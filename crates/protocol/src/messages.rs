@@ -66,6 +66,10 @@ pub enum DataChannelMessage {
         text: String,
         timestamp: u64,
     },
+    CallInvite,
+    CallAccepted,
+    CallRejected,
+    CallEnded,
     Ack {
         id: String,
     },

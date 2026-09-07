@@ -1,4 +1,4 @@
-use crate::state::{current_time_string, ChatMessageUi, ConnectionStatus};
+use crate::state::{current_time_string, CallState, ChatMessageUi, ConnectionStatus};
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 use gloo_net::websocket::futures::WebSocket;
@@ -13,9 +13,10 @@ use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{
-    window, MessageEvent, RtcConfiguration, RtcDataChannel, RtcDataChannelEvent,
-    RtcDataChannelInit, RtcDataChannelState, RtcIceCandidate, RtcIceCandidateInit,
-    RtcPeerConnection, RtcPeerConnectionIceEvent, RtcSdpType, RtcSessionDescriptionInit,
+    window, HtmlAudioElement, MediaStream, MediaStreamConstraints, MediaStreamTrack,
+    MessageEvent, RtcConfiguration, RtcDataChannel, RtcDataChannelEvent, RtcDataChannelInit,
+    RtcDataChannelState, RtcIceCandidate, RtcIceCandidateInit, RtcPeerConnection,
+    RtcPeerConnectionIceEvent, RtcRtpSender, RtcSdpType, RtcSessionDescriptionInit, RtcTrackEvent,
 };
 
 #[allow(dead_code)]
@@ -25,6 +26,12 @@ pub struct WebRtcSession {
     pub peer: RtcPeerConnection,
     pub data_channel: Rc<RefCell<Option<RtcDataChannel>>>,
     pub ws_sender: mpsc::UnboundedSender<ClientMessage>,
+    pub local_audio_stream: Rc<RefCell<Option<MediaStream>>>,
+    pub audio_senders: Rc<RefCell<Vec<RtcRtpSender>>>,
+    pub remote_audio: Rc<RefCell<Option<HtmlAudioElement>>>,
+    pub call_state: WriteSignal<CallState>,
+    pub is_mic_muted: WriteSignal<bool>,
+    pub toast_signal: WriteSignal<Option<String>>,
 }
 
 impl WebRtcSession {
@@ -49,16 +56,8 @@ impl WebRtcSession {
             timestamp,
         };
 
-        let encrypted = encrypt_json(&self.key, &chat_msg)
-            .map_err(|e| format!("Encryption error: {e}"))?;
+        self.send_dc_message(&chat_msg)?;
 
-        let json_str = serde_json::to_string(&encrypted)
-            .map_err(|e| format!("Serialization error: {e}"))?;
-
-        dc.send_with_str(&json_str)
-            .map_err(|e| format!("Data channel send error: {:?}", e))?;
-
-        // Add to local message list
         let time_str = current_time_string();
         messages_signal.update(|msgs| {
             msgs.push(ChatMessageUi {
@@ -72,6 +71,160 @@ impl WebRtcSession {
 
         Ok(())
     }
+
+    pub fn send_dc_message(&self, msg: &DataChannelMessage) -> Result<(), String> {
+        let dc_guard = self.data_channel.borrow();
+        let dc = dc_guard.as_ref().ok_or("Data channel is not open")?;
+
+        let encrypted = encrypt_json(&self.key, msg)
+            .map_err(|e| format!("Encryption error: {e}"))?;
+
+        let json_str = serde_json::to_string(&encrypted)
+            .map_err(|e| format!("Serialization error: {e}"))?;
+
+        dc.send_with_str(&json_str)
+            .map_err(|e| format!("Data channel send error: {:?}", e))?;
+
+        Ok(())
+    }
+
+    pub fn start_audio_call(&self) {
+        if let Err(err) = self.send_dc_message(&DataChannelMessage::CallInvite) {
+            self.toast_signal.set(Some(format!("Cannot initiate call: {err}")));
+            return;
+        }
+        self.call_state.set(CallState::Calling);
+    }
+
+    pub fn accept_audio_call(&self) {
+        let pc = self.peer.clone();
+        let key = self.key;
+        let room_id = self.room_id.clone();
+        let mut ws_tx = self.ws_sender.clone();
+        let local_stream_cell = self.local_audio_stream.clone();
+        let audio_senders_cell = self.audio_senders.clone();
+        let call_state = self.call_state;
+        let toast = self.toast_signal;
+
+        let dc_msg_sender = self.clone_dc_sender();
+
+        wasm_bindgen_futures::spawn_local(async move {
+            match capture_microphone().await {
+                Ok(stream) => {
+                    let tracks = stream.get_audio_tracks();
+                    let mut senders = Vec::new();
+                    for i in 0..tracks.length() {
+                        let track: MediaStreamTrack = tracks.get(i).unchecked_into();
+                        let sender = pc.add_track_0(&track, &stream);
+                        senders.push(sender);
+                    }
+                    *local_stream_cell.borrow_mut() = Some(stream);
+                    *audio_senders_cell.borrow_mut() = senders;
+
+                    let _ = dc_msg_sender(DataChannelMessage::CallAccepted);
+                    call_state.set(CallState::Active);
+
+                    // Renegotiate: create and send offer with audio track
+                    if let Ok(offer) = wasm_bindgen_futures::JsFuture::from(pc.create_offer()).await {
+                        if let Ok(sdp) = js_sys::Reflect::get(&offer, &"sdp".into()) {
+                            if let Some(sdp_str) = sdp.as_string() {
+                                let init = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
+                                init.set_sdp(&sdp_str);
+                                let _ = wasm_bindgen_futures::JsFuture::from(pc.set_local_description(&init)).await;
+                                if let Ok(enc) = encrypt_json(&key, &SignalPayload::Offer { sdp: sdp_str }) {
+                                    let _ = ws_tx.start_send(ClientMessage::Signal {
+                                        room_id,
+                                        payload: enc,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    log::error!("Microphone access error: {:?}", err);
+                    toast.set(Some("Microphone access denied. Check browser permissions.".into()));
+                    let _ = dc_msg_sender(DataChannelMessage::CallRejected);
+                    call_state.set(CallState::Idle);
+                }
+            }
+        });
+    }
+
+    pub fn reject_audio_call(&self) {
+        let _ = self.send_dc_message(&DataChannelMessage::CallRejected);
+        self.call_state.set(CallState::Idle);
+    }
+
+    pub fn toggle_mic_mute(&self) {
+        let stream_guard = self.local_audio_stream.borrow();
+        if let Some(ref stream) = *stream_guard {
+            let tracks = stream.get_audio_tracks();
+            let mut new_muted = false;
+            for i in 0..tracks.length() {
+                let track: MediaStreamTrack = tracks.get(i).unchecked_into();
+                let current = track.enabled();
+                track.set_enabled(!current);
+                new_muted = current; // if it was enabled, it is now muted
+            }
+            self.is_mic_muted.set(new_muted);
+        }
+    }
+
+    pub fn end_audio_call(&self) {
+        let _ = self.send_dc_message(&DataChannelMessage::CallEnded);
+        self.cleanup_audio();
+    }
+
+    pub fn cleanup_audio(&self) {
+        if let Some(stream) = self.local_audio_stream.borrow_mut().take() {
+            let tracks = stream.get_tracks();
+            for i in 0..tracks.length() {
+                let track: MediaStreamTrack = tracks.get(i).unchecked_into();
+                track.stop();
+            }
+        }
+
+        for sender in self.audio_senders.borrow_mut().drain(..) {
+            let _ = self.peer.remove_track(&sender);
+        }
+
+        if let Some(audio) = self.remote_audio.borrow_mut().take() {
+            let _ = audio.pause();
+            audio.set_src("");
+        }
+
+        self.is_mic_muted.set(false);
+        self.call_state.set(CallState::Idle);
+    }
+
+    fn clone_dc_sender(&self) -> Box<dyn Fn(DataChannelMessage) -> Result<(), String>> {
+        let dc_cell = self.data_channel.clone();
+        let key = self.key;
+        Box::new(move |msg| {
+            let dc_guard = dc_cell.borrow();
+            let dc = dc_guard.as_ref().ok_or("Data channel is not open")?;
+            let encrypted = encrypt_json(&key, &msg)
+                .map_err(|e| format!("Encryption error: {e}"))?;
+            let json_str = serde_json::to_string(&encrypted)
+                .map_err(|e| format!("Serialization error: {e}"))?;
+            dc.send_with_str(&json_str)
+                .map_err(|e| format!("Send error: {:?}", e))?;
+            Ok(())
+        })
+    }
+}
+
+pub async fn capture_microphone() -> Result<MediaStream, JsValue> {
+    let win = window().ok_or_else(|| JsValue::from_str("No window"))?;
+    let nav = win.navigator();
+    let media_devices = nav.media_devices()?;
+    let constraints = MediaStreamConstraints::new();
+    constraints.set_audio(&JsValue::from_bool(true));
+    constraints.set_video(&JsValue::from_bool(false));
+    let promise = media_devices.get_user_media_with_constraints(&constraints)?;
+    let js_stream = wasm_bindgen_futures::JsFuture::from(promise).await?;
+    Ok(js_stream.unchecked_into())
 }
 
 pub fn start_webrtc_session(
@@ -79,6 +232,9 @@ pub fn start_webrtc_session(
     key: [u8; KEY_LENGTH],
     status_signal: WriteSignal<ConnectionStatus>,
     messages_signal: WriteSignal<Vec<ChatMessageUi>>,
+    call_state: WriteSignal<CallState>,
+    is_mic_muted: WriteSignal<bool>,
+    toast_signal: WriteSignal<Option<String>>,
 ) -> Result<Rc<RefCell<Option<WebRtcSession>>>, JsValue> {
     status_signal.set(ConnectionStatus::ConnectingRelay);
 
@@ -103,9 +259,32 @@ pub fn start_webrtc_session(
 
     let pc = RtcPeerConnection::new_with_configuration(&rtc_config)?;
     let data_channel_cell = Rc::new(RefCell::new(None::<RtcDataChannel>));
+    let local_audio_stream = Rc::new(RefCell::new(None::<MediaStream>));
+    let audio_senders = Rc::new(RefCell::new(Vec::<RtcRtpSender>::new()));
+    let remote_audio = Rc::new(RefCell::new(None::<HtmlAudioElement>));
     let session_cell = Rc::new(RefCell::new(None::<WebRtcSession>));
 
     let (ws_tx, mut ws_rx) = mpsc::unbounded::<ClientMessage>();
+
+    // Setup incoming track listener for remote audio
+    {
+        let remote_audio_cell = remote_audio.clone();
+        let on_track = Closure::wrap(Box::new(move |ev: RtcTrackEvent| {
+            let streams = ev.streams();
+            if streams.length() > 0 {
+                let remote_stream: MediaStream = streams.get(0).unchecked_into();
+                if let Ok(audio) = HtmlAudioElement::new() {
+                    audio.set_src_object(Some(&remote_stream));
+                    audio.set_autoplay(true);
+                    let _ = audio.play();
+                    *remote_audio_cell.borrow_mut() = Some(audio);
+                    log::info!("Remote audio track received and attached to audio element");
+                }
+            }
+        }) as Box<dyn FnMut(RtcTrackEvent)>);
+        pc.set_ontrack(Some(on_track.as_ref().unchecked_ref()));
+        on_track.forget();
+    }
 
     // Store session
     *session_cell.borrow_mut() = Some(WebRtcSession {
@@ -114,6 +293,12 @@ pub fn start_webrtc_session(
         peer: pc.clone(),
         data_channel: data_channel_cell.clone(),
         ws_sender: ws_tx.clone(),
+        local_audio_stream: local_audio_stream.clone(),
+        audio_senders: audio_senders.clone(),
+        remote_audio: remote_audio.clone(),
+        call_state,
+        is_mic_muted,
+        toast_signal,
     });
 
     // Handle incoming ICE candidates on PC
@@ -154,6 +339,7 @@ pub fn start_webrtc_session(
         let key = key;
         let data_channel_cell = data_channel_cell.clone();
         let ws_tx = ws_tx.clone();
+        let session_cell_c = session_cell.clone();
 
         async move {
             let ws = match WebSocket::open(&ws_url) {
@@ -212,6 +398,7 @@ pub fn start_webrtc_session(
                                 data_channel_cell.clone(),
                                 status_signal,
                                 messages_signal,
+                                session_cell_c.clone(),
                             );
                         }
                     }
@@ -226,6 +413,7 @@ pub fn start_webrtc_session(
                             ws_tx.clone(),
                             status_signal,
                             messages_signal,
+                            session_cell_c.clone(),
                         )
                         .await;
                     }
@@ -247,6 +435,9 @@ pub fn start_webrtc_session(
                     }
                     ServerMessage::PeerLeft => {
                         status_signal.set(ConnectionStatus::Disconnected);
+                        if let Some(ref sess) = *session_cell_c.borrow() {
+                            sess.cleanup_audio();
+                        }
                     }
                     ServerMessage::Error { message } => {
                         status_signal.set(ConnectionStatus::Error(message));
@@ -268,12 +459,13 @@ async fn initiate_p2p_offer(
     mut ws_tx: mpsc::UnboundedSender<ClientMessage>,
     status_signal: WriteSignal<ConnectionStatus>,
     messages_signal: WriteSignal<Vec<ChatMessageUi>>,
+    session_cell: Rc<RefCell<Option<WebRtcSession>>>,
 ) -> Result<(), JsValue> {
     let dc_init = RtcDataChannelInit::new();
     dc_init.set_ordered(true);
     let dc = pc.create_data_channel_with_data_channel_dict("chat", &dc_init);
 
-    attach_datachannel_callbacks(&dc, key, status_signal, messages_signal);
+    attach_datachannel_callbacks(&dc, key, status_signal, messages_signal, session_cell);
     *dc_cell.borrow_mut() = Some(dc);
 
     let offer = wasm_bindgen_futures::JsFuture::from(pc.create_offer()).await?;
@@ -302,10 +494,11 @@ fn setup_responder_datachannel(
     dc_cell: Rc<RefCell<Option<RtcDataChannel>>>,
     status_signal: WriteSignal<ConnectionStatus>,
     messages_signal: WriteSignal<Vec<ChatMessageUi>>,
+    session_cell: Rc<RefCell<Option<WebRtcSession>>>,
 ) {
     let on_dc = Closure::wrap(Box::new(move |ev: RtcDataChannelEvent| {
         let dc = ev.channel();
-        attach_datachannel_callbacks(&dc, key, status_signal, messages_signal);
+        attach_datachannel_callbacks(&dc, key, status_signal, messages_signal, session_cell.clone());
         *dc_cell.borrow_mut() = Some(dc);
     }) as Box<dyn FnMut(RtcDataChannelEvent)>);
 
@@ -396,6 +589,7 @@ fn attach_datachannel_callbacks(
     key: [u8; KEY_LENGTH],
     status_signal: WriteSignal<ConnectionStatus>,
     messages_signal: WriteSignal<Vec<ChatMessageUi>>,
+    session_cell: Rc<RefCell<Option<WebRtcSession>>>,
 ) {
     // onopen
     {
@@ -428,6 +622,7 @@ fn attach_datachannel_callbacks(
 
     // onmessage
     {
+        let session_c = session_cell.clone();
         let on_message = Closure::wrap(Box::new(move |ev: MessageEvent| {
             if let Some(text) = ev.data().as_string() {
                 if let Ok(encrypted) = serde_json::from_str::<EncryptedPayload>(&text) {
@@ -444,6 +639,58 @@ fn attach_datachannel_callbacks(
                                         time: time_str,
                                     });
                                 });
+                            }
+                            DataChannelMessage::CallInvite => {
+                                log::info!("Incoming audio call invite received from peer");
+                                if let Some(ref sess) = *session_c.borrow() {
+                                    sess.call_state.set(CallState::Incoming);
+                                }
+                            }
+                            DataChannelMessage::CallAccepted => {
+                                log::info!("Peer accepted audio call! Capturing caller mic and activating stream.");
+                                if let Some(ref sess) = *session_c.borrow() {
+                                    let pc = sess.peer.clone();
+                                    let local_stream_cell = sess.local_audio_stream.clone();
+                                    let audio_senders_cell = sess.audio_senders.clone();
+                                    let call_state = sess.call_state;
+                                    let toast = sess.toast_signal;
+
+                                    wasm_bindgen_futures::spawn_local(async move {
+                                        match capture_microphone().await {
+                                            Ok(stream) => {
+                                                let tracks = stream.get_audio_tracks();
+                                                let mut senders = Vec::new();
+                                                for i in 0..tracks.length() {
+                                                    let track: MediaStreamTrack = tracks.get(i).unchecked_into();
+                                                    let sender = pc.add_track_0(&track, &stream);
+                                                    senders.push(sender);
+                                                }
+                                                *local_stream_cell.borrow_mut() = Some(stream);
+                                                *audio_senders_cell.borrow_mut() = senders;
+                                                call_state.set(CallState::Active);
+                                            }
+                                            Err(err) => {
+                                                log::error!("Caller microphone error: {:?}", err);
+                                                toast.set(Some("Microphone access failed.".into()));
+                                                call_state.set(CallState::Idle);
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            DataChannelMessage::CallRejected => {
+                                log::info!("Peer rejected audio call");
+                                if let Some(ref sess) = *session_c.borrow() {
+                                    sess.call_state.set(CallState::Idle);
+                                    sess.toast_signal.set(Some("Peer declined audio call".into()));
+                                }
+                            }
+                            DataChannelMessage::CallEnded => {
+                                log::info!("Audio call ended by peer");
+                                if let Some(ref sess) = *session_c.borrow() {
+                                    sess.cleanup_audio();
+                                    sess.toast_signal.set(Some("Audio call ended".into()));
+                                }
                             }
                             DataChannelMessage::Ack { .. } => {}
                         }

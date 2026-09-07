@@ -4,7 +4,7 @@ mod webrtc;
 
 use leptos::*;
 use qr::generate_qr_svg;
-use state::{get_full_share_url, get_or_init_credentials, ChatMessageUi, ConnectionStatus};
+use state::{get_full_share_url, get_or_init_credentials, CallState, ChatMessageUi, ConnectionStatus};
 use std::cell::RefCell;
 use std::rc::Rc;
 use web_sys::{window, HtmlInputElement};
@@ -20,13 +20,26 @@ fn App() -> impl IntoView {
     let (room_id_sig, set_room_id_sig) = create_signal(String::new());
     let (feature_modal, set_feature_modal) = create_signal(Option::<&'static str>::None);
 
+    // Phase 2: Audio Call reactive signals
+    let (call_state, set_call_state) = create_signal(CallState::Idle);
+    let (is_mic_muted, set_is_mic_muted) = create_signal(false);
+    let (toast, set_toast) = create_signal(Option::<String>::None);
+
     let session_ref = store_value(Rc::new(RefCell::new(None::<WebRtcSession>)));
 
     // Initialize session on mount
     create_effect(move |_| {
         if let Some((room_id, key, _)) = get_or_init_credentials() {
             set_room_id_sig.set(room_id.clone());
-            if let Ok(sess) = start_webrtc_session(room_id, key, set_status, set_messages) {
+            if let Ok(sess) = start_webrtc_session(
+                room_id,
+                key,
+                set_status,
+                set_messages,
+                set_call_state,
+                set_is_mic_muted,
+                set_toast,
+            ) {
                 session_ref.set_value(sess);
             }
         }
@@ -56,7 +69,6 @@ fn App() -> impl IntoView {
             let _ = clipboard.write_text(&url);
             set_copied.set(true);
 
-            // Hide toast after 2 seconds
             set_timeout(
                 move || {
                     set_copied.set(false);
@@ -67,10 +79,55 @@ fn App() -> impl IntoView {
     };
 
     let destroy_session = move |_| {
+        session_ref.with_value(|sess_cell| {
+            if let Some(ref sess) = *sess_cell.borrow() {
+                sess.cleanup_audio();
+            }
+        });
         if let Some(win) = window() {
-            // Drop hash and reload to clean memory completely
             let _ = win.location().set_href("/");
         }
+    };
+
+    // Audio Call Actions
+    let handle_start_call = move |_| {
+        session_ref.with_value(|sess_cell| {
+            if let Some(ref sess) = *sess_cell.borrow() {
+                sess.start_audio_call();
+            }
+        });
+    };
+
+    let handle_accept_call = move |_| {
+        session_ref.with_value(|sess_cell| {
+            if let Some(ref sess) = *sess_cell.borrow() {
+                sess.accept_audio_call();
+            }
+        });
+    };
+
+    let handle_reject_call = move |_| {
+        session_ref.with_value(|sess_cell| {
+            if let Some(ref sess) = *sess_cell.borrow() {
+                sess.reject_audio_call();
+            }
+        });
+    };
+
+    let handle_toggle_mute = move |_| {
+        session_ref.with_value(|sess_cell| {
+            if let Some(ref sess) = *sess_cell.borrow() {
+                sess.toggle_mic_mute();
+            }
+        });
+    };
+
+    let handle_end_call = move |_| {
+        session_ref.with_value(|sess_cell| {
+            if let Some(ref sess) = *sess_cell.borrow() {
+                sess.end_audio_call();
+            }
+        });
     };
 
     let is_connected = move || status.get() == ConnectionStatus::Connected;
@@ -106,7 +163,21 @@ fn App() -> impl IntoView {
                     {move || format!("• Room: {}", room_id_sig.get())}
                 </span>
             </div>
-            <div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                {move || {
+                    if is_connected() && call_state.get() == CallState::Idle {
+                        view! {
+                            <button
+                                class="btn btn-call"
+                                on:click=handle_start_call
+                            >
+                                "📞 Audio Call"
+                            </button>
+                        }.into_view()
+                    } else {
+                        view! { <span></span> }.into_view()
+                    }
+                }}
                 <button
                     class="btn btn-secondary"
                     on:click=copy_share_link
@@ -116,17 +187,57 @@ fn App() -> impl IntoView {
             </div>
         </div>
 
+        // Phase 2: Active Audio Call Bar
+        {move || match call_state.get() {
+            CallState::Active => view! {
+                <div class="call-bar">
+                    <div class="call-info">
+                        <span>"🔊 Audio Call Active"</span>
+                        <span style="font-weight: normal; font-size: 0.75rem; color: var(--text-muted);">
+                            "(DTLS-SRTP P2P)"
+                        </span>
+                    </div>
+                    <div class="call-actions">
+                        <button
+                            class=move || if is_mic_muted.get() { "btn btn-mute muted" } else { "btn btn-mute" }
+                            on:click=handle_toggle_mute
+                        >
+                            {move || if is_mic_muted.get() { "🔇 Unmute Mic" } else { "🎙️ Mute Mic" }}
+                        </button>
+                        <button
+                            class="btn btn-danger"
+                            on:click=handle_end_call
+                        >
+                            "🔴 End Call"
+                        </button>
+                    </div>
+                </div>
+            }.into_view(),
+            CallState::Calling => view! {
+                <div class="call-bar">
+                    <div class="call-info">
+                        <span class="status-dot status-connecting"></span>
+                        <span>"📞 Calling Peer... Waiting for answer"</span>
+                    </div>
+                    <div class="call-actions">
+                        <button
+                            class="btn btn-danger"
+                            on:click=handle_end_call
+                        >
+                            "Cancel"
+                        </button>
+                    </div>
+                </div>
+            }.into_view(),
+            _ => view! { <div></div> }.into_view(),
+        }}
+
         <div class="feature-bar">
-            <span class="feature-tag active">"💬 Phase 1: Text Chat (Active)"</span>
+            <span class="feature-tag active">"💬 Phase 1: Text Chat"</span>
+            <span class="feature-tag active">"🎙️ Phase 2: Audio Call"</span>
             <span
                 class="feature-tag planned"
-                on:click=move |_| set_feature_modal.set(Some("🎙️ Phase 2: Audio Calls\n\nDirect peer-to-peer encrypted audio streaming via getUserMedia is part of Phase 2 in the project roadmap."))
-            >
-                "🎙️ Audio Call (Phase 2)"
-            </span>
-            <span
-                class="feature-tag planned"
-                on:click=move |_| set_feature_modal.set(Some("📹 Phase 3: Video Calls & Screen Share\n\nCamera capture and screen sharing via getDisplayMedia will be unlocked in Phase 3."))
+                on:click=move |_| set_feature_modal.set(Some("📹 Phase 3: Video Calls & Screen Share\n\nCamera capture and screen sharing via getDisplayMedia are scheduled for Phase 3."))
             >
                 "📹 Video & Screen (Phase 3)"
             </span>
@@ -139,12 +250,13 @@ fn App() -> impl IntoView {
                     view! {
                         <div class="empty-state">
                             <h3>"Ephemeral P2P Encrypted Session"</h3>
-                            <p>"To begin chatting, share your link or scan the QR code with another device on your network."</p>
+                            <p>"Share your link or QR code with another device to start chatting and calling."</p>
                             <div class="security-checklist">
-                                <li>"🛡️ 256-bit ChaCha20-Poly1305 E2E Encryption"</li>
+                                <li>"🛡️ 256-bit ChaCha20-Poly1305 E2EE Text"</li>
+                                <li>"🎙️ DTLS-SRTP End-to-End Encrypted Audio Calls"</li>
                                 <li>"🔑 Zero-Knowledge: Key never touches server"</li>
-                                <li>"🚫 Zero Storage: Strictly resides in Wasm linear memory"</li>
-                                <li>"💥 Instant Destruction: Refresh or close tab wipes history"</li>
+                                <li>"🚫 Zero Storage: Volatile Wasm RAM only"</li>
+                                <li>"💥 Instant Destruction: Refresh or close tab erases history"</li>
                             </div>
                         </div>
                     }.into_view()
@@ -196,6 +308,38 @@ fn App() -> impl IntoView {
             </button>
         </footer>
 
+        // Incoming Call Modal
+        {move || {
+            if call_state.get() == CallState::Incoming {
+                view! {
+                    <div class="modal-backdrop">
+                        <div class="incoming-call-box">
+                            <h3>"📞 Incoming Audio Call"</h3>
+                            <p>"Your peer is calling you over an encrypted P2P audio stream."</p>
+                            <div style="display: flex; gap: 12px; width: 100%; justify-content: center;">
+                                <button
+                                    class="btn btn-call"
+                                    style="padding: 10px 20px; font-size: 1rem;"
+                                    on:click=handle_accept_call
+                                >
+                                    "🟢 Accept"
+                                </button>
+                                <button
+                                    class="btn btn-danger"
+                                    style="padding: 10px 20px; font-size: 1rem;"
+                                    on:click=handle_reject_call
+                                >
+                                    "🔴 Decline"
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                }.into_view()
+            } else {
+                view! { <div></div> }.into_view()
+            }
+        }}
+
         // QR Code Modal for Phone Pairing
         {move || {
             if show_qr.get() {
@@ -237,6 +381,25 @@ fn App() -> impl IntoView {
                                 "Got it"
                             </button>
                         </div>
+                    </div>
+                }.into_view()
+            } else {
+                view! { <div></div> }.into_view()
+            }
+        }}
+
+        // Floating toast message
+        {move || {
+            if let Some(msg) = toast.get() {
+                set_timeout(
+                    move || {
+                        set_toast.set(None);
+                    },
+                    std::time::Duration::from_secs(3),
+                );
+                view! {
+                    <div class="toast">
+                        {msg}
                     </div>
                 }.into_view()
             } else {

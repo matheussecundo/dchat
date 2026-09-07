@@ -27,12 +27,12 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
    - Axum WebSocket signaling relay and dev TLS server.
    - Comprehensive unit and Playwright multi-browser E2E tests.
 
-2. **Phase 2: Encrypted Audio Calls (Next Sprint)**
+2. **Phase 2: Encrypted Audio Calls (Completed)**
    - Capture microphone audio via `getUserMedia`.
    - DTLS-SRTP encrypted peer audio streaming.
    - Mute/unmute microphone controls in the UI.
 
-3. **Phase 3: Video Calls & Screen Capture**
+3. **Phase 3: Video Calls Phase 3: Video Calls & Screen Capture Screen Capture (Next Sprint)**
    - Camera capture with front/back camera toggling on mobile.
    - Screen capture via `getDisplayMedia`.
    - Fullscreen video rendering.

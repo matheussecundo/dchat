@@ -76,13 +76,13 @@ dchat/
   - Static asset-only Service Worker caching.
   - Multi-tiered automated tests (Cargo unit/integration + Playwright 2-peer E2E).
 
-- **Phase 2: Audio Calls (Next Sprint)**
+- **Phase 2: Audio Calls (Completed)**
   - Capture microphone via `web_sys::MediaDevices::get_user_media_with_constraints`.
   - Add audio tracks to `RtcPeerConnection`.
   - In-app microphone mute/unmute UI controls.
   - Handle audio stream reception and playback via HTML `<audio>` elements.
 
-- **Phase 3: Video Calls & Screen Sharing**
+- **Phase 3: Video Calls Phase 3: Video Calls & Screen Sharing Screen Sharing (Next Sprint)**
   - Camera capture with front/back camera flip toggle on mobile.
   - Screen capture via `web_sys::MediaDevices::get_display_media`.
   - Video stream rendering elements with fullscreen support.

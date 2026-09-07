@@ -39,6 +39,14 @@ impl ConnectionStatus {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CallState {
+    Idle,
+    Calling,
+    Incoming,
+    Active,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessageUi {
     pub id: String,
