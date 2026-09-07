@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#0a0f1d">
+    <title>dchat - Ephemeral Zero-Knowledge P2P Chat</title>
+    <link data-trunk rel="css" href="style.css">
+    <link data-trunk rel="copy-file" href="service-worker.js">
+    <link data-trunk rel="rust" href="Cargo.toml" data-bin="client">
+</head>
+<body>
+    <div id="app"></div>
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('./service-worker.js').catch((err) => {
+            console.log('Service worker not registered:', err);
+          });
+        });
+      }
+    </script>
+</body>
+</html>

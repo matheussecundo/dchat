@@ -1,0 +1,56 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+protocol = { path = "../protocol" }
+leptos = { version = "0.6", features = ["csr"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+gloo-net = { version = "0.5", features = ["websocket"] }
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+console_log = "1.0"
+log = "0.4"
+futures = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+uuid = { version = "1.0", features = ["v4", "js"] }
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+  "RtcPeerConnection",
+  "RtcPeerConnectionIceEvent",
+  "RtcDataChannel",
+  "RtcDataChannelState",
+  "RtcConfiguration",
+  "RtcSdpType",
+  "RtcSessionDescription",
+  "RtcSessionDescriptionInit",
+  "RtcIceCandidate",
+  "RtcIceCandidateInit",
+  "RtcDataChannelEvent",
+  "RtcDataChannelInit",
+  "RtcIceConnectionState",
+  "RtcPeerConnectionState",
+  "MediaStream",
+  "MediaStreamConstraints",
+  "MediaDevices",
+  "Navigator",
+  "Window",
+  "Document",
+  "Element",
+  "HtmlElement",
+  "HtmlInputElement",
+  "Location",
+  "History",
+  "MessageEvent",
+  "CloseEvent",
+  "ErrorEvent",
+  "Clipboard",
+  "ServiceWorkerContainer",
+  "ServiceWorker",
+]
