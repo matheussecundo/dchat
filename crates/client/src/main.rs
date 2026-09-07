@@ -4,7 +4,7 @@ mod webrtc;
 
 use leptos::*;
 use qr::generate_qr_svg;
-use state::{get_full_share_url, get_or_init_credentials, CallState, ChatMessageUi, ConnectionStatus};
+use state::{get_full_share_url, get_or_init_credentials, CallState, CallType, ChatMessageUi, ConnectionStatus};
 use std::cell::RefCell;
 use std::rc::Rc;
 use web_sys::{window, HtmlInputElement};
@@ -18,11 +18,12 @@ fn App() -> impl IntoView {
     let (show_qr, set_show_qr) = create_signal(false);
     let (copied, set_copied) = create_signal(false);
     let (room_id_sig, set_room_id_sig) = create_signal(String::new());
-    let (feature_modal, set_feature_modal) = create_signal(Option::<&'static str>::None);
 
-    // Phase 2: Audio Call reactive signals
+    // Call state signals (Audio, Video, Screen Share)
     let (call_state, set_call_state) = create_signal(CallState::Idle);
     let (is_mic_muted, set_is_mic_muted) = create_signal(false);
+    let (is_video_muted, set_is_video_muted) = create_signal(false);
+    let (_is_front_camera, set_is_front_camera) = create_signal(true);
     let (toast, set_toast) = create_signal(Option::<String>::None);
 
     let session_ref = store_value(Rc::new(RefCell::new(None::<WebRtcSession>)));
@@ -38,6 +39,8 @@ fn App() -> impl IntoView {
                 set_messages,
                 set_call_state,
                 set_is_mic_muted,
+                set_is_video_muted,
+                set_is_front_camera,
                 set_toast,
             ) {
                 session_ref.set_value(sess);
@@ -81,7 +84,7 @@ fn App() -> impl IntoView {
     let destroy_session = move |_| {
         session_ref.with_value(|sess_cell| {
             if let Some(ref sess) = *sess_cell.borrow() {
-                sess.cleanup_audio();
+                sess.cleanup_media();
             }
         });
         if let Some(win) = window() {
@@ -89,19 +92,35 @@ fn App() -> impl IntoView {
         }
     };
 
-    // Audio Call Actions
-    let handle_start_call = move |_| {
+    // Call Action Handlers
+    let handle_start_audio = move |_| {
         session_ref.with_value(|sess_cell| {
             if let Some(ref sess) = *sess_cell.borrow() {
-                sess.start_audio_call();
+                sess.start_call(CallType::Audio);
             }
         });
     };
 
-    let handle_accept_call = move |_| {
+    let handle_start_video = move |_| {
         session_ref.with_value(|sess_cell| {
             if let Some(ref sess) = *sess_cell.borrow() {
-                sess.accept_audio_call();
+                sess.start_call(CallType::Video);
+            }
+        });
+    };
+
+    let handle_start_screen = move |_| {
+        session_ref.with_value(|sess_cell| {
+            if let Some(ref sess) = *sess_cell.borrow() {
+                sess.start_call(CallType::ScreenShare);
+            }
+        });
+    };
+
+    let handle_accept_call = move |c_type: CallType| {
+        session_ref.with_value(move |sess_cell| {
+            if let Some(ref sess) = *sess_cell.borrow() {
+                sess.accept_call(c_type);
             }
         });
     };
@@ -109,7 +128,7 @@ fn App() -> impl IntoView {
     let handle_reject_call = move |_| {
         session_ref.with_value(|sess_cell| {
             if let Some(ref sess) = *sess_cell.borrow() {
-                sess.reject_audio_call();
+                sess.reject_call();
             }
         });
     };
@@ -122,12 +141,38 @@ fn App() -> impl IntoView {
         });
     };
 
+    let handle_toggle_video = move |_| {
+        session_ref.with_value(|sess_cell| {
+            if let Some(ref sess) = *sess_cell.borrow() {
+                sess.toggle_video_mute();
+            }
+        });
+    };
+
+    let handle_flip_camera = move |_| {
+        session_ref.with_value(|sess_cell| {
+            if let Some(ref sess) = *sess_cell.borrow() {
+                sess.flip_camera();
+            }
+        });
+    };
+
     let handle_end_call = move |_| {
         session_ref.with_value(|sess_cell| {
             if let Some(ref sess) = *sess_cell.borrow() {
-                sess.end_audio_call();
+                sess.end_call();
             }
         });
+    };
+
+    let handle_fullscreen = move |_| {
+        if let Some(win) = window() {
+            if let Some(doc) = win.document() {
+                if let Some(el) = doc.get_element_by_id("video-stage-container") {
+                    let _ = el.request_fullscreen();
+                }
+            }
+        }
     };
 
     let is_connected = move || status.get() == ConnectionStatus::Connected;
@@ -163,15 +208,31 @@ fn App() -> impl IntoView {
                     {move || format!("• Room: {}", room_id_sig.get())}
                 </span>
             </div>
-            <div style="display: flex; align-items: center; gap: 8px;">
+            <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
                 {move || {
                     if is_connected() && call_state.get() == CallState::Idle {
                         view! {
                             <button
                                 class="btn btn-call"
-                                on:click=handle_start_call
+                                on:click=handle_start_audio
+                                title="Start Encrypted Audio Call"
                             >
-                                "📞 Audio Call"
+                                "📞 Audio"
+                            </button>
+                            <button
+                                class="btn btn-primary"
+                                style="background-color: var(--accent-cyan);"
+                                on:click=handle_start_video
+                                title="Start Encrypted Video Call"
+                            >
+                                "📹 Video"
+                            </button>
+                            <button
+                                class="btn btn-secondary"
+                                on:click=handle_start_screen
+                                title="Share Screen with Peer"
+                            >
+                                "🖥️ Screen"
                             </button>
                         }.into_view()
                     } else {
@@ -182,14 +243,35 @@ fn App() -> impl IntoView {
                     class="btn btn-secondary"
                     on:click=copy_share_link
                 >
-                    {move || if copied.get() { "✅ Copied URL!" } else { "🔗 Copy Share Link" }}
+                    {move || if copied.get() { "✅ Copied!" } else { "🔗 Copy Link" }}
                 </button>
             </div>
         </div>
 
-        // Phase 2: Active Audio Call Bar
+        // Calling Banner
         {move || match call_state.get() {
-            CallState::Active => view! {
+            CallState::Calling(c_type) => view! {
+                <div class="call-bar">
+                    <div class="call-info">
+                        <span class="status-dot status-connecting"></span>
+                        <span>{format!("Calling Peer with {}... Waiting for answer", c_type.label())}</span>
+                    </div>
+                    <div class="call-actions">
+                        <button
+                            class="btn btn-danger"
+                            on:click=handle_end_call
+                        >
+                            "Cancel"
+                        </button>
+                    </div>
+                </div>
+            }.into_view(),
+            _ => view! { <div></div> }.into_view(),
+        }}
+
+        // Active Audio Call Bar
+        {move || match call_state.get() {
+            CallState::Active(CallType::Audio) => view! {
                 <div class="call-bar">
                     <div class="call-info">
                         <span>"🔊 Audio Call Active"</span>
@@ -213,18 +295,50 @@ fn App() -> impl IntoView {
                     </div>
                 </div>
             }.into_view(),
-            CallState::Calling => view! {
-                <div class="call-bar">
-                    <div class="call-info">
-                        <span class="status-dot status-connecting"></span>
-                        <span>"📞 Calling Peer... Waiting for answer"</span>
-                    </div>
-                    <div class="call-actions">
+            _ => view! { <div></div> }.into_view(),
+        }}
+
+        // Active Video / Screen Share Stage
+        {move || match call_state.get() {
+            CallState::Active(CallType::Video) | CallState::Active(CallType::ScreenShare) => view! {
+                <div id="video-stage-container" class="video-stage">
+                    <video id="remote-video-feed" class="remote-video" autoplay playsinline></video>
+                    <video id="local-video-preview" class="local-preview" autoplay playsinline muted></video>
+                    <div class="video-overlay-controls">
+                        <button
+                            class=move || if is_mic_muted.get() { "btn btn-mute muted" } else { "btn btn-mute" }
+                            on:click=handle_toggle_mute
+                            title="Mute/Unmute Mic"
+                        >
+                            {move || if is_mic_muted.get() { "🔇" } else { "🎙️" }}
+                        </button>
+                        <button
+                            class=move || if is_video_muted.get() { "btn btn-mute muted" } else { "btn btn-mute" }
+                            on:click=handle_toggle_video
+                            title="Enable/Disable Camera"
+                        >
+                            {move || if is_video_muted.get() { "🙈" } else { "📹" }}
+                        </button>
+                        <button
+                            class="btn btn-secondary"
+                            on:click=handle_flip_camera
+                            title="Flip Front/Rear Camera"
+                        >
+                            "📷"
+                        </button>
+                        <button
+                            class="btn btn-secondary"
+                            on:click=handle_fullscreen
+                            title="Toggle Fullscreen"
+                        >
+                            "⛶"
+                        </button>
                         <button
                             class="btn btn-danger"
                             on:click=handle_end_call
+                            title="End Call"
                         >
-                            "Cancel"
+                            "🔴 End"
                         </button>
                     </div>
                 </div>
@@ -235,12 +349,7 @@ fn App() -> impl IntoView {
         <div class="feature-bar">
             <span class="feature-tag active">"💬 Phase 1: Text Chat"</span>
             <span class="feature-tag active">"🎙️ Phase 2: Audio Call"</span>
-            <span
-                class="feature-tag planned"
-                on:click=move |_| set_feature_modal.set(Some("📹 Phase 3: Video Calls & Screen Share\n\nCamera capture and screen sharing via getDisplayMedia are scheduled for Phase 3."))
-            >
-                "📹 Video & Screen (Phase 3)"
-            </span>
+            <span class="feature-tag active">"📹 Phase 3: Video & Screen"</span>
         </div>
 
         <main class="chat-container">
@@ -250,13 +359,14 @@ fn App() -> impl IntoView {
                     view! {
                         <div class="empty-state">
                             <h3>"Ephemeral P2P Encrypted Session"</h3>
-                            <p>"Share your link or QR code with another device to start chatting and calling."</p>
+                            <p>"Share your link or QR code with another device to chat, call, or share screens."</p>
                             <div class="security-checklist">
                                 <li>"🛡️ 256-bit ChaCha20-Poly1305 E2EE Text"</li>
-                                <li>"🎙️ DTLS-SRTP End-to-End Encrypted Audio Calls"</li>
-                                <li>"🔑 Zero-Knowledge: Key never touches server"</li>
-                                <li>"🚫 Zero Storage: Volatile Wasm RAM only"</li>
-                                <li>"💥 Instant Destruction: Refresh or close tab erases history"</li>
+                                <li>"🎙️ DTLS-SRTP Audio Calls"</li>
+                                <li>"📹 Video Calls & Screen Sharing with Camera Flip"</li>
+                                <li>"🔑 Zero-Knowledge: Keys never touch server"</li>
+                                <li>"🚫 Zero Storage: Strictly in volatile Wasm RAM"</li>
+                                <li>"💥 Instant Destruction: Refresh or close tab wipes all history"</li>
                             </div>
                         </div>
                     }.into_view()
@@ -309,35 +419,32 @@ fn App() -> impl IntoView {
         </footer>
 
         // Incoming Call Modal
-        {move || {
-            if call_state.get() == CallState::Incoming {
-                view! {
-                    <div class="modal-backdrop">
-                        <div class="incoming-call-box">
-                            <h3>"📞 Incoming Audio Call"</h3>
-                            <p>"Your peer is calling you over an encrypted P2P audio stream."</p>
-                            <div style="display: flex; gap: 12px; width: 100%; justify-content: center;">
-                                <button
-                                    class="btn btn-call"
-                                    style="padding: 10px 20px; font-size: 1rem;"
-                                    on:click=handle_accept_call
-                                >
-                                    "🟢 Accept"
-                                </button>
-                                <button
-                                    class="btn btn-danger"
-                                    style="padding: 10px 20px; font-size: 1rem;"
-                                    on:click=handle_reject_call
-                                >
-                                    "🔴 Decline"
-                                </button>
-                            </div>
+        {move || match call_state.get() {
+            CallState::Incoming(c_type) => view! {
+                <div class="modal-backdrop">
+                    <div class="incoming-call-box">
+                        <h3>{format!("📞 Incoming {} Session", c_type.label())}</h3>
+                        <p>{format!("Your peer wants to start an encrypted {} session.", c_type.label())}</p>
+                        <div style="display: flex; gap: 12px; width: 100%; justify-content: center;">
+                            <button
+                                class="btn btn-call"
+                                style="padding: 10px 20px; font-size: 1rem;"
+                                on:click=move |_| handle_accept_call(c_type)
+                            >
+                                "🟢 Accept"
+                            </button>
+                            <button
+                                class="btn btn-danger"
+                                style="padding: 10px 20px; font-size: 1rem;"
+                                on:click=handle_reject_call
+                            >
+                                "🔴 Decline"
+                            </button>
                         </div>
                     </div>
-                }.into_view()
-            } else {
-                view! { <div></div> }.into_view()
-            }
+                </div>
+            }.into_view(),
+            _ => view! { <div></div> }.into_view(),
         }}
 
         // QR Code Modal for Phone Pairing
@@ -356,29 +463,6 @@ fn App() -> impl IntoView {
                                 on:click=move |_| set_show_qr.set(false)
                             >
                                 "Close"
-                            </button>
-                        </div>
-                    </div>
-                }.into_view()
-            } else {
-                view! { <div></div> }.into_view()
-            }
-        }}
-
-        // Feature info modal
-        {move || {
-            if let Some(info) = feature_modal.get() {
-                view! {
-                    <div class="modal-backdrop" on:click=move |_| set_feature_modal.set(None)>
-                        <div class="modal-content" on:click=|ev| ev.stop_propagation()>
-                            <h3>"Roadmap Preview"</h3>
-                            <p style="white-space: pre-line;">{info}</p>
-                            <button
-                                class="btn btn-secondary"
-                                style="width: 100%;"
-                                on:click=move |_| set_feature_modal.set(None)
-                            >
-                                "Got it"
                             </button>
                         </div>
                     </div>

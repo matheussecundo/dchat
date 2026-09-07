@@ -25,13 +25,13 @@ test('2-peer audio call handshake, mute toggle, and end call', async ({ browser 
   await expect(page1.locator('.status-indicator')).toContainText('Connected (E2EE P2P Active)', { timeout: 15000 });
   await expect(page2.locator('.status-indicator')).toContainText('Connected (E2EE P2P Active)', { timeout: 15000 });
 
-  // 4. Peer 1 clicks "📞 Audio Call"
-  const callBtn1 = page1.locator('button:has-text("📞 Audio Call")');
+  // 4. Peer 1 clicks "📞 Audio"
+  const callBtn1 = page1.locator('button:has-text("📞 Audio")');
   await expect(callBtn1).toBeVisible();
   await callBtn1.click();
 
-  // Peer 1 should see "Calling Peer..."
-  await expect(page1.locator('.call-bar')).toContainText('Calling Peer...', { timeout: 5000 });
+  // Peer 1 should see "Calling Peer with Audio"
+  await expect(page1.locator('.call-bar')).toContainText('Calling Peer with Audio', { timeout: 5000 });
 
   // Peer 2 should see incoming call prompt with Accept button
   const acceptBtn2 = page2.locator('.incoming-call-box button:has-text("Accept")');
@@ -62,8 +62,8 @@ test('2-peer audio call handshake, mute toggle, and end call', async ({ browser 
   await endBtn2.click();
 
   // Both peers should return to idle call state
-  await expect(page1.locator('button:has-text("📞 Audio Call")')).toBeVisible({ timeout: 5000 });
-  await expect(page2.locator('button:has-text("📞 Audio Call")')).toBeVisible({ timeout: 5000 });
+  await expect(page1.locator('button:has-text("📞 Audio")')).toBeVisible({ timeout: 5000 });
+  await expect(page2.locator('button:has-text("📞 Audio")')).toBeVisible({ timeout: 5000 });
   await expect(page1.locator('.call-bar')).toHaveCount(0);
   await expect(page2.locator('.call-bar')).toHaveCount(0);
   console.log('Audio call ended and cleaned up cleanly.');

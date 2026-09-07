@@ -67,6 +67,8 @@ pub enum DataChannelMessage {
         timestamp: u64,
     },
     CallInvite,
+    VideoCallInvite,
+    ScreenShareInvite,
     CallAccepted,
     CallRejected,
     CallEnded,

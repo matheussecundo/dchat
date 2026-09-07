@@ -1,4 +1,4 @@
-use crate::state::{current_time_string, CallState, ChatMessageUi, ConnectionStatus};
+use crate::state::{current_time_string, CallState, CallType, ChatMessageUi, ConnectionStatus};
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 use gloo_net::websocket::futures::WebSocket;
@@ -13,10 +13,11 @@ use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{
-    window, HtmlAudioElement, MediaStream, MediaStreamConstraints, MediaStreamTrack,
-    MessageEvent, RtcConfiguration, RtcDataChannel, RtcDataChannelEvent, RtcDataChannelInit,
-    RtcDataChannelState, RtcIceCandidate, RtcIceCandidateInit, RtcPeerConnection,
-    RtcPeerConnectionIceEvent, RtcRtpSender, RtcSdpType, RtcSessionDescriptionInit, RtcTrackEvent,
+    window, HtmlAudioElement, HtmlVideoElement, MediaStream, MediaStreamConstraints,
+    MediaStreamTrack, MessageEvent, RtcConfiguration, RtcDataChannel, RtcDataChannelEvent,
+    RtcDataChannelInit, RtcDataChannelState, RtcIceCandidate, RtcIceCandidateInit,
+    RtcPeerConnection, RtcPeerConnectionIceEvent, RtcRtpSender, RtcSdpType,
+    RtcSessionDescriptionInit, RtcTrackEvent,
 };
 
 #[allow(dead_code)]
@@ -26,11 +27,16 @@ pub struct WebRtcSession {
     pub peer: RtcPeerConnection,
     pub data_channel: Rc<RefCell<Option<RtcDataChannel>>>,
     pub ws_sender: mpsc::UnboundedSender<ClientMessage>,
-    pub local_audio_stream: Rc<RefCell<Option<MediaStream>>>,
-    pub audio_senders: Rc<RefCell<Vec<RtcRtpSender>>>,
+    pub local_stream: Rc<RefCell<Option<MediaStream>>>,
+    pub media_senders: Rc<RefCell<Vec<RtcRtpSender>>>,
     pub remote_audio: Rc<RefCell<Option<HtmlAudioElement>>>,
-    pub call_state: WriteSignal<CallState>,
-    pub is_mic_muted: WriteSignal<bool>,
+    pub remote_stream: Rc<RefCell<Option<MediaStream>>>,
+    pub current_call_type: Rc<RefCell<CallType>>,
+    pub is_front_camera_cell: Rc<RefCell<bool>>,
+    pub call_state_signal: WriteSignal<CallState>,
+    pub is_mic_muted_signal: WriteSignal<bool>,
+    pub is_video_muted_signal: WriteSignal<bool>,
+    pub is_front_camera_signal: WriteSignal<bool>,
     pub toast_signal: WriteSignal<Option<String>>,
 }
 
@@ -88,30 +94,82 @@ impl WebRtcSession {
         Ok(())
     }
 
-    pub fn start_audio_call(&self) {
-        if let Err(err) = self.send_dc_message(&DataChannelMessage::CallInvite) {
+    pub fn start_call(&self, call_type: CallType) {
+        let msg = match call_type {
+            CallType::Audio => DataChannelMessage::CallInvite,
+            CallType::Video => DataChannelMessage::VideoCallInvite,
+            CallType::ScreenShare => DataChannelMessage::ScreenShareInvite,
+            CallType::None => return,
+        };
+
+        if let Err(err) = self.send_dc_message(&msg) {
             self.toast_signal.set(Some(format!("Cannot initiate call: {err}")));
             return;
         }
-        self.call_state.set(CallState::Calling);
+
+        *self.current_call_type.borrow_mut() = call_type;
+        self.call_state_signal.set(CallState::Calling(call_type));
+
+        let pc = self.peer.clone();
+        let local_stream_cell = self.local_stream.clone();
+        let media_senders_cell = self.media_senders.clone();
+        let toast = self.toast_signal;
+
+        wasm_bindgen_futures::spawn_local(async move {
+            let stream_res = match call_type {
+                CallType::Audio => capture_microphone().await,
+                CallType::Video => capture_camera(true).await,
+                CallType::ScreenShare => capture_screen().await,
+                _ => return,
+            };
+
+            match stream_res {
+                Ok(stream) => {
+                    attach_local_stream_to_dom(&stream);
+                    let mut senders = Vec::new();
+                    let tracks = stream.get_tracks();
+                    for i in 0..tracks.length() {
+                        let track: MediaStreamTrack = tracks.get(i).unchecked_into();
+                        let sender = pc.add_track_0(&track, &stream);
+                        senders.push(sender);
+                    }
+                    *local_stream_cell.borrow_mut() = Some(stream);
+                    *media_senders_cell.borrow_mut() = senders;
+                }
+                Err(err) => {
+                    log::error!("Media capture error: {:?}", err);
+                    toast.set(Some("Failed to capture video device or screen".into()));
+                }
+            }
+        });
     }
 
-    pub fn accept_audio_call(&self) {
+    pub fn accept_call(&self, call_type: CallType) {
         let pc = self.peer.clone();
         let key = self.key;
         let room_id = self.room_id.clone();
         let mut ws_tx = self.ws_sender.clone();
-        let local_stream_cell = self.local_audio_stream.clone();
-        let audio_senders_cell = self.audio_senders.clone();
-        let call_state = self.call_state;
+        let local_stream_cell = self.local_stream.clone();
+        let media_senders_cell = self.media_senders.clone();
+        let call_type_cell = self.current_call_type.clone();
+        let call_state_signal = self.call_state_signal;
         let toast = self.toast_signal;
-
         let dc_msg_sender = self.clone_dc_sender();
 
         wasm_bindgen_futures::spawn_local(async move {
-            match capture_microphone().await {
+            let stream_res = match call_type {
+                CallType::Audio => capture_microphone().await,
+                CallType::Video => capture_camera(true).await,
+                CallType::ScreenShare => capture_microphone().await,
+                CallType::None => return,
+            };
+
+            match stream_res {
                 Ok(stream) => {
-                    let tracks = stream.get_audio_tracks();
+                    if call_type == CallType::Video {
+                        attach_local_stream_to_dom(&stream);
+                    }
+                    let tracks = stream.get_tracks();
                     let mut senders = Vec::new();
                     for i in 0..tracks.length() {
                         let track: MediaStreamTrack = tracks.get(i).unchecked_into();
@@ -119,12 +177,13 @@ impl WebRtcSession {
                         senders.push(sender);
                     }
                     *local_stream_cell.borrow_mut() = Some(stream);
-                    *audio_senders_cell.borrow_mut() = senders;
+                    *media_senders_cell.borrow_mut() = senders;
 
                     let _ = dc_msg_sender(DataChannelMessage::CallAccepted);
-                    call_state.set(CallState::Active);
+                    *call_type_cell.borrow_mut() = call_type;
+                    call_state_signal.set(CallState::Active(call_type));
 
-                    // Renegotiate: create and send offer with audio track
+                    // Renegotiate: create and send offer with new media tracks
                     if let Ok(offer) = wasm_bindgen_futures::JsFuture::from(pc.create_offer()).await {
                         if let Ok(sdp) = js_sys::Reflect::get(&offer, &"sdp".into()) {
                             if let Some(sdp_str) = sdp.as_string() {
@@ -142,22 +201,22 @@ impl WebRtcSession {
                     }
                 }
                 Err(err) => {
-                    log::error!("Microphone access error: {:?}", err);
-                    toast.set(Some("Microphone access denied. Check browser permissions.".into()));
+                    log::error!("Media capture error: {:?}", err);
+                    toast.set(Some("Media permission denied.".into()));
                     let _ = dc_msg_sender(DataChannelMessage::CallRejected);
-                    call_state.set(CallState::Idle);
+                    call_state_signal.set(CallState::Idle);
                 }
             }
         });
     }
 
-    pub fn reject_audio_call(&self) {
+    pub fn reject_call(&self) {
         let _ = self.send_dc_message(&DataChannelMessage::CallRejected);
-        self.call_state.set(CallState::Idle);
+        self.cleanup_media();
     }
 
     pub fn toggle_mic_mute(&self) {
-        let stream_guard = self.local_audio_stream.borrow();
+        let stream_guard = self.local_stream.borrow();
         if let Some(ref stream) = *stream_guard {
             let tracks = stream.get_audio_tracks();
             let mut new_muted = false;
@@ -165,19 +224,79 @@ impl WebRtcSession {
                 let track: MediaStreamTrack = tracks.get(i).unchecked_into();
                 let current = track.enabled();
                 track.set_enabled(!current);
-                new_muted = current; // if it was enabled, it is now muted
+                new_muted = current;
             }
-            self.is_mic_muted.set(new_muted);
+            self.is_mic_muted_signal.set(new_muted);
         }
     }
 
-    pub fn end_audio_call(&self) {
-        let _ = self.send_dc_message(&DataChannelMessage::CallEnded);
-        self.cleanup_audio();
+    pub fn toggle_video_mute(&self) {
+        let stream_guard = self.local_stream.borrow();
+        if let Some(ref stream) = *stream_guard {
+            let tracks = stream.get_video_tracks();
+            let mut new_muted = false;
+            for i in 0..tracks.length() {
+                let track: MediaStreamTrack = tracks.get(i).unchecked_into();
+                let current = track.enabled();
+                track.set_enabled(!current);
+                new_muted = current;
+            }
+            self.is_video_muted_signal.set(new_muted);
+        }
     }
 
-    pub fn cleanup_audio(&self) {
-        if let Some(stream) = self.local_audio_stream.borrow_mut().take() {
+    pub fn flip_camera(&self) {
+        let local_stream_cell = self.local_stream.clone();
+        let media_senders_cell = self.media_senders.clone();
+        let is_front_cell = self.is_front_camera_cell.clone();
+        let is_front_signal = self.is_front_camera_signal;
+        let toast = self.toast_signal;
+
+        let current_front = *is_front_cell.borrow();
+        let new_front = !current_front;
+        *is_front_cell.borrow_mut() = new_front;
+        is_front_signal.set(new_front);
+
+        wasm_bindgen_futures::spawn_local(async move {
+            match capture_camera(new_front).await {
+                Ok(new_stream) => {
+                    attach_local_stream_to_dom(&new_stream);
+
+                    let video_tracks = new_stream.get_video_tracks();
+                    if video_tracks.length() > 0 {
+                        let track_ref: MediaStreamTrack = video_tracks.get(0).unchecked_into();
+                        for sender in media_senders_cell.borrow().iter() {
+                            if let Some(sender_track) = sender.track() {
+                                if sender_track.kind() == "video" {
+                                    let _ = sender.replace_track(Some(&track_ref));
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(old_stream) = local_stream_cell.borrow_mut().replace(new_stream) {
+                        let old_tracks = old_stream.get_video_tracks();
+                        for i in 0..old_tracks.length() {
+                            let t: MediaStreamTrack = old_tracks.get(i).unchecked_into();
+                            t.stop();
+                        }
+                    }
+                }
+                Err(err) => {
+                    log::error!("Camera flip error: {:?}", err);
+                    toast.set(Some("Could not switch camera.".into()));
+                }
+            }
+        });
+    }
+
+    pub fn end_call(&self) {
+        let _ = self.send_dc_message(&DataChannelMessage::CallEnded);
+        self.cleanup_media();
+    }
+
+    pub fn cleanup_media(&self) {
+        if let Some(stream) = self.local_stream.borrow_mut().take() {
             let tracks = stream.get_tracks();
             for i in 0..tracks.length() {
                 let track: MediaStreamTrack = tracks.get(i).unchecked_into();
@@ -185,7 +304,7 @@ impl WebRtcSession {
             }
         }
 
-        for sender in self.audio_senders.borrow_mut().drain(..) {
+        for sender in self.media_senders.borrow_mut().drain(..) {
             let _ = self.peer.remove_track(&sender);
         }
 
@@ -194,8 +313,12 @@ impl WebRtcSession {
             audio.set_src("");
         }
 
-        self.is_mic_muted.set(false);
-        self.call_state.set(CallState::Idle);
+        detach_streams_from_dom();
+
+        *self.current_call_type.borrow_mut() = CallType::None;
+        self.is_mic_muted_signal.set(false);
+        self.is_video_muted_signal.set(false);
+        self.call_state_signal.set(CallState::Idle);
     }
 
     fn clone_dc_sender(&self) -> Box<dyn Fn(DataChannelMessage) -> Result<(), String>> {
@@ -227,13 +350,85 @@ pub async fn capture_microphone() -> Result<MediaStream, JsValue> {
     Ok(js_stream.unchecked_into())
 }
 
+pub async fn capture_camera(front: bool) -> Result<MediaStream, JsValue> {
+    let win = window().ok_or_else(|| JsValue::from_str("No window"))?;
+    let nav = win.navigator();
+    let media_devices = nav.media_devices()?;
+    let constraints = MediaStreamConstraints::new();
+    constraints.set_audio(&JsValue::from_bool(true));
+
+    let video_opts = js_sys::Object::new();
+    let facing = if front { "user" } else { "environment" };
+    js_sys::Reflect::set(&video_opts, &"facingMode".into(), &facing.into())?;
+    constraints.set_video(&video_opts);
+
+    let promise = media_devices.get_user_media_with_constraints(&constraints)?;
+    let js_stream = wasm_bindgen_futures::JsFuture::from(promise).await?;
+    Ok(js_stream.unchecked_into())
+}
+
+pub async fn capture_screen() -> Result<MediaStream, JsValue> {
+    let win = window().ok_or_else(|| JsValue::from_str("No window"))?;
+    let nav = win.navigator();
+    let media_devices = nav.media_devices()?;
+    let promise = media_devices.get_display_media()?;
+    let js_stream = wasm_bindgen_futures::JsFuture::from(promise).await?;
+    Ok(js_stream.unchecked_into())
+}
+
+fn attach_local_stream_to_dom(stream: &MediaStream) {
+    if stream.get_video_tracks().length() == 0 { return; }
+    if let Some(win) = window() {
+        if let Some(doc) = win.document() {
+            if let Some(el) = doc.get_element_by_id("local-video-preview") {
+                if let Ok(video) = el.dyn_into::<HtmlVideoElement>() {
+                    video.set_src_object(Some(stream));
+                    let _ = video.play();
+                }
+            }
+        }
+    }
+}
+
+fn attach_remote_stream_to_dom(stream: &MediaStream) {
+    if let Some(win) = window() {
+        if let Some(doc) = win.document() {
+            if let Some(el) = doc.get_element_by_id("remote-video-feed") {
+                if let Ok(video) = el.dyn_into::<HtmlVideoElement>() {
+                    video.set_src_object(Some(stream));
+                    let _ = video.play();
+                }
+            }
+        }
+    }
+}
+
+fn detach_streams_from_dom() {
+    if let Some(win) = window() {
+        if let Some(doc) = win.document() {
+            if let Some(el) = doc.get_element_by_id("local-video-preview") {
+                if let Ok(video) = el.dyn_into::<HtmlVideoElement>() {
+                    video.set_src_object(None);
+                }
+            }
+            if let Some(el) = doc.get_element_by_id("remote-video-feed") {
+                if let Ok(video) = el.dyn_into::<HtmlVideoElement>() {
+                    video.set_src_object(None);
+                }
+            }
+        }
+    }
+}
+
 pub fn start_webrtc_session(
     room_id: String,
     key: [u8; KEY_LENGTH],
     status_signal: WriteSignal<ConnectionStatus>,
     messages_signal: WriteSignal<Vec<ChatMessageUi>>,
-    call_state: WriteSignal<CallState>,
-    is_mic_muted: WriteSignal<bool>,
+    call_state_signal: WriteSignal<CallState>,
+    is_mic_muted_signal: WriteSignal<bool>,
+    is_video_muted_signal: WriteSignal<bool>,
+    is_front_camera_signal: WriteSignal<bool>,
     toast_signal: WriteSignal<Option<String>>,
 ) -> Result<Rc<RefCell<Option<WebRtcSession>>>, JsValue> {
     status_signal.set(ConnectionStatus::ConnectingRelay);
@@ -259,27 +454,37 @@ pub fn start_webrtc_session(
 
     let pc = RtcPeerConnection::new_with_configuration(&rtc_config)?;
     let data_channel_cell = Rc::new(RefCell::new(None::<RtcDataChannel>));
-    let local_audio_stream = Rc::new(RefCell::new(None::<MediaStream>));
-    let audio_senders = Rc::new(RefCell::new(Vec::<RtcRtpSender>::new()));
+    let local_stream = Rc::new(RefCell::new(None::<MediaStream>));
+    let media_senders = Rc::new(RefCell::new(Vec::<RtcRtpSender>::new()));
     let remote_audio = Rc::new(RefCell::new(None::<HtmlAudioElement>));
+    let remote_stream_cell = Rc::new(RefCell::new(None::<MediaStream>));
+    let current_call_type = Rc::new(RefCell::new(CallType::None));
+    let is_front_camera_cell = Rc::new(RefCell::new(true));
     let session_cell = Rc::new(RefCell::new(None::<WebRtcSession>));
 
     let (ws_tx, mut ws_rx) = mpsc::unbounded::<ClientMessage>();
 
-    // Setup incoming track listener for remote audio
+    // Setup incoming track listener for remote audio/video
     {
         let remote_audio_cell = remote_audio.clone();
+        let remote_stream_c = remote_stream_cell.clone();
         let on_track = Closure::wrap(Box::new(move |ev: RtcTrackEvent| {
             let streams = ev.streams();
             if streams.length() > 0 {
-                let remote_stream: MediaStream = streams.get(0).unchecked_into();
+                let r_stream: MediaStream = streams.get(0).unchecked_into();
+                *remote_stream_c.borrow_mut() = Some(r_stream.clone());
+
+                if r_stream.get_video_tracks().length() > 0 {
+                    attach_remote_stream_to_dom(&r_stream);
+                }
+
                 if let Ok(audio) = HtmlAudioElement::new() {
-                    audio.set_src_object(Some(&remote_stream));
+                    audio.set_src_object(Some(&r_stream));
                     audio.set_autoplay(true);
                     let _ = audio.play();
                     *remote_audio_cell.borrow_mut() = Some(audio);
-                    log::info!("Remote audio track received and attached to audio element");
                 }
+                log::info!("Remote media track received and attached");
             }
         }) as Box<dyn FnMut(RtcTrackEvent)>);
         pc.set_ontrack(Some(on_track.as_ref().unchecked_ref()));
@@ -293,11 +498,16 @@ pub fn start_webrtc_session(
         peer: pc.clone(),
         data_channel: data_channel_cell.clone(),
         ws_sender: ws_tx.clone(),
-        local_audio_stream: local_audio_stream.clone(),
-        audio_senders: audio_senders.clone(),
+        local_stream: local_stream.clone(),
+        media_senders: media_senders.clone(),
         remote_audio: remote_audio.clone(),
-        call_state,
-        is_mic_muted,
+        remote_stream: remote_stream_cell.clone(),
+        current_call_type: current_call_type.clone(),
+        is_front_camera_cell: is_front_camera_cell.clone(),
+        call_state_signal,
+        is_mic_muted_signal,
+        is_video_muted_signal,
+        is_front_camera_signal,
         toast_signal,
     });
 
@@ -355,7 +565,6 @@ pub fn start_webrtc_session(
 
             let (mut ws_sink, mut ws_stream) = ws.split();
 
-            // Task to send outgoing messages to WebSocket
             wasm_bindgen_futures::spawn_local(async move {
                 while let Some(msg) = ws_rx.next().await {
                     if let Ok(json) = serde_json::to_string(&msg) {
@@ -366,12 +575,10 @@ pub fn start_webrtc_session(
                 }
             });
 
-            // Send Join message
             let _ = ws_tx.unbounded_send(ClientMessage::Join {
                 room_id: room_id.clone(),
             });
 
-            // Listen for server messages
             while let Some(msg_res) = ws_stream.next().await {
                 let text = match msg_res {
                     Ok(Message::Text(t)) => t,
@@ -390,7 +597,6 @@ pub fn start_webrtc_session(
                                 status_signal.set(ConnectionStatus::WaitingForPeer);
                             }
                         } else {
-                            // Responder joins
                             status_signal.set(ConnectionStatus::NegotiatingWebRtc);
                             setup_responder_datachannel(
                                 &pc,
@@ -403,7 +609,6 @@ pub fn start_webrtc_session(
                         }
                     }
                     ServerMessage::PeerJoined => {
-                        // Initiator sees peer joined -> create DataChannel and Offer
                         status_signal.set(ConnectionStatus::NegotiatingWebRtc);
                         let _ = initiate_p2p_offer(
                             &pc,
@@ -418,7 +623,6 @@ pub fn start_webrtc_session(
                         .await;
                     }
                     ServerMessage::Signal { payload } => {
-                        // Decrypt incoming signal
                         if let Ok(signal) = decrypt_json::<SignalPayload>(&key, &payload) {
                             handle_remote_signal(
                                 &pc,
@@ -436,7 +640,7 @@ pub fn start_webrtc_session(
                     ServerMessage::PeerLeft => {
                         status_signal.set(ConnectionStatus::Disconnected);
                         if let Some(ref sess) = *session_cell_c.borrow() {
-                            sess.cleanup_audio();
+                            sess.cleanup_media();
                         }
                     }
                     ServerMessage::Error { message } => {
@@ -643,53 +847,43 @@ fn attach_datachannel_callbacks(
                             DataChannelMessage::CallInvite => {
                                 log::info!("Incoming audio call invite received from peer");
                                 if let Some(ref sess) = *session_c.borrow() {
-                                    sess.call_state.set(CallState::Incoming);
+                                    *sess.current_call_type.borrow_mut() = CallType::Audio;
+                                    sess.call_state_signal.set(CallState::Incoming(CallType::Audio));
+                                }
+                            }
+                            DataChannelMessage::VideoCallInvite => {
+                                log::info!("Incoming video call invite received from peer");
+                                if let Some(ref sess) = *session_c.borrow() {
+                                    *sess.current_call_type.borrow_mut() = CallType::Video;
+                                    sess.call_state_signal.set(CallState::Incoming(CallType::Video));
+                                }
+                            }
+                            DataChannelMessage::ScreenShareInvite => {
+                                log::info!("Incoming screen share invite received from peer");
+                                if let Some(ref sess) = *session_c.borrow() {
+                                    *sess.current_call_type.borrow_mut() = CallType::ScreenShare;
+                                    sess.call_state_signal.set(CallState::Incoming(CallType::ScreenShare));
                                 }
                             }
                             DataChannelMessage::CallAccepted => {
-                                log::info!("Peer accepted audio call! Capturing caller mic and activating stream.");
+                                log::info!("Peer accepted call! Connecting media stream.");
                                 if let Some(ref sess) = *session_c.borrow() {
-                                    let pc = sess.peer.clone();
-                                    let local_stream_cell = sess.local_audio_stream.clone();
-                                    let audio_senders_cell = sess.audio_senders.clone();
-                                    let call_state = sess.call_state;
-                                    let toast = sess.toast_signal;
-
-                                    wasm_bindgen_futures::spawn_local(async move {
-                                        match capture_microphone().await {
-                                            Ok(stream) => {
-                                                let tracks = stream.get_audio_tracks();
-                                                let mut senders = Vec::new();
-                                                for i in 0..tracks.length() {
-                                                    let track: MediaStreamTrack = tracks.get(i).unchecked_into();
-                                                    let sender = pc.add_track_0(&track, &stream);
-                                                    senders.push(sender);
-                                                }
-                                                *local_stream_cell.borrow_mut() = Some(stream);
-                                                *audio_senders_cell.borrow_mut() = senders;
-                                                call_state.set(CallState::Active);
-                                            }
-                                            Err(err) => {
-                                                log::error!("Caller microphone error: {:?}", err);
-                                                toast.set(Some("Microphone access failed.".into()));
-                                                call_state.set(CallState::Idle);
-                                            }
-                                        }
-                                    });
+                                    let current_type = *sess.current_call_type.borrow();
+                                    sess.call_state_signal.set(CallState::Active(current_type));
                                 }
                             }
                             DataChannelMessage::CallRejected => {
-                                log::info!("Peer rejected audio call");
+                                log::info!("Peer rejected call");
                                 if let Some(ref sess) = *session_c.borrow() {
-                                    sess.call_state.set(CallState::Idle);
-                                    sess.toast_signal.set(Some("Peer declined audio call".into()));
+                                    sess.cleanup_media();
+                                    sess.toast_signal.set(Some("Peer declined call".into()));
                                 }
                             }
                             DataChannelMessage::CallEnded => {
-                                log::info!("Audio call ended by peer");
+                                log::info!("Call ended by peer");
                                 if let Some(ref sess) = *session_c.borrow() {
-                                    sess.cleanup_audio();
-                                    sess.toast_signal.set(Some("Audio call ended".into()));
+                                    sess.cleanup_media();
+                                    sess.toast_signal.set(Some("Call ended".into()));
                                 }
                             }
                             DataChannelMessage::Ack { .. } => {}

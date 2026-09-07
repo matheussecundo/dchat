@@ -39,12 +39,31 @@ impl ConnectionStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallType {
+    None,
+    Audio,
+    Video,
+    ScreenShare,
+}
+
+impl CallType {
+    pub fn label(&self) -> &'static str {
+        match self {
+            CallType::None => "None",
+            CallType::Audio => "Audio",
+            CallType::Video => "Video",
+            CallType::ScreenShare => "Screen Share",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallState {
     Idle,
-    Calling,
-    Incoming,
-    Active,
+    Calling(CallType),
+    Incoming(CallType),
+    Active(CallType),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
