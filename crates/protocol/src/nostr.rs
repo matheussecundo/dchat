@@ -1,5 +1,3 @@
-use k256::schnorr::signature::Signer;
-use k256::schnorr::signature::Verifier;
 use k256::schnorr::{Signature, SigningKey, VerifyingKey};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -242,9 +240,7 @@ impl NostrBurnerKey {
         let id_bytes = hasher.finalize();
         let id_hex = hex::encode(id_bytes);
 
-        // Sign the 32-byte digest using BIP-340 Schnorr
-        let signature: Signature = self.signing_key.sign(&id_bytes);
-        let sig_hex = hex::encode(signature.to_bytes());
+        let sig_hex = hex::encode(self.sign_raw_32(&id_bytes)?.to_bytes());
 
         Ok(NostrEvent {
             id: id_hex,
@@ -255,6 +251,17 @@ impl NostrBurnerKey {
             content,
             sig: sig_hex,
         })
+    }
+
+    /// BIP-340 sign a 32-byte message as-is (no extra hashing), with fresh aux randomness.
+    /// NIP-01 requires the signature to cover the raw event id, so the `Signer` trait
+    /// (which SHA-256 hashes its input first) must not be used here.
+    fn sign_raw_32(&self, msg: &[u8]) -> Result<Signature, NostrError> {
+        let mut aux_rand = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut aux_rand);
+        self.signing_key
+            .sign_raw(msg, &aux_rand)
+            .map_err(|e| NostrError::Crypto(format!("Signing failed: {e}")))
     }
 }
 
@@ -288,7 +295,7 @@ pub fn verify_event(event: &NostrEvent) -> Result<bool, NostrError> {
         Err(_) => return Ok(false),
     };
 
-    Ok(verifying_key.verify(&id_bytes, &signature).is_ok())
+    Ok(verifying_key.verify_raw(&id_bytes, &signature).is_ok())
 }
 
 #[cfg(test)]
@@ -315,6 +322,51 @@ mod tests {
 
         let is_valid = verify_event(&event).expect("Verify event");
         assert!(is_valid, "Signature verification must succeed");
+    }
+
+    #[test]
+    fn test_bip340_vectors() {
+        // Official BIP-340 test vectors 0 and 1 (secret key, aux_rand, message, signature).
+        let vectors = [
+            (
+                "0000000000000000000000000000000000000000000000000000000000000003",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "E907831F80848D1069A5371B402410364BDF1C5F8307B0084C55F1CE2DCA821525F66A4A85EA8B71E482A74F382D2CE5EBEEE8FDB2172F477DF4900D310536C0",
+            ),
+            (
+                "B7E151628AED2A6ABF7158809CF4F3C762E7160F38B4DA56A784D9045190CFEF",
+                "0000000000000000000000000000000000000000000000000000000000000001",
+                "243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89",
+                "6896BD60EEAE296DB48A229FF71DFE071BDE413E6D43F917DC8DCF8C78DE33418906D11AC976ABCCB20B091292BFF4EA897EFCB639EA871CFA95F6DE339E4B0A",
+            ),
+        ];
+        for (sk, aux, msg, sig) in vectors {
+            let key = SigningKey::from_bytes(&hex::decode(sk).unwrap()).unwrap();
+            let aux: [u8; 32] = hex::decode(aux).unwrap().try_into().unwrap();
+            let msg = hex::decode(msg).unwrap();
+            let signature = key.sign_raw(&msg, &aux).unwrap();
+            assert_eq!(hex::encode_upper(signature.to_bytes()), sig);
+            assert!(key.verifying_key().verify_raw(&msg, &signature).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_event_signature_covers_raw_id() {
+        // NIP-01: sig is a BIP-340 signature over the 32-byte id itself, not sha256(id).
+        use k256::schnorr::signature::Verifier;
+
+        let key = NostrBurnerKey::generate().expect("Generate burner key");
+        let event = key
+            .create_event(KIND_EPHEMERAL_SIGNAL, vec![], "hi".into(), 1700000000)
+            .expect("Create event");
+
+        let id_bytes = hex::decode(&event.id).unwrap();
+        let vk = VerifyingKey::from_bytes(&hex::decode(&event.pubkey).unwrap()).unwrap();
+        let sig = Signature::try_from(hex::decode(&event.sig).unwrap().as_slice()).unwrap();
+
+        assert!(vk.verify_raw(&id_bytes, &sig).is_ok(), "sig must cover the raw id");
+        assert!(vk.verify(&id_bytes, &sig).is_err(), "sig must not cover sha256(id)");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
-use protocol::{NostrEvent, NostrFilter};
+use protocol::{verify_event, NostrEvent, NostrFilter};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -17,6 +17,15 @@ pub struct Subscription {
 #[derive(Default, Clone)]
 pub struct NostrRelayState {
     pub clients: Arc<RwLock<HashMap<String, HashMap<String, Subscription>>>>,
+}
+
+/// Mirror public relays: reject events whose id or BIP-340 signature does not verify,
+/// so a signing regression fails the offline E2E tests too.
+fn validate_event(event: &NostrEvent) -> Result<(), &'static str> {
+    match verify_event(event) {
+        Ok(true) => Ok(()),
+        _ => Err("invalid: bad signature or id"),
+    }
 }
 
 pub async fn handle_nostr_websocket(socket: WebSocket, state: NostrRelayState) {
@@ -91,6 +100,13 @@ pub async fn handle_nostr_websocket(socket: WebSocket, state: NostrRelayState) {
             "EVENT" => {
                 if arr.len() >= 2 {
                     if let Ok(event) = serde_json::from_value::<NostrEvent>(arr[1].clone()) {
+                        if let Err(reason) = validate_event(&event) {
+                            let _ = tx.send(
+                                serde_json::json!(["OK", event.id, false, reason]).to_string(),
+                            );
+                            continue;
+                        }
+
                         // Send OK response to publisher
                         let ok_msg = format!(r#"["OK","{}",true,""]"#, event.id);
                         let _ = tx.send(ok_msg);
@@ -147,7 +163,24 @@ pub async fn handle_nostr_websocket(socket: WebSocket, state: NostrRelayState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::KIND_EPHEMERAL_SIGNAL;
+    use protocol::{NostrBurnerKey, KIND_EPHEMERAL_SIGNAL};
+
+    #[test]
+    fn test_validate_event_rejects_bad_signatures() {
+        let key = NostrBurnerKey::generate().expect("Generate burner key");
+        let event = key
+            .create_event(KIND_EPHEMERAL_SIGNAL, vec![], "signal".into(), 1700000000)
+            .expect("Create event");
+        assert!(validate_event(&event).is_ok());
+
+        let mut tampered = event.clone();
+        tampered.content = "forged".into();
+        assert!(validate_event(&tampered).is_err());
+
+        let mut bad_sig = event;
+        bad_sig.sig = "00".repeat(64);
+        assert!(validate_event(&bad_sig).is_err());
+    }
 
     #[tokio::test]
     async fn test_in_memory_mock_nostr_relay_lifecycle() {
