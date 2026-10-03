@@ -19,6 +19,9 @@ const CHAT_LABEL: &str = "chat";
 const FILE_LABEL: &str = "file-transfer";
 const ICE_BATCH_DELAY_MS: i32 = 100;
 const ICE_BATCH_MAX: usize = 10;
+/// A link stuck in "disconnected" this long counts as lost (a killed tab only reaches
+/// "failed" after the ~30 s ICE consent timeout); a real member reconnects via presence.
+const DISCONNECT_GRACE_MS: i32 = 10_000;
 
 pub enum LinkEvent {
     /// The chat channel opened: the member is directly reachable.
@@ -279,13 +282,28 @@ impl PeerLink {
 
     fn install_state_watch(&self, notify_closed: Rc<dyn Fn()>) {
         let pc = self.pc.clone();
-        let on_state = Closure::wrap(Box::new(move || {
-            if matches!(
-                pc.connection_state(),
-                RtcPeerConnectionState::Failed | RtcPeerConnectionState::Closed
-            ) {
-                notify_closed();
+        let on_state = Closure::wrap(Box::new(move || match pc.connection_state() {
+            RtcPeerConnectionState::Failed | RtcPeerConnectionState::Closed => notify_closed(),
+            RtcPeerConnectionState::Disconnected => {
+                let pc = pc.clone();
+                let notify_closed = notify_closed.clone();
+                let check = Closure::once(move || {
+                    if matches!(
+                        pc.connection_state(),
+                        RtcPeerConnectionState::Disconnected | RtcPeerConnectionState::Failed
+                    ) {
+                        notify_closed();
+                    }
+                });
+                if let Some(w) = window() {
+                    let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(
+                        check.as_ref().unchecked_ref(),
+                        DISCONNECT_GRACE_MS,
+                    );
+                }
+                check.forget();
             }
+            _ => {}
         }) as Box<dyn FnMut()>);
         self.pc.set_onconnectionstatechange(Some(on_state.as_ref().unchecked_ref()));
         on_state.forget();

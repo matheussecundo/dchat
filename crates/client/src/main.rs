@@ -13,13 +13,13 @@ use i18n::{
 };
 use leptos::*;
 use names::{pubkey_tag, random_name, sanitize_name, MAX_NAME_CHARS};
-use protocol::{parse_cap, VideoKind, DEFAULT_MEMBER_CAP, DEFAULT_VIDEO_CAP, DEFAULT_VOICE_CAP};
+use protocol::{parse_cap, VideoKind, DEFAULT_MEMBER_CAP, DEFAULT_VIDEO_CAP, DEFAULT_VOICE_CAP, REACTIONS};
 use qr::generate_qr_svg;
 use session::{RoomSession, SessionSignals};
 use state::{
     admin_url, create_room, format_file_size, invite_url, read_credentials, AudioSettings,
-    ChatMessageUi, ConnectionStatus, FileOfferInfo, FileTransferStatus, LinkUi, LoungeMemberUi,
-    MemberUi, MyVoiceUi, Notice, RoomCaps,
+    ChatMessageUi, ConnectionStatus, DmUi, FileOfferInfo, FileTransferStatus, LinkUi,
+    LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RekeyTarget, RoomCaps,
 };
 use std::collections::{HashMap, HashSet};
 use wasm_bindgen::JsCast;
@@ -37,6 +37,8 @@ enum Screen {
     Room,
     /// This tab lost the deterministic race for the last seat.
     Full,
+    /// An admin removed this tab from the room.
+    Removed,
 }
 
 #[component]
@@ -52,12 +54,15 @@ fn App() -> impl IntoView {
     let (cap_input, set_cap_input) = create_signal(DEFAULT_MEMBER_CAP.to_string());
     let (voice_cap_input, set_voice_cap_input) = create_signal(DEFAULT_VOICE_CAP.to_string());
     let (video_cap_input, set_video_cap_input) = create_signal(DEFAULT_VIDEO_CAP.to_string());
+    let (history_input, set_history_input) = create_signal(false);
 
     let (status, set_status) = create_signal(ConnectionStatus::Idle);
     let (messages, set_messages) = create_signal(Vec::<ChatMessageUi>::new());
     let (members, set_members) = create_signal(Vec::<MemberUi>::new());
     let (names, set_names) = create_signal(HashMap::<String, String>::new());
     let (room_full, set_room_full) = create_signal(false);
+    let (removed, set_removed) = create_signal(false);
+    let (rekey, set_rekey) = create_signal(None::<RekeyTarget>);
     let (connected_relays, set_connected_relays) = create_signal(0usize);
     let (input_text, set_input_text) = create_signal(String::new());
     let (show_qr, set_show_qr) = create_signal(false);
@@ -74,17 +79,26 @@ fn App() -> impl IntoView {
     let (voice_prompt, set_voice_prompt) = create_signal(Option::<String>::None);
     let (audio_settings, set_audio_settings) = create_signal(AudioSettings::default());
 
+    // Chat extras
+    let (typing, set_typing) = create_signal(Vec::<String>::new());
+    let (mention_count, set_mention_count) = create_signal(0usize);
+    let (dms, set_dms) = create_signal(HashMap::<String, Vec<DmUi>>::new());
+    let (dm_unread, set_dm_unread) = create_signal(HashMap::<String, usize>::new());
+    let (dm_open, set_dm_open) = create_signal(Option::<String>::None);
+    let (dm_input, set_dm_input) = create_signal(String::new());
+    let (editing, set_editing) = create_signal(Option::<String>::None);
+    let (react_picker, set_react_picker) = create_signal(Option::<String>::None);
+
     // File sharing
     let (staged_file, set_staged_file) = create_signal(Option::<web_sys::File>::None);
     let (large_file_warning, set_large_file_warning) = create_signal(Option::<(String, String)>::None);
     let (show_audio_settings, set_show_audio_settings) = create_signal(false);
 
     let session_ref = store_value(None::<RoomSession>);
+    // The session name, reused when an admin moves the room to a new link.
+    let my_name = store_value(String::new());
 
-    let enter_room = move || {
-        let Some((room_id, key)) = read_credentials() else {
-            return;
-        };
+    let start_session = move |room_id: String, key: [u8; protocol::KEY_LENGTH], migrated: bool| -> Option<RoomSession> {
         let signals = SessionSignals {
             status: set_status,
             messages: set_messages,
@@ -97,23 +111,58 @@ fn App() -> impl IntoView {
             speaking: set_speaking,
             voice_prompt: set_voice_prompt,
             toast: set_toast,
+            removed: set_removed,
+            rekey: set_rekey,
+            typing: set_typing,
+            mention: set_mention_count,
+            dms: set_dms,
+            dm_unread: set_dm_unread,
         };
         set_room_id_sig.set(room_id.clone());
-        let name = sanitize_name(&name_input.get_untracked());
-        match RoomSession::start(room_id, key, name, signals) {
+        match RoomSession::start(room_id, key, my_name.get_value(), signals, migrated) {
             Ok(session) => {
-                session_ref.set_value(Some(session));
+                session_ref.set_value(Some(session.clone()));
                 set_screen.set(Screen::Room);
+                Some(session)
             }
-            Err(err) => set_status.set(ConnectionStatus::Error(err)),
+            Err(err) => {
+                set_status.set(ConnectionStatus::Error(err));
+                None
+            }
         }
     };
+
+    let enter_room = move || {
+        let Some((room_id, key)) = read_credentials() else {
+            return;
+        };
+        my_name.set_value(sanitize_name(&name_input.get_untracked()));
+        start_session(room_id, key, false);
+    };
+
+    // An admin moved the room: follow it with a fresh session, keeping the chat on screen.
+    create_effect(move |_| {
+        if let Some(target) = rekey.get() {
+            set_rekey.set(None);
+            if let Some(session) = start_session(target.room, target.key, true) {
+                if target.rejoin_voice {
+                    session.join_voice();
+                }
+            }
+        }
+    });
+    create_effect(move |_| {
+        if removed.get() {
+            set_screen.set(Screen::Removed);
+        }
+    });
 
     let create_and_enter = move || {
         let caps = RoomCaps {
             members: parse_cap(Some(&cap_input.get_untracked()), DEFAULT_MEMBER_CAP),
             voice: parse_cap(Some(&voice_cap_input.get_untracked()), DEFAULT_VOICE_CAP),
             video: parse_cap(Some(&video_cap_input.get_untracked()), DEFAULT_VIDEO_CAP),
+            history: history_input.get_untracked(),
         };
         match create_room(caps) {
             Ok(()) => enter_room(),
@@ -129,6 +178,16 @@ fn App() -> impl IntoView {
 
     let send_message = move || {
         let text = input_text.get_untracked().trim().to_string();
+        if let Some(target) = editing.get_untracked() {
+            session_ref.with_value(|s| {
+                if let Some(s) = s {
+                    s.edit_message(&target, &text);
+                }
+            });
+            set_editing.set(None);
+            set_input_text.set(String::new());
+            return;
+        }
         let staged = staged_file.get_untracked();
         if text.is_empty() && staged.is_none() {
             return;
@@ -268,6 +327,100 @@ fn App() -> impl IntoView {
         FileAction::Withdraw => with_session(&|s| s.withdraw_file(&file_id)),
     };
     let has_messages = create_memo(move |_| messages.with(|m| !m.is_empty()));
+    let start_edit = move |id: String, text: String| {
+        set_editing.set(Some(id));
+        set_input_text.set(text);
+        if let Some(input) = window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.query_selector("footer.input-bar input[type=text]").ok().flatten())
+            .and_then(|el| el.dyn_into::<HtmlInputElement>().ok())
+        {
+            let _ = input.focus();
+        }
+    };
+    let delete_message = move |id: String| {
+        let ok = window()
+            .and_then(|w| w.confirm_with_message(t(lang.get_untracked(), "confirm_delete")).ok())
+            .unwrap_or(false);
+        if ok {
+            with_session(&|s| s.delete_message(&id));
+        }
+    };
+    let react = move |id: String, emoji: &'static str| {
+        set_react_picker.set(None);
+        with_session(&|s| s.toggle_reaction(&id, emoji));
+    };
+    let open_dm = move |pubkey: String| {
+        set_dm_unread.update(|u| {
+            u.remove(&pubkey);
+        });
+        set_dm_open.set(Some(pubkey));
+    };
+    // Reading an open conversation clears its unread count.
+    create_effect(move |_| {
+        if let Some(peer) = dm_open.get() {
+            if dm_unread.with(|u| u.get(&peer).copied().unwrap_or(0)) > 0 {
+                set_dm_unread.update(|u| {
+                    u.remove(&peer);
+                });
+            }
+        }
+    });
+    let send_dm = move || {
+        let (Some(peer), text) = (dm_open.get_untracked(), dm_input.get_untracked()) else {
+            return;
+        };
+        let sent = session_ref.with_value(|s| s.as_ref().map(|s| s.send_dm(&peer, &text)));
+        match sent {
+            Some(Ok(())) => set_dm_input.set(String::new()),
+            Some(Err(err)) => log::warn!("DM not sent: {err}"),
+            None => {}
+        }
+    };
+    // @mentions: chime, and a "(n)" title badge while the tab is in the background.
+    let base_title = window().and_then(|w| w.document()).map(|d| d.title()).unwrap_or_default();
+    let page_hidden = || window().and_then(|w| w.document()).is_some_and(|d| d.hidden());
+    create_effect(move |previous: Option<usize>| {
+        let count = mention_count.get();
+        if count > previous.unwrap_or(0) {
+            media::play_chime();
+        }
+        if let Some(doc) = window().and_then(|w| w.document()) {
+            if count > 0 && page_hidden() {
+                doc.set_title(&format!("({count}) {base_title}"));
+            } else {
+                doc.set_title(&base_title);
+                if count > 0 {
+                    set_mention_count.set(0);
+                }
+            }
+        }
+        count
+    });
+    {
+        let on_visible = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
+            if !page_hidden() {
+                set_mention_count.set(0);
+            }
+        }) as Box<dyn FnMut()>);
+        if let Some(doc) = window().and_then(|w| w.document()) {
+            let _ = doc.add_event_listener_with_callback("visibilitychange", on_visible.as_ref().unchecked_ref());
+        }
+        on_visible.forget();
+    }
+    let am_admin = create_memo(move |_| members.with(|m| m.iter().any(|x| x.link == LinkUi::Me && x.is_admin)));
+    let confirm = |text: String| window().and_then(|w| w.confirm_with_message(&text).ok()).unwrap_or(false);
+    let kick_member = move |pubkey: String, name: String| {
+        if confirm(t_replace_1(lang.get_untracked(), "confirm_kick", "{name}", &name)) {
+            with_session(&|s| s.kick(&pubkey));
+        }
+    };
+    let rotate_link = move |_| {
+        if confirm(t(lang.get_untracked(), "confirm_rotate").to_string()) {
+            with_session(&|s| s.rotate_link());
+        }
+    };
+    let history_on = move || session_ref.with_value(|s| s.as_ref().is_some_and(|s| s.history_enabled()));
 
     let is_connected = move || status.get() == ConnectionStatus::Connected;
     let display_name = move |pubkey: &str| {
@@ -337,6 +490,15 @@ fn App() -> impl IntoView {
                             />
                         </div>
                     </div>
+                    <label class="lobby-check" for="history-checkbox">
+                        <input
+                            type="checkbox"
+                            id="history-checkbox"
+                            prop:checked=move || history_input.get()
+                            on:change=move |ev| set_history_input.set(event_target_checked(&ev))
+                        />
+                        <span>{move || t(lang.get(), "history_label")}</span>
+                    </label>
                     {move || cap_is_large().then(|| view! {
                         <p class="lobby-warning">{move || t(lang.get(), "cap_warning")}</p>
                     })}
@@ -386,6 +548,28 @@ fn App() -> impl IntoView {
         }
     };
 
+    let removed_view = move || {
+        view! {
+            <div class="lobby">
+                <div class="lobby-card room-removed">
+                    <h2>{move || t(lang.get(), "removed_title")}</h2>
+                    <p class="lobby-desc">{move || t(lang.get(), "removed_desc")}</p>
+                    <button
+                        id="back-to-start-btn"
+                        class="btn btn-primary lobby-submit"
+                        on:click=move |_| {
+                            if let Some(win) = window() {
+                                let _ = win.location().set_href("/");
+                            }
+                        }
+                    >
+                        {move || t(lang.get(), "btn_back_to_start")}
+                    </button>
+                </div>
+            </div>
+        }
+    };
+
     let message_view = move |msg: ChatMessageUi| {
         if let Some(notice) = msg.notice {
             return view! {
@@ -394,25 +578,84 @@ fn App() -> impl IntoView {
                         Notice::Joined(name) => t_replace_1(lang.get(), "sys_joined", "{name}", name),
                         Notice::Left(name) => t_replace_1(lang.get(), "sys_left", "{name}", name),
                         Notice::LateJoin => t(lang.get(), "sys_late_join").to_string(),
+                        Notice::HistoryShown => t(lang.get(), "sys_history_shown").to_string(),
+                        Notice::Rekeyed => t(lang.get(), "sys_rekeyed").to_string(),
                     }}
                 </div>
             }
             .into_view();
         }
-        let row_class = if msg.is_self { "message-row self" } else { "message-row peer" };
-        let author = msg.author.clone();
-        let body = match msg.file {
-            Some(file) => file_card(lang, file, msg.text, msg.author.clone(), members, file_action).into_view(),
-            None => view! { <div class="message-bubble" dir="auto">{msg.text}</div> }.into_view(),
+        let row_class = match (msg.is_self, msg.mentions_me) {
+            (true, _) => "message-row self",
+            (false, true) => "message-row peer mention",
+            (false, false) => "message-row peer",
         };
+        let author = msg.author.clone();
+        let is_file = msg.file.is_some();
+        let body = match msg.file {
+            Some(file) => file_card(lang, file, msg.text.clone(), msg.author.clone(), members, file_action).into_view(),
+            None => view! { <div class="message-bubble" dir="auto">{msg.text.clone()}</div> }.into_view(),
+        };
+        let id = msg.id.clone();
+        let me = members.with_untracked(|m| m.iter().find(|x| x.link == LinkUi::Me).map(|x| x.pubkey.clone()));
+        let reactions = msg.reactions.clone();
+        let (id_pick, id_edit, id_delete, id_picker) = (id.clone(), id.clone(), id.clone(), id.clone());
+        let text_for_edit = msg.text.clone();
+        let is_self = msg.is_self;
         view! {
-            <div class=row_class>
+            <div class=row_class data-message-id=id.clone()>
                 {body}
+                <div class="message-actions">
+                    <button class="msg-action react-btn" title=move || t(lang.get(), "title_react")
+                        on:click=move |_| set_react_picker.update(|p| *p = if p.as_deref() == Some(id_pick.as_str()) { None } else { Some(id_pick.clone()) })>
+                        "😀"
+                    </button>
+                    {(is_self && !is_file).then(|| view! {
+                        <button class="msg-action edit-btn" title=move || t(lang.get(), "title_edit")
+                            on:click=move |_| start_edit(id_edit.clone(), text_for_edit.clone())>
+                            "✏️"
+                        </button>
+                    })}
+                    {(is_self && !is_file).then(|| view! {
+                        <button class="msg-action delete-btn" title=move || t(lang.get(), "title_delete")
+                            on:click=move |_| delete_message(id_delete.clone())>
+                            "🗑️"
+                        </button>
+                    })}
+                </div>
+                {move || (react_picker.get().as_deref() == Some(id_picker.as_str())).then(|| {
+                    let id = id_picker.clone();
+                    view! {
+                        <div class="reaction-picker">
+                            {REACTIONS.iter().map(|emoji| {
+                                let id = id.clone();
+                                view! { <button class="reaction-option" on:click=move |_| react(id.clone(), emoji)>{*emoji}</button> }
+                            }).collect_view()}
+                        </div>
+                    }
+                })}
+                {(!reactions.is_empty()).then(|| view! {
+                    <div class="reactions">
+                        {reactions.into_iter().map(|(emoji, who)| {
+                            let mine = me.as_ref().is_some_and(|me| who.contains(me));
+                            let id = id.clone();
+                            let emoji_static = REACTIONS.iter().copied().find(|e| *e == emoji).unwrap_or("👍");
+                            view! {
+                                <button class=if mine { "reaction-chip mine" } else { "reaction-chip" }
+                                    data-emoji=emoji.clone()
+                                    on:click=move |_| react(id.clone(), emoji_static)>
+                                    {format!("{} {}", emoji, who.len())}
+                                </button>
+                            }
+                        }).collect_view()}
+                    </div>
+                })}
                 <div class="message-meta">
                     <span class="message-author" dir="auto">{move || display_name(&author)}</span>
                     <span class="message-tag">{format!(" · {}", pubkey_tag(&msg.author))}</span>
                     <span>" • "</span>
                     <span>{msg.time}</span>
+                    {msg.edited.then(|| view! { <span class="edited-mark">{move || format!(" {}", t(lang.get(), "edited_suffix"))}</span> })}
                 </div>
             </div>
         }
@@ -449,12 +692,27 @@ fn App() -> impl IntoView {
                     >
                         {move || format!("👥 {}", members.get().len())}
                     </button>
+                    {move || history_on().then(|| view! {
+                        <span class="history-badge" title=move || t(lang.get(), "history_badge_title")>
+                            {move || t(lang.get(), "history_badge")}
+                        </span>
+                    })}
                     <button class="btn btn-secondary copy-invite-btn" on:click=copy_invite_link>
                         {move || if copied.get() { t(lang.get(), "btn_copied") } else { t(lang.get(), "btn_copy_link") }}
                     </button>
                     {is_admin_link.then(|| view! {
                         <button class="btn btn-secondary copy-admin-btn" on:click=copy_admin_link>
                             {move || t(lang.get(), "btn_copy_admin")}
+                        </button>
+                    })}
+                    {move || am_admin.get().then(|| view! {
+                        <button
+                            id="rotate-link-btn"
+                            class="btn btn-secondary"
+                            on:click=rotate_link
+                            title=move || t(lang.get(), "title_rotate_link")
+                        >
+                            {move || t(lang.get(), "btn_rotate_link")}
                         </button>
                     })}
                 </div>
@@ -615,7 +873,7 @@ fn App() -> impl IntoView {
                             view! {
                                 <For
                                     each=move || messages.get()
-                                    key=|msg| (msg.id.clone(), msg.file.as_ref().map(|f| f.status.clone()))
+                                    key=|msg| (msg.id.clone(), msg.rev)
                                     children=message_view
                                 />
                             }
@@ -633,11 +891,26 @@ fn App() -> impl IntoView {
                         <For
                             each=move || members.get()
                             key=|m| (m.pubkey.clone(), m.name.clone(), m.is_admin, m.link.clone())
-                            children=move |m| member_row(lang, m)
+                            children=move |m| member_row(lang, m, am_admin, kick_member, dm_unread, open_dm)
                         />
                     </ul>
                 </aside>
             </div>
+
+            <div class="typing-indicator">
+                {move || {
+                    let names = typing.get();
+                    match names.as_slice() {
+                        [] => String::new(),
+                        [one] => t_replace_1(lang.get(), "typing_one", "{name}", one),
+                        [a, b] => t_replace_1(lang.get(), "typing_two", "{a}", a).replace("{b}", b),
+                        _ => t(lang.get(), "typing_many").to_string(),
+                    }
+                }}
+            </div>
+            {move || editing.get().is_some().then(|| view! {
+                <div class="editing-hint">{move || t(lang.get(), "editing_hint")}</div>
+            })}
 
             {move || staged_file.get().map(|file| view! {
                 <div class="attachment-chip">
@@ -699,10 +972,16 @@ fn App() -> impl IntoView {
                     on:input=move |ev| {
                         let target: HtmlInputElement = event_target(&ev);
                         set_input_text.set(target.value());
+                        with_session(&|s| s.notify_typing());
                     }
                     on:keydown=move |ev| {
-                        if ev.key() == "Enter" {
-                            send_message();
+                        match ev.key().as_str() {
+                            "Enter" => send_message(),
+                            "Escape" if editing.get_untracked().is_some() => {
+                                set_editing.set(None);
+                                set_input_text.set(String::new());
+                            }
+                            _ => {}
                         }
                     }
                 />
@@ -711,7 +990,7 @@ fn App() -> impl IntoView {
                     disabled=move || !is_connected() || (input_text.get().trim().is_empty() && staged_file.with(|f| f.is_none()))
                     on:click=move |_| send_message()
                 >
-                    {move || t(lang.get(), "btn_send")}
+                    {move || if editing.get().is_some() { t(lang.get(), "btn_save") } else { t(lang.get(), "btn_send") }}
                 </button>
             </footer>
         }
@@ -767,6 +1046,7 @@ fn App() -> impl IntoView {
                 Screen::Join => join_view().into_view(),
                 Screen::Room => room_view().into_view(),
                 Screen::Full => full_view().into_view(),
+                Screen::Removed => removed_view().into_view(),
             }}
 
             // QR code of the invite link (never the admin link) for phone pairing
@@ -810,6 +1090,51 @@ fn App() -> impl IntoView {
                             </button>
                         </div>
                     </div>
+                }
+            })}
+
+            // Private conversation panel
+            {move || dm_open.get().map(|peer| {
+                let peer_name = peer.clone();
+                let name = Signal::derive(move || names.with(|n| n.get(&peer_name).cloned()).unwrap_or_else(|| pubkey_tag(&peer_name)));
+                let thread_peer = peer.clone();
+                view! {
+                    <aside id="dm-panel" class="dm-panel" data-peer=peer.clone()>
+                        <div class="dm-header">
+                            <h4 dir="auto">{move || t_replace_1(lang.get(), "dm_title", "{name}", &name.get())}</h4>
+                            <button class="btn btn-secondary btn-sm" title=move || t(lang.get(), "title_close") on:click=move |_| set_dm_open.set(None)>"✕"</button>
+                        </div>
+                        <div class="dm-thread">
+                            <p class="dm-empty">{move || t_replace_1(lang.get(), "dm_empty", "{name}", &name.get())}</p>
+                            {move || dms.with(|d| d.get(&thread_peer).cloned().unwrap_or_default()).into_iter().map(|line| {
+                                if line.notice {
+                                    view! { <div class="dm-notice">{move || t_replace_1(lang.get(), "dm_peer_left", "{name}", &line.text)}</div> }.into_view()
+                                } else {
+                                    view! {
+                                        <div class=if line.from_me { "dm-line self" } else { "dm-line peer" }>
+                                            <span class="dm-text" dir="auto">{line.text}</span>
+                                            <span class="dm-time">{line.time}</span>
+                                        </div>
+                                    }.into_view()
+                                }
+                            }).collect_view()}
+                        </div>
+                        <div class="dm-input-row">
+                            <input
+                                id="dm-input"
+                                type="text"
+                                placeholder=move || t_replace_1(lang.get(), "dm_placeholder", "{name}", &name.get())
+                                prop:value=move || dm_input.get()
+                                on:input=move |ev| set_dm_input.set(event_target_value(&ev))
+                                on:keydown=move |ev| if ev.key() == "Enter" { send_dm() }
+                            />
+                            <button id="dm-send-btn" class="btn btn-primary btn-sm"
+                                disabled=move || dm_input.get().trim().is_empty()
+                                on:click=move |_| send_dm()>
+                                {move || t(lang.get(), "btn_send")}
+                            </button>
+                        </div>
+                    </aside>
                 }
             })}
 
@@ -1077,8 +1402,19 @@ fn audio_option_row(
     }
 }
 
-/// One member in the side panel: name, key tag, admin badge and how we reach them.
-fn member_row(lang: ReadSignal<Language>, member: MemberUi) -> impl IntoView {
+/// One member in the side panel: name, key tag, admin badge, how we reach them, and a
+/// Kick button for admins.
+fn member_row(
+    lang: ReadSignal<Language>,
+    member: MemberUi,
+    am_admin: Memo<bool>,
+    on_kick: impl Fn(String, String) + Copy + 'static,
+    dm_unread: ReadSignal<HashMap<String, usize>>,
+    on_dm: impl Fn(String) + Copy + 'static,
+) -> impl IntoView {
+    let kickable = member.link != LinkUi::Me && !member.is_admin;
+    let dm_target = (member.link != LinkUi::Me).then(|| member.pubkey.clone());
+    let kick_target = (member.pubkey.clone(), member.name.clone());
     let (kind, dot) = match member.link {
         LinkUi::Me => ("me", "link-me"),
         LinkUi::Direct => ("direct", "link-direct"),
@@ -1106,6 +1442,34 @@ fn member_row(lang: ReadSignal<Language>, member: MemberUi) -> impl IntoView {
                     LinkUi::Connecting => t(lang.get(), "link_connecting").to_string(),
                 }}
             </span>
+            {dm_target.map(|pubkey| {
+                let unread_key = pubkey.clone();
+                view! {
+                    <button
+                        class="btn btn-sm btn-secondary dm-btn"
+                        title=move || t(lang.get(), "title_dm")
+                        on:click=move |_| on_dm(pubkey.clone())
+                    >
+                        "✉️"
+                        {move || {
+                            let n = dm_unread.with(|u| u.get(&unread_key).copied().unwrap_or(0));
+                            (n > 0).then(|| view! { <span class="dm-unread">{n}</span> })
+                        }}
+                    </button>
+                }
+            })}
+            {move || (kickable && am_admin.get()).then(|| {
+                let (pubkey, name) = kick_target.clone();
+                view! {
+                    <button
+                        class="btn btn-sm btn-danger kick-btn"
+                        title=move || t(lang.get(), "title_kick")
+                        on:click=move |_| on_kick(pubkey.clone(), name.clone())
+                    >
+                        {move || t(lang.get(), "btn_kick")}
+                    </button>
+                }
+            })}
         </li>
     }
 }

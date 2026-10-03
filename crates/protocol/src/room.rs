@@ -2,6 +2,7 @@
 //! gossip routing, cap eviction and room parameters. Pure Rust, no browser APIs.
 
 use crate::fragment::FragmentParams;
+use crate::messages::{RoomBody, RoomEnvelope};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 pub const DEFAULT_MEMBER_CAP: usize = 25;
@@ -194,6 +195,115 @@ impl GossipDedup {
     }
 }
 
+/// The reactions members can add to a message.
+pub const REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🎉"];
+
+/// Who reacted with what to each message. Each member's latest toggle per
+/// (message, emoji) wins, so reordered gossip converges.
+#[derive(Debug, Default)]
+pub struct Reactions {
+    toggles: HashMap<(String, String), HashMap<String, (u64, bool)>>,
+}
+
+impl Reactions {
+    /// Apply `author`'s toggle; returns whether the tally of `target` may have changed.
+    /// Only the fixed `REACTIONS` set is accepted.
+    pub fn apply(&mut self, target: &str, emoji: &str, author: &str, ts: u64, on: bool) -> bool {
+        if !REACTIONS.contains(&emoji) {
+            return false;
+        }
+        let entry = self.toggles.entry((target.to_string(), emoji.to_string())).or_default();
+        match entry.get(author) {
+            Some((known_ts, _)) if *known_ts > ts => false,
+            _ => {
+                entry.insert(author.to_string(), (ts, on));
+                true
+            }
+        }
+    }
+
+    pub fn has(&self, target: &str, emoji: &str, author: &str) -> bool {
+        self.toggles
+            .get(&(target.to_string(), emoji.to_string()))
+            .and_then(|by| by.get(author))
+            .is_some_and(|(_, on)| *on)
+    }
+
+    /// `(emoji, reactors)` for `target`, in `REACTIONS` order, skipping empty ones.
+    pub fn tally(&self, target: &str) -> Vec<(String, Vec<String>)> {
+        REACTIONS
+            .iter()
+            .filter_map(|emoji| {
+                let by = self.toggles.get(&(target.to_string(), emoji.to_string()))?;
+                let mut who: Vec<String> = by.iter().filter(|(_, (_, on))| *on).map(|(a, _)| a.clone()).collect();
+                who.sort();
+                (!who.is_empty()).then(|| (emoji.to_string(), who))
+            })
+            .collect()
+    }
+}
+
+/// Whether `text` @-mentions `name`: case-insensitive `@name`, not glued to a letter or
+/// digit on either side, so "@Ana" matches "@ana," but not "@Anabel" or "x@ana.example".
+pub fn mentions(text: &str, name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
+    }
+    let text = text.to_lowercase();
+    let needle = format!("@{}", name.to_lowercase());
+    text.match_indices(&needle).any(|(i, m)| {
+        let before_ok = text[..i].chars().next_back().map_or(true, |c| !c.is_alphanumeric());
+        let after_ok = text[i + m.len()..].chars().next().map_or(true, |c| !c.is_alphanumeric());
+        before_ok && after_ok
+    })
+}
+
+/// How many recent messages a member keeps for late joiners when history is on.
+pub const HISTORY_LIMIT: usize = 200;
+
+/// Recent shareable chat messages, kept as signed originals so a late joiner can verify
+/// each one against its author. RAM only.
+#[derive(Debug)]
+pub struct HistoryBuffer {
+    limit: usize,
+    entries: VecDeque<RoomEnvelope>,
+}
+
+impl HistoryBuffer {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            entries: VecDeque::new(),
+        }
+    }
+
+    /// Keep `envelope` if it is a chat message its author marked shareable.
+    pub fn record(&mut self, envelope: &RoomEnvelope) -> bool {
+        if !matches!(envelope.body, RoomBody::Chat { shareable: true, .. })
+            || self.entries.iter().any(|e| e.id == envelope.id)
+        {
+            return false;
+        }
+        if self.entries.len() >= self.limit {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(envelope.clone());
+        true
+    }
+
+    /// Forget a message (e.g. deleted by its author).
+    pub fn remove(&mut self, id: &str) {
+        self.entries.retain(|e| e.id != id);
+    }
+
+    /// Oldest first, in batches small enough for one data-channel message.
+    pub fn batches(&self, batch_size: usize) -> Vec<Vec<RoomEnvelope>> {
+        let all: Vec<RoomEnvelope> = self.entries.iter().cloned().collect();
+        all.chunks(batch_size.max(1)).map(|c| c.to_vec()).collect()
+    }
+}
+
 /// At most this many uploads run at once per author; further requests wait in line.
 pub const MAX_CONCURRENT_UPLOADS: usize = 2;
 
@@ -316,6 +426,8 @@ pub struct RoomParams {
     pub voice_cap: Option<usize>,
     /// How many lounge members may send video (camera or screen) at once (`maxv`).
     pub video_cap: Option<usize>,
+    /// Late joiners may see recent shareable messages (`hist=1`).
+    pub history: bool,
     /// TURN server URLs (`turn`, comma-separated) and credentials.
     pub turn_urls: Vec<String>,
     pub turn_user: Option<String>,
@@ -331,6 +443,7 @@ impl RoomParams {
             member_cap: parse_cap(params.get("max"), DEFAULT_MEMBER_CAP),
             voice_cap: parse_cap(params.get("maxa"), DEFAULT_VOICE_CAP),
             video_cap: parse_cap(params.get("maxv"), DEFAULT_VIDEO_CAP),
+            history: params.get("hist") == Some("1"),
             turn_urls: params
                 .get("turn")
                 .map(|v| {
@@ -525,6 +638,64 @@ mod tests {
         assert_eq!(q.counts("f"), (0, 0));
     }
 
+    fn chat(key: &crate::nostr::NostrBurnerKey, text: &str, shareable: bool) -> RoomEnvelope {
+        RoomEnvelope::sign(key, 1, RoomBody::Chat { text: text.into(), shareable }).unwrap()
+    }
+
+    #[test]
+    fn test_history_buffer_keeps_only_shareable_and_is_bounded() {
+        let key = crate::nostr::NostrBurnerKey::generate().unwrap();
+        let mut history = HistoryBuffer::new(3);
+        let private = chat(&key, "private", false);
+        assert!(!history.record(&private));
+        let leave = RoomEnvelope::sign(&key, 1, RoomBody::Leave).unwrap();
+        assert!(!history.record(&leave));
+
+        let msgs: Vec<RoomEnvelope> = (0..4).map(|i| chat(&key, &format!("m{i}"), true)).collect();
+        for m in &msgs {
+            assert!(history.record(m));
+        }
+        assert!(!history.record(&msgs[3]), "duplicates are ignored");
+        let kept: Vec<String> = history.batches(10).concat().into_iter().map(|e| e.id).collect();
+        assert_eq!(kept, vec![msgs[1].id.clone(), msgs[2].id.clone(), msgs[3].id.clone()]);
+
+        history.remove(&msgs[2].id);
+        let batches = history.batches(1);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0][0].id, msgs[1].id);
+    }
+
+    #[test]
+    fn test_reactions_latest_toggle_wins() {
+        let mut r = Reactions::default();
+        assert!(r.apply("m1", "👍", "ana", 10, true));
+        assert!(r.apply("m1", "👍", "bo", 11, true));
+        assert!(r.apply("m1", "🎉", "bo", 12, true));
+        assert!(!r.apply("m1", "💩", "bo", 13, true), "only the fixed set");
+        assert_eq!(r.tally("m1"), vec![
+            ("👍".to_string(), vec!["ana".to_string(), "bo".to_string()]),
+            ("🎉".to_string(), vec!["bo".to_string()]),
+        ]);
+        // An older toggle arriving late does not undo a newer one.
+        assert!(r.apply("m1", "👍", "ana", 20, false));
+        assert!(!r.apply("m1", "👍", "ana", 15, true));
+        assert!(!r.has("m1", "👍", "ana"));
+        assert!(r.has("m1", "👍", "bo"));
+        assert!(r.tally("other").is_empty());
+    }
+
+    #[test]
+    fn test_mentions() {
+        assert!(mentions("hey @Ana, look", "Ana"));
+        assert!(mentions("@teal otter you there?", "Teal Otter"));
+        assert!(mentions("ping @ana", "Ana"));
+        assert!(!mentions("hey @Anabel", "Ana"));
+        assert!(!mentions("hey Ana", "Ana"));
+        assert!(!mentions("email ana@example.com", "example"), "an email address is not a mention");
+        assert!(mentions("(@Ana)", "Ana"));
+        assert!(!mentions("hi @", ""));
+    }
+
     #[test]
     fn test_gossip_dedup_is_bounded() {
         let mut dedup = GossipDedup::new(2);
@@ -558,6 +729,8 @@ mod tests {
         assert_eq!(params.admin_pubkey.as_deref(), Some("pub"));
         assert_eq!(params.admin_secret.as_deref(), Some("sec"));
         assert_eq!(params.member_cap, Some(3));
+        assert!(!params.history);
+        assert!(RoomParams::from_fragment(&FragmentParams::parse("#room=r&hist=1")).history);
         assert_eq!(params.voice_cap, Some(2));
         assert_eq!(params.video_cap, None);
         assert_eq!(params.turn_urls, vec!["turn:a.example:3478", "turns:b.example"]);

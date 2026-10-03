@@ -389,7 +389,7 @@ impl RoomSession {
             is_self,
             text: caption.clone().unwrap_or_default(),
             time: current_time_string(),
-            notice: None,
+            ts: envelope.ts,
             file: Some(FileOfferInfo {
                 file_id: file_id.clone(),
                 name: name.clone(),
@@ -397,6 +397,7 @@ impl RoomSession {
                 mime_type: mime_type.clone(),
                 status,
             }),
+            ..Default::default()
         });
     }
 
@@ -473,6 +474,7 @@ impl RoomSession {
                 if let Some(file) = msg.file.as_mut().filter(|f| theirs.contains(&f.file_id)) {
                     if matches!(file.status, FileTransferStatus::Offered | FileTransferStatus::Queued { .. }) {
                         file.status = FileTransferStatus::SenderLeft;
+                        msg.rev += 1;
                     }
                 }
             }
@@ -481,10 +483,13 @@ impl RoomSession {
 
     fn set_file_status(&self, file_id: &str, status: FileTransferStatus) {
         self.inner.signals.messages.update(|msgs| {
-            if let Some(file) = msgs.iter_mut().find(|m| m.id == file_id).and_then(|m| m.file.as_mut()) {
-                // A finished transfer stays finished.
-                if !matches!(file.status, FileTransferStatus::Completed) || matches!(status, FileTransferStatus::Sharing { .. }) {
-                    file.status = status;
+            if let Some(msg) = msgs.iter_mut().find(|m| m.id == file_id) {
+                if let Some(file) = msg.file.as_mut() {
+                    // A finished transfer stays finished.
+                    if !matches!(file.status, FileTransferStatus::Completed) || matches!(status, FileTransferStatus::Sharing { .. }) {
+                        file.status = status;
+                        msg.rev += 1;
+                    }
                 }
             }
         });

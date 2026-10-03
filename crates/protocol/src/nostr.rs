@@ -1,4 +1,6 @@
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::schnorr::{Signature, SigningKey, VerifyingKey};
+use k256::ProjectivePoint;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -237,6 +239,28 @@ impl NostrBurnerKey {
         hex::encode(self.signing_key.to_bytes())
     }
 
+    /// 32-byte key shared with the holder of `peer_pubkey_hex` (x-only): ECDH on secp256k1
+    /// (both sides use their even-Y BIP-340 keys, so either side derives the same point),
+    /// then SHA-256 over a domain tag, the shared X and both pubkeys in sorted order.
+    pub fn shared_key(&self, peer_pubkey_hex: &str) -> Result<[u8; 32], NostrError> {
+        let peer = VerifyingKey::from_bytes(&hex::decode(peer_pubkey_hex)?)
+            .map_err(|e| NostrError::Crypto(format!("Invalid peer key: {e}")))?;
+        let shared = (ProjectivePoint::from(*peer.as_affine()) * **self.signing_key.as_nonzero_scalar()).to_affine();
+        let encoded = shared.to_encoded_point(false);
+        let x = encoded.x().ok_or_else(|| NostrError::Crypto("Shared point at infinity".into()))?;
+        let (a, b) = if self.pubkey_hex.as_str() <= peer_pubkey_hex {
+            (self.pubkey_hex.as_str(), peer_pubkey_hex)
+        } else {
+            (peer_pubkey_hex, self.pubkey_hex.as_str())
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(b"dchat:ecdh:");
+        hasher.update(x);
+        hasher.update(a.as_bytes());
+        hasher.update(b.as_bytes());
+        Ok(hasher.finalize().into())
+    }
+
     /// BIP-340 sign an arbitrary dchat message (domain-separated, see `message_digest`).
     pub fn sign_message(&self, msg: &[u8]) -> Result<String, NostrError> {
         Ok(hex::encode(self.sign_raw_32(&message_digest(msg))?.to_bytes()))
@@ -430,6 +454,20 @@ mod tests {
         assert!(!verify_message(other.pubkey(), b"hello room", &sig));
         assert!(!verify_message("zz", b"hello room", &sig));
         assert!(!verify_message(key.pubkey(), b"hello room", "00"));
+    }
+
+    #[test]
+    fn test_shared_key_is_symmetric_and_pairwise() {
+        let a = NostrBurnerKey::generate().unwrap();
+        let b = NostrBurnerKey::generate().unwrap();
+        let c = NostrBurnerKey::generate().unwrap();
+        let ab = a.shared_key(b.pubkey()).unwrap();
+        assert_eq!(ab, b.shared_key(a.pubkey()).unwrap());
+        assert_ne!(ab, a.shared_key(c.pubkey()).unwrap());
+        assert_ne!(ab, c.shared_key(b.pubkey()).unwrap());
+        assert!(a.shared_key("zz").is_err());
+        // Sealing to oneself also works (an admin includes its own grant).
+        assert_eq!(a.shared_key(a.pubkey()).unwrap(), a.shared_key(a.pubkey()).unwrap());
     }
 
     #[test]
