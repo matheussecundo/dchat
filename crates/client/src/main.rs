@@ -1,4 +1,5 @@
 mod i18n;
+mod media;
 mod mesh;
 mod names;
 mod nostr_pool;
@@ -9,14 +10,14 @@ mod state;
 use i18n::{detect_browser_language, t, t_replace_1, update_document_direction, Language};
 use leptos::*;
 use names::{pubkey_tag, random_name, sanitize_name, MAX_NAME_CHARS};
-use protocol::{parse_cap, DEFAULT_MEMBER_CAP};
+use protocol::{parse_cap, VideoKind, DEFAULT_MEMBER_CAP, DEFAULT_VIDEO_CAP, DEFAULT_VOICE_CAP};
 use qr::generate_qr_svg;
 use session::{RoomSession, SessionSignals};
 use state::{
-    admin_url, create_room, invite_url, read_credentials, ChatMessageUi, ConnectionStatus, LinkUi,
-    MemberUi, Notice,
+    admin_url, create_room, invite_url, read_credentials, AudioSettings, ChatMessageUi,
+    ConnectionStatus, LinkUi, LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RoomCaps,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use web_sys::{window, HtmlInputElement};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +42,8 @@ fn App() -> impl IntoView {
     let (screen, set_screen) = create_signal(initial_screen);
     let (name_input, set_name_input) = create_signal(random_name());
     let (cap_input, set_cap_input) = create_signal(DEFAULT_MEMBER_CAP.to_string());
+    let (voice_cap_input, set_voice_cap_input) = create_signal(DEFAULT_VOICE_CAP.to_string());
+    let (video_cap_input, set_video_cap_input) = create_signal(DEFAULT_VIDEO_CAP.to_string());
 
     let (status, set_status) = create_signal(ConnectionStatus::Idle);
     let (messages, set_messages) = create_signal(Vec::<ChatMessageUi>::new());
@@ -54,7 +57,15 @@ fn App() -> impl IntoView {
     let (show_members, set_show_members) = create_signal(false);
     let (copied, set_copied) = create_signal(false);
     let (room_id_sig, set_room_id_sig) = create_signal(String::new());
-    let (toast, set_toast) = create_signal(Option::<String>::None);
+    let (toast, set_toast) = create_signal(Option::<&'static str>::None);
+
+    // Voice lounge
+    let (lounge, set_lounge) = create_signal(Vec::<LoungeMemberUi>::new());
+    let (my_voice, set_my_voice) = create_signal(MyVoiceUi::default());
+    let (speaking, set_speaking) = create_signal(HashSet::<String>::new());
+    let (voice_prompt, set_voice_prompt) = create_signal(Option::<String>::None);
+    let (audio_settings, set_audio_settings) = create_signal(AudioSettings::default());
+    let (show_audio_settings, set_show_audio_settings) = create_signal(false);
 
     let session_ref = store_value(None::<RoomSession>);
 
@@ -69,6 +80,11 @@ fn App() -> impl IntoView {
             names: set_names,
             room_full: set_room_full,
             connected_relays: set_connected_relays,
+            lounge: set_lounge,
+            my_voice: set_my_voice,
+            speaking: set_speaking,
+            voice_prompt: set_voice_prompt,
+            toast: set_toast,
         };
         set_room_id_sig.set(room_id.clone());
         let name = sanitize_name(&name_input.get_untracked());
@@ -82,8 +98,12 @@ fn App() -> impl IntoView {
     };
 
     let create_and_enter = move || {
-        let cap = parse_cap(Some(&cap_input.get_untracked()), DEFAULT_MEMBER_CAP);
-        match create_room(cap) {
+        let caps = RoomCaps {
+            members: parse_cap(Some(&cap_input.get_untracked()), DEFAULT_MEMBER_CAP),
+            voice: parse_cap(Some(&voice_cap_input.get_untracked()), DEFAULT_VOICE_CAP),
+            video: parse_cap(Some(&video_cap_input.get_untracked()), DEFAULT_VIDEO_CAP),
+        };
+        match create_room(caps) {
             Ok(()) => enter_room(),
             Err(err) => set_status.set(ConnectionStatus::Error(err)),
         }
@@ -125,7 +145,7 @@ fn App() -> impl IntoView {
     let copy_admin_link = move |_| {
         if let Some(url) = admin_url() {
             write_clipboard(&url);
-            set_toast.set(Some(t(lang.get_untracked(), "toast_admin_copied").to_string()));
+            set_toast.set(Some("toast_admin_copied"));
         }
     };
 
@@ -139,6 +159,70 @@ fn App() -> impl IntoView {
             let _ = win.location().set_href("/");
         }
     };
+
+    let with_session = move |f: &dyn Fn(&RoomSession)| {
+        session_ref.with_value(|session| {
+            if let Some(session) = session {
+                f(session);
+            }
+        });
+    };
+    let join_voice = move |_| {
+        set_voice_prompt.set(None);
+        with_session(&|s| s.join_voice());
+    };
+    let apply_audio_settings = move |settings: AudioSettings| {
+        set_audio_settings.set(settings);
+        with_session(&|s| s.set_audio_settings(settings));
+    };
+    let open_audio_settings = move |_| {
+        // The modal lives outside the video grid, so it would be hidden in fullscreen.
+        if let Some(doc) = window().and_then(|w| w.document()) {
+            if doc.fullscreen_element().is_some() {
+                doc.exit_fullscreen();
+            }
+        }
+        set_show_audio_settings.set(true);
+    };
+    let enter_fullscreen = move |_| {
+        if let Some(el) = window().and_then(|w| w.document()).and_then(|d| d.get_element_by_id("video-grid")) {
+            let _ = el.request_fullscreen();
+        }
+    };
+    let voice_cap = move || session_ref.with_value(|s| s.as_ref().and_then(|s| s.voice_cap()));
+    let video_cap = move || session_ref.with_value(|s| s.as_ref().and_then(|s| s.video_cap()));
+    let voice_full = move || {
+        !my_voice.get().in_voice && voice_cap().is_some_and(|cap| lounge.with(|l| l.len()) >= cap)
+    };
+    let video_full = move || {
+        video_cap().is_some_and(|cap| {
+            lounge.with(|l| l.iter().filter(|m| !m.is_self && m.video != VideoKind::None).count()) >= cap
+        })
+    };
+    let video_members = move || {
+        lounge.with(|l| l.iter().filter(|m| m.video != VideoKind::None).cloned().collect::<Vec<_>>())
+    };
+    let show_video_grid = create_memo(move |_| {
+        my_voice.get().in_voice && lounge.with(|l| l.iter().any(|m| m.video != VideoKind::None))
+    });
+    // Video elements are recreated when the grid appears: point them at their streams.
+    create_effect(move |_| {
+        if show_video_grid.get() {
+            with_session(&|s| s.attach_lounge_media());
+        }
+    });
+    create_effect(move |_| {
+        if let Some(name) = voice_prompt.get() {
+            set_timeout(
+                move || {
+                    if voice_prompt.get_untracked().as_deref() == Some(name.as_str()) {
+                        set_voice_prompt.set(None);
+                    }
+                },
+                std::time::Duration::from_secs(10),
+            );
+        }
+    });
 
     let is_connected = move || status.get() == ConnectionStatus::Connected;
     let display_name = move |pubkey: &str| {
@@ -161,7 +245,13 @@ fn App() -> impl IntoView {
 
     let create_view = move || {
         let cap_is_large = move || {
-            parse_cap(Some(&cap_input.get()), DEFAULT_MEMBER_CAP).map_or(true, |cap| cap > DEFAULT_MEMBER_CAP)
+            [
+                (cap_input.get(), DEFAULT_MEMBER_CAP),
+                (voice_cap_input.get(), DEFAULT_VOICE_CAP),
+                (video_cap_input.get(), DEFAULT_VIDEO_CAP),
+            ]
+            .iter()
+            .any(|(input, default)| parse_cap(Some(input), *default).map_or(true, |cap| cap > *default))
         };
         view! {
             <div class="lobby">
@@ -178,6 +268,30 @@ fn App() -> impl IntoView {
                         prop:value=move || cap_input.get()
                         on:input=move |ev| set_cap_input.set(event_target_value(&ev))
                     />
+                    <div class="lobby-row">
+                        <div class="lobby-field">
+                            <label class="lobby-label" for="voice-cap-input">{move || t(lang.get(), "voice_cap_label")}</label>
+                            <input
+                                id="voice-cap-input"
+                                class="lobby-input"
+                                type="number"
+                                min="0"
+                                prop:value=move || voice_cap_input.get()
+                                on:input=move |ev| set_voice_cap_input.set(event_target_value(&ev))
+                            />
+                        </div>
+                        <div class="lobby-field">
+                            <label class="lobby-label" for="video-cap-input">{move || t(lang.get(), "video_cap_label")}</label>
+                            <input
+                                id="video-cap-input"
+                                class="lobby-input"
+                                type="number"
+                                min="0"
+                                prop:value=move || video_cap_input.get()
+                                on:input=move |ev| set_video_cap_input.set(event_target_value(&ev))
+                            />
+                        </div>
+                    </div>
                     {move || cap_is_large().then(|| view! {
                         <p class="lobby-warning">{move || t(lang.get(), "cap_warning")}</p>
                     })}
@@ -297,6 +411,137 @@ fn App() -> impl IntoView {
                 </div>
             </div>
 
+            <div class="lounge-bar">
+                <div class="lounge-info">
+                    <span class="lounge-title">{move || format!("🔊 {}", t(lang.get(), "voice_title"))}</span>
+                    <span class="lounge-count">{move || {
+                        let n = lounge.with(|l| l.len());
+                        match voice_cap() {
+                            Some(cap) => format!("{n}/{cap}"),
+                            None => n.to_string(),
+                        }
+                    }}</span>
+                    <div class="voice-chips">
+                        <For
+                            each=move || lounge.get()
+                            key=|m| m.clone()
+                            children=move |m| voice_chip(lang, m, speaking)
+                        />
+                        {move || lounge.with(|l| l.is_empty()).then(|| view! {
+                            <span class="voice-empty">{move || t(lang.get(), "voice_empty")}</span>
+                        })}
+                    </div>
+                </div>
+                <div class="lounge-controls">
+                    {move || {
+                        let mine = my_voice.get();
+                        if !mine.in_voice {
+                            return view! {
+                                <button
+                                    id="join-voice-btn"
+                                    class="btn btn-call"
+                                    disabled=move || my_voice.get().joining || voice_full() || !is_connected()
+                                    on:click=join_voice
+                                >
+                                    {move || if voice_full() { t(lang.get(), "voice_full") } else { t(lang.get(), "btn_join_voice") }}
+                                </button>
+                            }.into_view();
+                        }
+                        view! {
+                            <button
+                                id="mic-btn"
+                                class=if mine.mic_muted { "btn btn-mute muted" } else { "btn btn-mute" }
+                                on:click=move |_| with_session(&|s| s.toggle_mic())
+                                title=move || t(lang.get(), "title_mute_mic")
+                            >
+                                {if mine.mic_muted { "🔇" } else { "🎙️" }}
+                            </button>
+                            <button
+                                id="speaker-btn"
+                                class=if mine.speaker_muted { "btn btn-mute muted" } else { "btn btn-mute" }
+                                on:click=move |_| with_session(&|s| s.toggle_speaker())
+                                title=move || t(lang.get(), "title_mute_speaker")
+                            >
+                                {if mine.speaker_muted { "🔈" } else { "🔊" }}
+                            </button>
+                            <button
+                                id="camera-btn"
+                                class=if mine.video == VideoKind::Camera { "btn btn-mute active" } else { "btn btn-mute" }
+                                disabled=move || mine.video == VideoKind::None && video_full()
+                                on:click=move |_| with_session(&|s| s.toggle_camera())
+                                title=move || if mine.video == VideoKind::None && video_full() { t(lang.get(), "video_full_title") } else { t(lang.get(), "title_camera") }
+                            >
+                                "📹"
+                            </button>
+                            {(mine.video == VideoKind::Camera).then(|| view! {
+                                <button
+                                    id="flip-camera-btn"
+                                    class="btn btn-secondary"
+                                    on:click=move |_| with_session(&|s| s.flip_camera())
+                                    title=move || t(lang.get(), "title_flip_camera")
+                                >
+                                    "🔄"
+                                </button>
+                            })}
+                            <button
+                                id="screen-btn"
+                                class=if mine.video == VideoKind::Screen { "btn btn-mute active" } else { "btn btn-mute" }
+                                disabled=move || mine.video == VideoKind::None && video_full()
+                                on:click=move |_| with_session(&|s| s.toggle_screen())
+                                title=move || if mine.video == VideoKind::Screen { t(lang.get(), "title_stop_screen") } else { t(lang.get(), "title_screen_share") }
+                            >
+                                "🖥️"
+                            </button>
+                            <button
+                                id="leave-voice-btn"
+                                class="btn btn-danger"
+                                on:click=move |_| with_session(&|s| s.leave_voice())
+                                title=move || t(lang.get(), "title_leave_voice")
+                            >
+                                {move || t(lang.get(), "btn_leave_voice")}
+                            </button>
+                        }.into_view()
+                    }}
+                    <button
+                        id="audio-settings-btn"
+                        class="btn btn-secondary"
+                        on:click=open_audio_settings
+                        title=move || t(lang.get(), "btn_audio_settings_title")
+                    >
+                        "⚙️"
+                    </button>
+                </div>
+            </div>
+
+            {move || voice_prompt.get().filter(|_| !my_voice.get().in_voice).map(|name| view! {
+                <div id="voice-prompt" class="voice-prompt">
+                    <span>{move || t_replace_1(lang.get(), "voice_joined_prompt", "{name}", &name)}</span>
+                    <button id="voice-prompt-join" class="btn btn-call btn-sm" on:click=join_voice>
+                        {move || t(lang.get(), "btn_join")}
+                    </button>
+                    <button
+                        class="btn btn-secondary btn-sm"
+                        title=move || t(lang.get(), "title_dismiss")
+                        on:click=move |_| set_voice_prompt.set(None)
+                    >
+                        "✕"
+                    </button>
+                </div>
+            })}
+
+            {move || show_video_grid.get().then(|| view! {
+                <div id="video-grid" class="video-grid">
+                    <For
+                        each=video_members
+                        key=|m| (m.pubkey.clone(), m.video)
+                        children=move |m| video_tile(lang, m, lounge, speaking)
+                    />
+                    <button class="btn btn-secondary grid-fullscreen" on:click=enter_fullscreen title=move || t(lang.get(), "title_fullscreen")>
+                        "⛶"
+                    </button>
+                </div>
+            })}
+
             <div class="room-body">
                 <main class="chat-container">
                     {move || {
@@ -307,6 +552,8 @@ fn App() -> impl IntoView {
                                     <p>{move || t(lang.get(), "empty_desc")}</p>
                                     <div class="security-checklist">
                                         <li>{move || t(lang.get(), "check_e2ee")}</li>
+                                        <li>{move || t(lang.get(), "check_audio")}</li>
+                                        <li>{move || t(lang.get(), "check_video")}</li>
                                         <li>{move || t(lang.get(), "check_zk")}</li>
                                         <li>{move || t(lang.get(), "check_zero_storage")}</li>
                                         <li>{move || t(lang.get(), "check_destruction")}</li>
@@ -371,7 +618,8 @@ fn App() -> impl IntoView {
     };
 
     view! {
-        <div id="app">
+        // Any tap can unlock remote audio the browser held back for lack of a gesture.
+        <div id="app" on:click=move |_| media::resume_remote_audio()>
             <header>
                 <div class="brand">
                     <span>"🔒 dchat"</span>
@@ -465,11 +713,138 @@ fn App() -> impl IntoView {
                 }
             })}
 
-            {move || toast.get().map(|msg| {
+            // Audio settings modal
+            {move || show_audio_settings.get().then(|| {
+                let (ns_supported, ec_supported, agc_supported) = media::supported_audio_constraints();
+                view! {
+                    <div class="modal-backdrop" on:click=move |_| set_show_audio_settings.set(false)>
+                        <div class="modal-content audio-settings-modal" on:click=|ev| ev.stop_propagation()>
+                            <div class="modal-title-row">
+                                <h3>{move || t(lang.get(), "audio_settings_title")}</h3>
+                                <button class="btn btn-secondary" on:click=move |_| set_show_audio_settings.set(false)>"✕"</button>
+                            </div>
+                            <div class="audio-options">
+                                {audio_option_row(
+                                    lang,
+                                    "audio-ns",
+                                    "opt_noise_suppression",
+                                    ns_supported,
+                                    Signal::derive(move || audio_settings.get().noise_suppression),
+                                    move |on| apply_audio_settings(AudioSettings { noise_suppression: on, ..audio_settings.get_untracked() }),
+                                )}
+                                {audio_option_row(
+                                    lang,
+                                    "audio-ec",
+                                    "opt_echo_cancellation",
+                                    ec_supported,
+                                    Signal::derive(move || audio_settings.get().echo_cancellation),
+                                    move |on| apply_audio_settings(AudioSettings { echo_cancellation: on, ..audio_settings.get_untracked() }),
+                                )}
+                                {audio_option_row(
+                                    lang,
+                                    "audio-agc",
+                                    "opt_auto_gain_control",
+                                    agc_supported,
+                                    Signal::derive(move || audio_settings.get().auto_gain_control),
+                                    move |on| apply_audio_settings(AudioSettings { auto_gain_control: on, ..audio_settings.get_untracked() }),
+                                )}
+                            </div>
+                            <button class="btn btn-primary" style="width: 100%;" on:click=move |_| set_show_audio_settings.set(false)>
+                                {move || t(lang.get(), "qr_close")}
+                            </button>
+                        </div>
+                    </div>
+                }
+            })}
+
+            {move || toast.get().map(|key| {
                 set_timeout(move || set_toast.set(None), std::time::Duration::from_secs(3));
-                view! { <div class="toast">{msg}</div> }
+                view! { <div class="toast">{move || t(lang.get(), key)}</div> }
             })}
         </div>
+    }
+}
+
+/// A lounge member chip: name, mic/video state, speaking highlight, media reachability.
+fn voice_chip(lang: ReadSignal<Language>, member: LoungeMemberUi, speaking: ReadSignal<HashSet<String>>) -> impl IntoView {
+    let pubkey = member.pubkey.clone();
+    let video = match member.video {
+        VideoKind::None => "none",
+        VideoKind::Camera => "camera",
+        VideoKind::Screen => "screen",
+    };
+    view! {
+        <span
+            class="voice-chip"
+            class:self-chip=member.is_self
+            data-pubkey=member.pubkey.clone()
+            data-mic=if member.mic_muted { "off" } else { "on" }
+            data-video=video
+            data-speaking=move || speaking.with(|s| s.contains(&pubkey)).to_string()
+        >
+            <span class="voice-chip-name" dir="auto">{member.name}</span>
+            {member.mic_muted.then(|| "🔇")}
+            {match member.video {
+                VideoKind::Camera => Some("📹"),
+                VideoKind::Screen => Some("🖥️"),
+                VideoKind::None => None,
+            }}
+            {(!member.has_media_link).then(|| view! {
+                <span class="voice-chip-warn" title=move || t(lang.get(), "no_direct_media")>"⚠"</span>
+            })}
+        </span>
+    }
+}
+
+/// A video tile in the lounge grid; the session attaches the stream by element id.
+fn video_tile(
+    lang: ReadSignal<Language>,
+    member: LoungeMemberUi,
+    lounge: ReadSignal<Vec<LoungeMemberUi>>,
+    speaking: ReadSignal<HashSet<String>>,
+) -> impl IntoView {
+    let pk_speaking = member.pubkey.clone();
+    let pk_mic = member.pubkey.clone();
+    let is_self = member.is_self;
+    view! {
+        <div
+            class="tile"
+            class:speaking=move || speaking.with(|s| s.contains(&pk_speaking))
+            data-pubkey=member.pubkey.clone()
+        >
+            <video id=format!("tile-video-{}", member.pubkey) autoplay playsinline muted></video>
+            <span class="tile-label">
+                <span dir="auto">{member.name}</span>
+                {move || is_self.then(|| format!(" {}", t(lang.get(), "you_suffix")))}
+                {move || lounge.with(|l| l.iter().any(|m| m.pubkey == pk_mic && m.mic_muted)).then(|| " 🔇")}
+            </span>
+        </div>
+    }
+}
+
+/// One mic-processing checkbox; disabled with a hint when the browser lacks the switch.
+fn audio_option_row(
+    lang: ReadSignal<Language>,
+    id: &'static str,
+    label_key: &'static str,
+    supported: bool,
+    checked: Signal<bool>,
+    on_toggle: impl Fn(bool) + 'static,
+) -> impl IntoView {
+    view! {
+        <label class=if supported { "audio-option" } else { "audio-option disabled" } for=id>
+            <input
+                type="checkbox"
+                id=id
+                prop:checked=move || checked.get()
+                prop:disabled=!supported
+                on:change=move |ev| on_toggle(event_target_checked(&ev))
+            />
+            <span>{move || t(lang.get(), label_key)}</span>
+            {(!supported).then(|| view! {
+                <span class="audio-option-hint">{move || t(lang.get(), "opt_not_supported")}</span>
+            })}
+        </label>
     }
 }
 

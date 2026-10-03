@@ -77,4 +77,10 @@ features = [
   "RtcDataChannelType",
   "RtcSignalingState",
   "EventTarget",
+  "AudioContext",
+  "BaseAudioContext",
+  "AudioNode",
+  "AnalyserNode",
+  "MediaStreamAudioSourceNode",
+  "NodeList",
 ]

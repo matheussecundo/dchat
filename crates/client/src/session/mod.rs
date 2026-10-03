@@ -2,13 +2,16 @@
 //! for room messages, and the roster that drives the member list and caps.
 //! Everything lives in RAM and is gone on reload.
 
+mod lounge;
+
 use crate::mesh::{LinkEvent, LinkEventHandler, PeerLink};
 use crate::names::pubkey_tag;
 use crate::nostr_pool::NostrRelayPool;
 use crate::state::{
     current_fragment, current_time_string, get_default_relays, ChatMessageUi, ConnectionStatus,
-    LinkUi, MemberUi, Notice,
+    LinkUi, LoungeMemberUi, MemberUi, MyVoiceUi, Notice,
 };
+use lounge::{Lounge, VoiceInfo};
 use leptos::*;
 use protocol::crypto::{decrypt_json, encrypt_json};
 use protocol::{
@@ -45,6 +48,15 @@ pub struct SessionSignals {
     pub names: WriteSignal<HashMap<String, String>>,
     pub room_full: WriteSignal<bool>,
     pub connected_relays: WriteSignal<usize>,
+    /// Members holding a voice seat, in seat order.
+    pub lounge: WriteSignal<Vec<LoungeMemberUi>>,
+    pub my_voice: WriteSignal<MyVoiceUi>,
+    /// Pubkeys currently heard speaking.
+    pub speaking: WriteSignal<HashSet<String>>,
+    /// Name of a member who just joined voice while we are out of it.
+    pub voice_prompt: WriteSignal<Option<String>>,
+    /// i18n key of a transient notice.
+    pub toast: WriteSignal<Option<&'static str>>,
 }
 
 #[derive(Clone)]
@@ -81,6 +93,7 @@ struct Inner {
     relays_connected: Cell<usize>,
     last_presence_echo: Cell<f64>,
     closed: Cell<bool>,
+    lounge: Lounge,
 }
 
 impl RoomSession {
@@ -127,6 +140,7 @@ impl RoomSession {
                 relays_connected: Cell::new(0),
                 last_presence_echo: Cell::new(0.0),
                 closed: Cell::new(false),
+                lounge: Lounge::default(),
             }),
         };
 
@@ -181,6 +195,7 @@ impl RoomSession {
         if self.inner.closed.get() {
             return;
         }
+        self.close_lounge();
         if let Some(pool) = self.pool() {
             pool.broadcast_signal(&SignalPayload::PeerLeft);
         }
@@ -290,6 +305,7 @@ impl RoomSession {
             }
             LinkEvent::Closed => self.drop_link(remote, true),
             LinkEvent::Message(text) => self.on_frame(remote, &text),
+            LinkEvent::Track(track, stream) => self.on_remote_track(remote, track, stream),
         }
     }
 
@@ -298,6 +314,7 @@ impl RoomSession {
             return;
         };
         link.close();
+        self.forget_member_media(remote, false);
         if failed {
             self.inner
                 .retry_after
@@ -355,7 +372,8 @@ impl RoomSession {
         };
         let hellos = self.inner.hellos.borrow();
         let reports = self.inner.link_reports.borrow();
-        for envelope in hellos.values().chain(reports.values()) {
+        let voices = self.inner.lounge.envelopes.borrow();
+        for envelope in hellos.values().chain(reports.values()).chain(voices.values()) {
             if let Some(frame) = self.encode(envelope) {
                 link.send(&frame);
             }
@@ -448,6 +466,17 @@ impl RoomSession {
                     notice: None,
                 });
             }
+            RoomBody::VoiceState { seq, in_voice, voice_ts, mic_muted, video, video_ts } => {
+                let info = VoiceInfo {
+                    seq: *seq,
+                    in_voice: *in_voice,
+                    voice_ts: *voice_ts,
+                    mic_muted: *mic_muted,
+                    video: *video,
+                    video_ts: *video_ts,
+                };
+                self.on_voice_state(envelope, info);
+            }
             RoomBody::Leave => {
                 if author != self.inner.me {
                     self.remove_member(author);
@@ -473,6 +502,7 @@ impl RoomSession {
         if let Some(link) = link {
             link.close();
         }
+        self.forget_member_media(pubkey, true);
         self.publish_link_state();
         self.recompute();
     }
@@ -561,6 +591,7 @@ impl RoomSession {
             });
         }
         self.refresh_status();
+        self.recompute_lounge();
     }
 
     fn refresh_status(&self) {
@@ -596,6 +627,10 @@ impl RoomSession {
     fn encode(&self, envelope: &RoomEnvelope) -> Option<String> {
         let encrypted = encrypt_json(&self.inner.key, envelope).ok()?;
         serde_json::to_string(&encrypted).ok()
+    }
+
+    fn toast(&self, key: &'static str) {
+        self.inner.signals.toast.set(Some(key));
     }
 
     fn push_message(&self, message: ChatMessageUi) {

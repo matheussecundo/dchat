@@ -83,6 +83,15 @@ impl SignalPayload {
     }
 }
 
+/// What a member is sending as video in the voice lounge (one source at a time).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+pub enum VideoKind {
+    #[default]
+    None,
+    Camera,
+    Screen,
+}
+
 /// Content of a room message. Sent inside a `RoomEnvelope` over the per-pair
 /// "chat" RTCDataChannel, encrypted with the room key.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -98,6 +107,17 @@ pub enum RoomBody {
     /// The author's current direct WebRTC links; `seq` increases with each update.
     LinkState { seq: u64, direct: Vec<String> },
     Chat { text: String },
+    /// The author's voice-lounge state. `voice_ts` / `video_ts` are when they joined
+    /// voice / turned video on, ordering the voice and video caps like `join_ts` does
+    /// for the member cap. `seq` increases with each update.
+    VoiceState {
+        seq: u64,
+        in_voice: bool,
+        voice_ts: u64,
+        mic_muted: bool,
+        video: VideoKind,
+        video_ts: u64,
+    },
     Leave,
 }
 

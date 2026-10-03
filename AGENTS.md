@@ -38,7 +38,8 @@ Every agent modifying this codebase must enforce these non-negotiable security a
    - **Addressed signaling**: `Offer`/`Answer`/`IceBatch` carry the recipient session pubkey in `to` (inside the encrypted payload); `NostrRelayPool` drops signals addressed to someone else. The lower pubkey of each pair dials; perfect negotiation (polite = higher pubkey) handles any later glare.
    - **Signed room messages**: every data-channel message is a `RoomEnvelope` signed by its author's session key (`sign_message`, domain-separated from Nostr event signatures) and encrypted with the room key. Receivers verify the signature **before** recording the message id for dedup, then relay it to neighbors without a direct link to the author (`Roster::forward_targets`). Attribution always comes from the verified `author`, never from a self-declared name.
    - **Admin secret**: `admsk` exists only in the creator's admin link. The invite link, the QR code and **🔗 Copy Link** always use `invite_url()`, which strips it.
-   - **Deterministic caps**: every member evaluates `Roster::evicted` on the same data; a member who finds itself evicted leaves on its own. Caps are enforced by honest clients, not cryptographically.
+   - **Deterministic caps**: every member evaluates `Roster::evicted` / `latest_beyond_cap` on the same data; a member who finds itself evicted (room, voice seat or video slot) backs off on its own. Caps are enforced by honest clients, not cryptographically.
+   - **Lounge media**: media flows only between members who both hold a voice seat over an open direct link (`sync_media_for`). Each link has at most one audio and one video `RtcRtpSender`; toggles use `replaceTrack`, never add/remove, so SDP does not grow.
 
 6. **NAT Traversal (known limitation, must stay documented)**:
    - ICE uses STUN only by default (`stun:stun.l.google.com:19302`). Pairs behind carrier-grade NAT (mobile data) or symmetric NAT often cannot link directly: roughly 10–20% of pairs, and more pairs fail as a room grows.
@@ -60,7 +61,7 @@ dchat/
 │   │       ├── fragment.rs     # Order-preserving URL fragment parser (keeps unknown params)
 │   │       ├── messages.rs     # Addressed SignalPayload, signed RoomEnvelope/RoomBody, ICE types
 │   │       ├── nostr.rs        # NIP-01/16 types, BIP-340 Schnorr keys (k256), message signing, topic hashing
-│   │       ├── room.rs         # Roster, link graph, gossip routing, cap eviction, RoomParams (pure, unit-tested)
+│   │       ├── room.rs         # Roster, link graph, gossip routing, member/voice/video cap eviction, RoomParams (pure, unit-tested)
 │   │       └── lib.rs
 │   ├── server/                 # Axum backend: Static file server + dev TLS + local mock Nostr relay
 │   │   └── src/
@@ -76,22 +77,27 @@ dchat/
 │       └── src/
 │           ├── main.rs         # Leptos UI: create/join lobby, room view, member panel, modals
 │           ├── i18n.rs         # Strongly typed i18n, browser detection, RTL handling
-│           ├── mesh.rs         # PeerLink: one RTCPeerConnection per member, perfect negotiation, batched ICE
+│           ├── media.rs        # Capture (mic/camera/screen), per-member <audio>, video attach, speaking meter
+│           ├── mesh.rs         # PeerLink: one RTCPeerConnection per member, perfect negotiation, batched ICE, tracks
 │           ├── names.rs        # Random session names, name sanitizing, pubkey tags
 │           ├── nostr_pool.rs   # Multi-relay pool, fan-out broadcast, deduplication, recipient filtering
 │           ├── qr.rs           # On-the-fly SVG QR code generation
-│           ├── session.rs      # RoomSession: mesh orchestration, signed gossip, roster, caps, e2e hooks
+│           ├── session/
+│           │   ├── mod.rs      # RoomSession: mesh orchestration, signed gossip, roster, caps, e2e hooks
+│           │   └── lounge.rs   # Voice lounge: seats, per-link senders, voice/video caps, speaking, controls
 │           └── state.rs        # UI types, URL fragment helpers (create room, invite/admin links), relays
 ├── e2e/                        # Playwright automated multi-peer end-to-end tests
 │   ├── playwright.config.js    # Automatic server launch (serves crates/client/dist-e2e) and browser runner
 │   └── tests/
 │       ├── helpers.js          # createRoom / joinRoom / memberRow helpers shared by specs
 │       ├── group_chat.spec.js  # 3-member mesh, fan-out, caps + admin seat, relayed text without a direct link
+│       ├── group_voice.spec.js # 3-member lounge: join prompt, mesh audio, mute state, speaking, voice/video caps
 │       ├── p2p_chat.spec.js    # 2-member room, E2EE message exchange, reload wipe, fragment params
-│       ├── audio_call.spec.js  # 2-peer audio call handshake, mute toggle, and end call
-│       ├── video_call.spec.js  # 2-peer video call handshake, camera controls, and termination
+│       ├── audio_call.spec.js  # 2-member lounge audio, mic/speaker mute, leave (replaceTrack null) and rejoin
+│       ├── video_call.spec.js  # Camera tiles, camera flip keeps the mic, camera off, grid teardown
+│       ├── screen_share.spec.js# Screen share, switch to camera on the same sender, stop
 │       ├── file_sharing.spec.js# P2P encrypted file sharing with multi-chunk transfer
-│       ├── audio_settings.spec.js # Mic processing checkboxes, live track swap, reload reset
+│       ├── audio_settings.spec.js # Mic processing checkboxes, live track swap in voice, carry-over, reload reset
 │       └── i18n.spec.js        # UI localization, dynamic switching, Arabic RTL, zero persistence
 ├── README.md                   # User guide, building, running locally, mobile test
 └── AGENTS.md                   # This document
@@ -153,11 +159,11 @@ dchat/
   - Settings are RAM-only signals: they survive across calls within a tab and reset on reload.
 - **Phase 8: Discord-like Group Rooms over a Serverless Mesh (In Progress, branch `group-rooms`)**
   - **8a Mesh core (Completed)**: create/join lobby with session nicknames; full-mesh `PeerLink`s with addressed signaling and perfect negotiation; signed `RoomEnvelope` gossip with relay to members lacking a direct link; roster with mutual-link reachability and `direct` / `via X` / `connecting` link states; per-room member cap (`&max=`, default 25, `0` = unlimited) with deterministic latest-joiner eviction and an admin seat; admin link (`adm`/`admsk`) vs invite link; optional TURN in the fragment; join/leave notices.
-  - 8b Drop-in voice/video lounge, screen share, speaking indicator, voice/video caps; ring flow removed.
+  - **8b Voice lounge (Completed)**: drop-in lounge replaces the ring flow (`CallInvite`/`CallAccepted` gone); signed `VoiceState` gossip (seat time, mic, video kind); per-room voice/video caps (`&maxa=`, `&maxv=`) with the same latest-loses rule (admins not exempt); one audio + one video sender per link (`addTrack` once, then `replaceTrack`, `None` to stop: no renegotiation on toggles); camera/screen as one video source with front/rear flip; per-member hidden `<audio class="remote-audio">`; Web Audio speaking meter; video grid with fullscreen; "X joined voice" prompt; audio settings carry over between joins.
   - 8c Room-wide file cards, per-downloader pulls, upload queue (max 2 concurrent). Merge `group-rooms` to main after 8c.
   - 8d Admin kick / invite rotation (ECDH-sealed rekey), opt-in signed history for late joiners (`&hist=1`).
   - 8e Typing indicator, reactions, edit/delete, ECDH-encrypted DMs, @mentions.
-  - Until 8b/8c land, the 1:1 call and file specs are skipped (`test.skip`) because that flow no longer exists.
+  - Until 8c lands, the 1:1 file-sharing spec is skipped (`test.skip`) because that flow no longer exists.
 
 ---
 

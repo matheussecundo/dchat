@@ -77,7 +77,7 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 
 8. **Phase 8: Discord-like Group Rooms over a Serverless Mesh (In Progress)**
    - **8a Mesh core (Completed)**: one `RTCPeerConnection` per member pair with perfect negotiation; recipient-addressed signaling; session nicknames shown with a short key tag; live member list; room messages signed by their author and gossip-relayed to members without a direct link; per-room member cap with deterministic "latest joiner loses" and an admin seat; admin link vs invite link; optional TURN server in the URL.
-   - 8b Drop-in voice/video lounge with screen share and speaking indicator (replaces the 1:1 call flow).
+   - **8b Voice lounge (Completed)**: Discord-style drop-in voice/video lounge replacing the 1:1 ring flow; per-person mic, speaker, camera (with front/rear flip) and screen-share toggles; video grid with fullscreen; speaking indicator; "X joined voice" prompt; per-room voice and video limits; audio processing settings carry over.
    - 8c Room-wide file sharing with per-downloader transfers.
    - 8d Admin kick and invite rotation (rekey), opt-in message history for late joiners.
    - 8e Typing indicator, reactions, edit/delete, private DMs and @mentions.
@@ -94,6 +94,16 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 
 Every room message is signed with its author's session key, so a member relaying it cannot alter it or forge messages from someone else. Joining late shows only the messages sent after you arrive.
 
+### Voice Lounge
+
+Each room has one drop-in voice lounge. Nobody is rung:
+- Tap **🔊 Join Voice** to enter. Members outside voice see a short *"Ana joined voice"* prompt with a **Join** button.
+- Inside, the controls are 🎙️ mic mute, 🔊 speaker mute (local only), 📹 camera (🔄 flips front/rear), 🖥️ screen share, ⚙️ audio processing and **📴 Leave**.
+- Camera and screen share are one video source at a time; switching between them reuses the same connection.
+- Members with video appear in a grid (⛶ for fullscreen). Whoever is talking gets a green ring, measured locally from the audio level.
+- Audio and video only flow between members who are in the lounge, directly peer-to-peer (DTLS-SRTP). A member you only reach `via` someone else is shown with ⚠: you can't hear or see each other without a direct link (see NAT below).
+- **Voice limit** (default 8) and **video limit** (default 6) are set when creating the room. When the lounge is full, **Join Voice** is disabled; if two people race for the last seat, the one who joined last is moved out, using the same rule as the member limit. The limits apply to admins too.
+
 ### URL Fragment Parameters
 
 Everything after `#` stays in the browser and is never sent to any server.
@@ -105,6 +115,8 @@ Everything after `#` stays in the browser and is never sent to any server.
 | `adm` | `adm=9f3c…` | Admin public key; sessions proving it get the `ADMIN` badge and a guaranteed seat |
 | `admsk` | `admsk=…` | Admin secret key: **admin link only**, never in the invite or QR code |
 | `max` | `max=10` | Member limit; default 25, `0` = unlimited (no hard ceiling; large rooms load every member) |
+| `maxa` | `maxa=4` | Voice limit: members in the lounge at once; default 8, `0` = unlimited |
+| `maxv` | `maxv=2` | Video limit: cameras/screens on at once; default 6, `0` = unlimited |
 | `relays` | `relays=wss://a,wss://b` | Custom Nostr relays |
 | `turn` | `turn=turns:turn.example.com:5349` | Optional TURN server(s), comma-separated |
 | `turnuser`, `turnpass` | `turnuser=me&turnpass=s3cret` | TURN credentials (percent-encode special characters) |
@@ -116,7 +128,7 @@ dchat uses STUN only by default, so it needs no infrastructure of its own. Most 
 What you will see:
 - The member list shows the other person as **`via <name>`** instead of `direct`.
 - **Text still works**: messages are relayed through a member who is connected to both of you. They stay encrypted with the room key and signed by their author, so the relaying member (who is in the room anyway) cannot alter or forge them.
-- **Calls and files don't work with that person**: media and file transfers only travel over direct links.
+- **Voice, video and files don't work with that person**: media and file transfers only travel over direct links (the lounge marks them with ⚠).
 - If no mutual member exists, the person stays `connecting…` until a path appears.
 
 **Fix: supply a TURN server.** A TURN server forwards encrypted packets between members who can't reach each other. It sees IP addresses and traffic timing, but never message or media content (DTLS/SRTP plus the room key). Add it to the room URL and share that URL:

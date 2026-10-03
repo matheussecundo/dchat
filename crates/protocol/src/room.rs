@@ -132,23 +132,29 @@ impl Roster {
     /// Admins always stay and count toward the cap; the remaining seats go to non-admins
     /// in (join time, pubkey) order, so the latest joiner loses a race.
     pub fn evicted(&self, present: &HashSet<String>, cap: Option<usize>) -> Vec<String> {
-        let Some(cap) = cap else {
-            return Vec::new();
-        };
         let present_members: Vec<&Member> = self
             .members
             .values()
             .filter(|m| present.contains(&m.pubkey))
             .collect();
         let admins = present_members.iter().filter(|m| m.is_admin).count();
-        let mut others: Vec<&&Member> = present_members.iter().filter(|m| !m.is_admin).collect();
-        others.sort_by(|a, b| (a.join_ts, &a.pubkey).cmp(&(b.join_ts, &b.pubkey)));
-        others
-            .into_iter()
-            .skip(cap.saturating_sub(admins))
-            .map(|m| m.pubkey.clone())
-            .collect()
+        let others = present_members
+            .iter()
+            .filter(|m| !m.is_admin)
+            .map(|m| (m.pubkey.clone(), m.join_ts));
+        latest_beyond_cap(others, cap.map(|c| c.saturating_sub(admins)))
     }
+}
+
+/// Of `(pubkey, since)` entries, the ones beyond the first `cap` in (since, pubkey) order:
+/// the deterministic "latest loses" rule shared by the member, voice and video caps.
+pub fn latest_beyond_cap(entries: impl IntoIterator<Item = (String, u64)>, cap: Option<usize>) -> Vec<String> {
+    let Some(cap) = cap else {
+        return Vec::new();
+    };
+    let mut entries: Vec<(String, u64)> = entries.into_iter().collect();
+    entries.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
+    entries.into_iter().skip(cap).map(|(pubkey, _)| pubkey).collect()
 }
 
 /// Bounded memory of message ids already seen, so gossip copies are processed once.
@@ -211,6 +217,10 @@ pub struct RoomParams {
     pub admin_secret: Option<String>,
     /// Member cap (`max`), `None` = unlimited.
     pub member_cap: Option<usize>,
+    /// How many members may be in the voice lounge at once (`maxa`).
+    pub voice_cap: Option<usize>,
+    /// How many lounge members may send video (camera or screen) at once (`maxv`).
+    pub video_cap: Option<usize>,
     /// TURN server URLs (`turn`, comma-separated) and credentials.
     pub turn_urls: Vec<String>,
     pub turn_user: Option<String>,
@@ -224,6 +234,8 @@ impl RoomParams {
             admin_pubkey: owned("adm"),
             admin_secret: owned("admsk"),
             member_cap: parse_cap(params.get("max"), DEFAULT_MEMBER_CAP),
+            voice_cap: parse_cap(params.get("maxa"), DEFAULT_VOICE_CAP),
+            video_cap: parse_cap(params.get("maxv"), DEFAULT_VIDEO_CAP),
             turn_urls: params
                 .get("turn")
                 .map(|v| {
@@ -370,6 +382,16 @@ mod tests {
     }
 
     #[test]
+    fn test_latest_beyond_cap() {
+        let entries = || vec![("b".to_string(), 5), ("a".to_string(), 5), ("c".to_string(), 1)];
+        assert_eq!(latest_beyond_cap(entries(), Some(1)), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(latest_beyond_cap(entries(), Some(2)), vec!["b".to_string()]);
+        assert!(latest_beyond_cap(entries(), Some(3)).is_empty());
+        assert!(latest_beyond_cap(entries(), None).is_empty());
+        assert_eq!(latest_beyond_cap(entries(), Some(0)).len(), 3);
+    }
+
+    #[test]
     fn test_gossip_dedup_is_bounded() {
         let mut dedup = GossipDedup::new(2);
         assert!(dedup.insert("1"));
@@ -396,12 +418,14 @@ mod tests {
     #[test]
     fn test_room_params_and_invite() {
         let fragment = FragmentParams::parse(
-            "#room=r&key=k&adm=pub&admsk=sec&max=3&turn=turn:a.example:3478, turns:b.example&turnuser=u&turnpass=p",
+            "#room=r&key=k&adm=pub&admsk=sec&max=3&maxa=2&maxv=0&turn=turn:a.example:3478, turns:b.example&turnuser=u&turnpass=p",
         );
         let params = RoomParams::from_fragment(&fragment);
         assert_eq!(params.admin_pubkey.as_deref(), Some("pub"));
         assert_eq!(params.admin_secret.as_deref(), Some("sec"));
         assert_eq!(params.member_cap, Some(3));
+        assert_eq!(params.voice_cap, Some(2));
+        assert_eq!(params.video_cap, None);
         assert_eq!(params.turn_urls, vec!["turn:a.example:3478", "turns:b.example"]);
         assert_eq!(params.turn_user.as_deref(), Some("u"));
         assert_eq!(params.turn_pass.as_deref(), Some("p"));
@@ -413,6 +437,8 @@ mod tests {
 
         let defaults = RoomParams::from_fragment(&FragmentParams::parse("#room=r&key=k"));
         assert_eq!(defaults.member_cap, Some(DEFAULT_MEMBER_CAP));
+        assert_eq!(defaults.voice_cap, Some(DEFAULT_VOICE_CAP));
+        assert_eq!(defaults.video_cap, Some(DEFAULT_VIDEO_CAP));
         assert!(defaults.turn_urls.is_empty());
     }
 }

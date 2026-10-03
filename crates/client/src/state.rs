@@ -1,6 +1,7 @@
 use protocol::{
     format_cap, generate_key, generate_room_id, invite_fragment, key_from_base64, key_to_base64,
-    FragmentParams, NostrBurnerKey, DEFAULT_MEMBER_CAP, KEY_LENGTH,
+    FragmentParams, NostrBurnerKey, VideoKind, DEFAULT_MEMBER_CAP, DEFAULT_VIDEO_CAP,
+    DEFAULT_VOICE_CAP, KEY_LENGTH,
 };
 use wasm_bindgen::JsValue;
 use web_sys::window;
@@ -64,6 +65,57 @@ pub struct MemberUi {
     pub link: LinkUi,
 }
 
+/// Browser-native microphone processing requested via getUserMedia constraints.
+/// Held in RAM only; resets to all-on on reload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioSettings {
+    pub noise_suppression: bool,
+    pub echo_cancellation: bool,
+    pub auto_gain_control: bool,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self {
+            noise_suppression: true,
+            echo_cancellation: true,
+            auto_gain_control: true,
+        }
+    }
+}
+
+/// A member currently in the voice lounge, as shown to this tab.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LoungeMemberUi {
+    pub pubkey: String,
+    pub name: String,
+    pub tag: String,
+    pub is_self: bool,
+    pub mic_muted: bool,
+    pub video: VideoKind,
+    /// Media needs a direct link; relayed members are listed but silent.
+    pub has_media_link: bool,
+}
+
+/// This tab's own lounge controls.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MyVoiceUi {
+    pub in_voice: bool,
+    /// Mic capture is in flight after Join Voice.
+    pub joining: bool,
+    pub mic_muted: bool,
+    pub speaker_muted: bool,
+    pub video: VideoKind,
+}
+
+/// Room caps chosen at creation: members, voice, video (`None` = unlimited).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoomCaps {
+    pub members: Option<usize>,
+    pub voice: Option<usize>,
+    pub video: Option<usize>,
+}
+
 /// System lines shown in the chat timeline.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Notice {
@@ -111,20 +163,26 @@ pub fn read_credentials() -> Option<(String, [u8; KEY_LENGTH])> {
     Some((room, key))
 }
 
-/// Create a new room in the fragment: fresh room ID, room key and admin keypair, plus the
-/// member cap when it differs from the default. Other parameters (e.g. `relays`) are kept.
+/// Create a new room in the fragment: fresh room ID, room key and admin keypair, plus each
+/// cap that differs from its default. Other parameters (e.g. `relays`) are kept.
 /// The admin secret only ever lives in this creator's fragment (the admin link).
-pub fn create_room(member_cap: Option<usize>) -> Result<(), String> {
+pub fn create_room(caps: RoomCaps) -> Result<(), String> {
     let admin = NostrBurnerKey::generate().map_err(|e| e.to_string())?;
     let mut params = current_fragment();
     params.set("room", &generate_room_id());
     params.set("key", &key_to_base64(&generate_key()));
     params.set("adm", admin.pubkey());
     params.set("admsk", &admin.secret_hex());
-    if member_cap == Some(DEFAULT_MEMBER_CAP) {
-        params.remove("max");
-    } else {
-        params.set("max", &format_cap(member_cap));
+    for (key, cap, default) in [
+        ("max", caps.members, DEFAULT_MEMBER_CAP),
+        ("maxa", caps.voice, DEFAULT_VOICE_CAP),
+        ("maxv", caps.video, DEFAULT_VIDEO_CAP),
+    ] {
+        if cap == Some(default) {
+            params.remove(key);
+        } else {
+            params.set(key, &format_cap(cap));
+        }
     }
     replace_fragment(&params);
     Ok(())

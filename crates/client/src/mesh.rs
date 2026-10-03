@@ -9,10 +9,10 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    window, MessageEvent, RtcConfiguration, RtcDataChannel, RtcDataChannelEvent,
-    RtcDataChannelInit, RtcDataChannelState, RtcIceCandidate, RtcIceCandidateInit,
-    RtcPeerConnection, RtcPeerConnectionIceEvent, RtcPeerConnectionState, RtcSdpType,
-    RtcSessionDescriptionInit, RtcSignalingState,
+    window, MediaStream, MediaStreamTrack, MessageEvent, RtcConfiguration, RtcDataChannel,
+    RtcDataChannelEvent, RtcDataChannelInit, RtcDataChannelState, RtcIceCandidate,
+    RtcIceCandidateInit, RtcPeerConnection, RtcPeerConnectionIceEvent, RtcPeerConnectionState,
+    RtcRtpSender, RtcSdpType, RtcSessionDescriptionInit, RtcSignalingState, RtcTrackEvent,
 };
 
 const CHAT_LABEL: &str = "chat";
@@ -26,6 +26,8 @@ pub enum LinkEvent {
     Closed,
     /// A text frame arrived on the chat channel.
     Message(String),
+    /// The member started sending a media track (with its stream, when announced).
+    Track(MediaStreamTrack, Option<MediaStream>),
 }
 
 /// Receives `(remote pubkey, link id, event)`. The id tells a replaced link's late
@@ -87,6 +89,7 @@ impl PeerLink {
         link.install_ice_batching();
         link.install_negotiation();
         link.install_state_watch(notify_closed.clone());
+        link.install_track_handler(on_event.clone());
 
         if initiator {
             let init = RtcDataChannelInit::new();
@@ -124,6 +127,11 @@ impl PeerLink {
             Some(dc) if dc.ready_state() == RtcDataChannelState::Open => dc.send_with_str(text).is_ok(),
             _ => false,
         }
+    }
+
+    /// Start sending `track` (as part of `stream`) to this member; triggers renegotiation.
+    pub fn add_track(&self, track: &MediaStreamTrack, stream: &MediaStream) -> RtcRtpSender {
+        self.pc.add_track_0(track, stream)
     }
 
     pub fn close(&self) {
@@ -219,6 +227,18 @@ impl PeerLink {
                 on_event(&remote, id, LinkEvent::Closed);
             }
         })
+    }
+
+    fn install_track_handler(&self, on_event: LinkEventHandler) {
+        let remote = self.remote.clone();
+        let id = self.id;
+        let on_track = Closure::wrap(Box::new(move |ev: RtcTrackEvent| {
+            let streams = ev.streams();
+            let stream = (streams.length() > 0).then(|| streams.get(0).unchecked_into::<MediaStream>());
+            on_event(&remote, id, LinkEvent::Track(ev.track(), stream));
+        }) as Box<dyn FnMut(RtcTrackEvent)>);
+        self.pc.set_ontrack(Some(on_track.as_ref().unchecked_ref()));
+        on_track.forget();
     }
 
     fn install_state_watch(&self, notify_closed: Rc<dyn Fn()>) {
