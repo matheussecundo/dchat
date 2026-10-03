@@ -2,6 +2,7 @@
 //! gossip routing, cap eviction and room parameters. Pure Rust, no browser APIs.
 
 use crate::fragment::FragmentParams;
+use crate::messages::{RoomBody, RoomEnvelope};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 pub const DEFAULT_MEMBER_CAP: usize = 25;
@@ -194,6 +195,51 @@ impl GossipDedup {
     }
 }
 
+/// How many recent messages a member keeps for late joiners when history is on.
+pub const HISTORY_LIMIT: usize = 200;
+
+/// Recent shareable chat messages, kept as signed originals so a late joiner can verify
+/// each one against its author. RAM only.
+#[derive(Debug)]
+pub struct HistoryBuffer {
+    limit: usize,
+    entries: VecDeque<RoomEnvelope>,
+}
+
+impl HistoryBuffer {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            entries: VecDeque::new(),
+        }
+    }
+
+    /// Keep `envelope` if it is a chat message its author marked shareable.
+    pub fn record(&mut self, envelope: &RoomEnvelope) -> bool {
+        if !matches!(envelope.body, RoomBody::Chat { shareable: true, .. })
+            || self.entries.iter().any(|e| e.id == envelope.id)
+        {
+            return false;
+        }
+        if self.entries.len() >= self.limit {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(envelope.clone());
+        true
+    }
+
+    /// Forget a message (e.g. deleted by its author).
+    pub fn remove(&mut self, id: &str) {
+        self.entries.retain(|e| e.id != id);
+    }
+
+    /// Oldest first, in batches small enough for one data-channel message.
+    pub fn batches(&self, batch_size: usize) -> Vec<Vec<RoomEnvelope>> {
+        let all: Vec<RoomEnvelope> = self.entries.iter().cloned().collect();
+        all.chunks(batch_size.max(1)).map(|c| c.to_vec()).collect()
+    }
+}
+
 /// At most this many uploads run at once per author; further requests wait in line.
 pub const MAX_CONCURRENT_UPLOADS: usize = 2;
 
@@ -316,6 +362,8 @@ pub struct RoomParams {
     pub voice_cap: Option<usize>,
     /// How many lounge members may send video (camera or screen) at once (`maxv`).
     pub video_cap: Option<usize>,
+    /// Late joiners may see recent shareable messages (`hist=1`).
+    pub history: bool,
     /// TURN server URLs (`turn`, comma-separated) and credentials.
     pub turn_urls: Vec<String>,
     pub turn_user: Option<String>,
@@ -331,6 +379,7 @@ impl RoomParams {
             member_cap: parse_cap(params.get("max"), DEFAULT_MEMBER_CAP),
             voice_cap: parse_cap(params.get("maxa"), DEFAULT_VOICE_CAP),
             video_cap: parse_cap(params.get("maxv"), DEFAULT_VIDEO_CAP),
+            history: params.get("hist") == Some("1"),
             turn_urls: params
                 .get("turn")
                 .map(|v| {
@@ -525,6 +574,33 @@ mod tests {
         assert_eq!(q.counts("f"), (0, 0));
     }
 
+    fn chat(key: &crate::nostr::NostrBurnerKey, text: &str, shareable: bool) -> RoomEnvelope {
+        RoomEnvelope::sign(key, 1, RoomBody::Chat { text: text.into(), shareable }).unwrap()
+    }
+
+    #[test]
+    fn test_history_buffer_keeps_only_shareable_and_is_bounded() {
+        let key = crate::nostr::NostrBurnerKey::generate().unwrap();
+        let mut history = HistoryBuffer::new(3);
+        let private = chat(&key, "private", false);
+        assert!(!history.record(&private));
+        let leave = RoomEnvelope::sign(&key, 1, RoomBody::Leave).unwrap();
+        assert!(!history.record(&leave));
+
+        let msgs: Vec<RoomEnvelope> = (0..4).map(|i| chat(&key, &format!("m{i}"), true)).collect();
+        for m in &msgs {
+            assert!(history.record(m));
+        }
+        assert!(!history.record(&msgs[3]), "duplicates are ignored");
+        let kept: Vec<String> = history.batches(10).concat().into_iter().map(|e| e.id).collect();
+        assert_eq!(kept, vec![msgs[1].id.clone(), msgs[2].id.clone(), msgs[3].id.clone()]);
+
+        history.remove(&msgs[2].id);
+        let batches = history.batches(1);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0][0].id, msgs[1].id);
+    }
+
     #[test]
     fn test_gossip_dedup_is_bounded() {
         let mut dedup = GossipDedup::new(2);
@@ -558,6 +634,8 @@ mod tests {
         assert_eq!(params.admin_pubkey.as_deref(), Some("pub"));
         assert_eq!(params.admin_secret.as_deref(), Some("sec"));
         assert_eq!(params.member_cap, Some(3));
+        assert!(!params.history);
+        assert!(RoomParams::from_fragment(&FragmentParams::parse("#room=r&hist=1")).history);
         assert_eq!(params.voice_cap, Some(2));
         assert_eq!(params.video_cap, None);
         assert_eq!(params.turn_urls, vec!["turn:a.example:3478", "turns:b.example"]);

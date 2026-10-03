@@ -108,12 +108,13 @@ pub struct MyVoiceUi {
     pub video: VideoKind,
 }
 
-/// Room caps chosen at creation: members, voice, video (`None` = unlimited).
+/// Room settings chosen at creation: caps (`None` = unlimited) and history for late joiners.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RoomCaps {
     pub members: Option<usize>,
     pub voice: Option<usize>,
     pub video: Option<usize>,
+    pub history: bool,
 }
 
 /// A file card's state, as seen by this tab.
@@ -165,6 +166,19 @@ pub enum Notice {
     Joined(String),
     Left(String),
     LateJoin,
+    /// History from before we joined was inserted above.
+    HistoryShown,
+    /// An admin moved the room to a new link and we followed.
+    Rekeyed,
+}
+
+/// Where an admin moved the room: the new room ID and key, already written to the URL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RekeyTarget {
+    pub room: String,
+    pub key: [u8; KEY_LENGTH],
+    /// Rejoin the voice lounge in the new room.
+    pub rejoin_voice: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,6 +189,8 @@ pub struct ChatMessageUi {
     pub is_self: bool,
     pub text: String,
     pub time: String,
+    /// Author's send time (ms), for placing history from before we joined.
+    pub ts: u64,
     pub notice: Option<Notice>,
     pub file: Option<FileOfferInfo>,
 }
@@ -227,6 +243,11 @@ pub fn create_room(caps: RoomCaps) -> Result<(), String> {
         } else {
             params.set(key, &format_cap(cap));
         }
+    }
+    if caps.history {
+        params.set("hist", "1");
+    } else {
+        params.remove("hist");
     }
     replace_fragment(&params);
     Ok(())

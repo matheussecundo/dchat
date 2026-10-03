@@ -19,7 +19,7 @@ use session::{RoomSession, SessionSignals};
 use state::{
     admin_url, create_room, format_file_size, invite_url, read_credentials, AudioSettings,
     ChatMessageUi, ConnectionStatus, FileOfferInfo, FileTransferStatus, LinkUi, LoungeMemberUi,
-    MemberUi, MyVoiceUi, Notice, RoomCaps,
+    MemberUi, MyVoiceUi, Notice, RekeyTarget, RoomCaps,
 };
 use std::collections::{HashMap, HashSet};
 use wasm_bindgen::JsCast;
@@ -37,6 +37,8 @@ enum Screen {
     Room,
     /// This tab lost the deterministic race for the last seat.
     Full,
+    /// An admin removed this tab from the room.
+    Removed,
 }
 
 #[component]
@@ -52,12 +54,15 @@ fn App() -> impl IntoView {
     let (cap_input, set_cap_input) = create_signal(DEFAULT_MEMBER_CAP.to_string());
     let (voice_cap_input, set_voice_cap_input) = create_signal(DEFAULT_VOICE_CAP.to_string());
     let (video_cap_input, set_video_cap_input) = create_signal(DEFAULT_VIDEO_CAP.to_string());
+    let (history_input, set_history_input) = create_signal(false);
 
     let (status, set_status) = create_signal(ConnectionStatus::Idle);
     let (messages, set_messages) = create_signal(Vec::<ChatMessageUi>::new());
     let (members, set_members) = create_signal(Vec::<MemberUi>::new());
     let (names, set_names) = create_signal(HashMap::<String, String>::new());
     let (room_full, set_room_full) = create_signal(false);
+    let (removed, set_removed) = create_signal(false);
+    let (rekey, set_rekey) = create_signal(None::<RekeyTarget>);
     let (connected_relays, set_connected_relays) = create_signal(0usize);
     let (input_text, set_input_text) = create_signal(String::new());
     let (show_qr, set_show_qr) = create_signal(false);
@@ -80,11 +85,10 @@ fn App() -> impl IntoView {
     let (show_audio_settings, set_show_audio_settings) = create_signal(false);
 
     let session_ref = store_value(None::<RoomSession>);
+    // The session name, reused when an admin moves the room to a new link.
+    let my_name = store_value(String::new());
 
-    let enter_room = move || {
-        let Some((room_id, key)) = read_credentials() else {
-            return;
-        };
+    let start_session = move |room_id: String, key: [u8; protocol::KEY_LENGTH], migrated: bool| -> Option<RoomSession> {
         let signals = SessionSignals {
             status: set_status,
             messages: set_messages,
@@ -97,23 +101,54 @@ fn App() -> impl IntoView {
             speaking: set_speaking,
             voice_prompt: set_voice_prompt,
             toast: set_toast,
+            removed: set_removed,
+            rekey: set_rekey,
         };
         set_room_id_sig.set(room_id.clone());
-        let name = sanitize_name(&name_input.get_untracked());
-        match RoomSession::start(room_id, key, name, signals) {
+        match RoomSession::start(room_id, key, my_name.get_value(), signals, migrated) {
             Ok(session) => {
-                session_ref.set_value(Some(session));
+                session_ref.set_value(Some(session.clone()));
                 set_screen.set(Screen::Room);
+                Some(session)
             }
-            Err(err) => set_status.set(ConnectionStatus::Error(err)),
+            Err(err) => {
+                set_status.set(ConnectionStatus::Error(err));
+                None
+            }
         }
     };
+
+    let enter_room = move || {
+        let Some((room_id, key)) = read_credentials() else {
+            return;
+        };
+        my_name.set_value(sanitize_name(&name_input.get_untracked()));
+        start_session(room_id, key, false);
+    };
+
+    // An admin moved the room: follow it with a fresh session, keeping the chat on screen.
+    create_effect(move |_| {
+        if let Some(target) = rekey.get() {
+            set_rekey.set(None);
+            if let Some(session) = start_session(target.room, target.key, true) {
+                if target.rejoin_voice {
+                    session.join_voice();
+                }
+            }
+        }
+    });
+    create_effect(move |_| {
+        if removed.get() {
+            set_screen.set(Screen::Removed);
+        }
+    });
 
     let create_and_enter = move || {
         let caps = RoomCaps {
             members: parse_cap(Some(&cap_input.get_untracked()), DEFAULT_MEMBER_CAP),
             voice: parse_cap(Some(&voice_cap_input.get_untracked()), DEFAULT_VOICE_CAP),
             video: parse_cap(Some(&video_cap_input.get_untracked()), DEFAULT_VIDEO_CAP),
+            history: history_input.get_untracked(),
         };
         match create_room(caps) {
             Ok(()) => enter_room(),
@@ -268,6 +303,19 @@ fn App() -> impl IntoView {
         FileAction::Withdraw => with_session(&|s| s.withdraw_file(&file_id)),
     };
     let has_messages = create_memo(move |_| messages.with(|m| !m.is_empty()));
+    let am_admin = create_memo(move |_| members.with(|m| m.iter().any(|x| x.link == LinkUi::Me && x.is_admin)));
+    let confirm = |text: String| window().and_then(|w| w.confirm_with_message(&text).ok()).unwrap_or(false);
+    let kick_member = move |pubkey: String, name: String| {
+        if confirm(t_replace_1(lang.get_untracked(), "confirm_kick", "{name}", &name)) {
+            with_session(&|s| s.kick(&pubkey));
+        }
+    };
+    let rotate_link = move |_| {
+        if confirm(t(lang.get_untracked(), "confirm_rotate").to_string()) {
+            with_session(&|s| s.rotate_link());
+        }
+    };
+    let history_on = move || session_ref.with_value(|s| s.as_ref().is_some_and(|s| s.history_enabled()));
 
     let is_connected = move || status.get() == ConnectionStatus::Connected;
     let display_name = move |pubkey: &str| {
@@ -337,6 +385,15 @@ fn App() -> impl IntoView {
                             />
                         </div>
                     </div>
+                    <label class="lobby-check" for="history-checkbox">
+                        <input
+                            type="checkbox"
+                            id="history-checkbox"
+                            prop:checked=move || history_input.get()
+                            on:change=move |ev| set_history_input.set(event_target_checked(&ev))
+                        />
+                        <span>{move || t(lang.get(), "history_label")}</span>
+                    </label>
                     {move || cap_is_large().then(|| view! {
                         <p class="lobby-warning">{move || t(lang.get(), "cap_warning")}</p>
                     })}
@@ -386,6 +443,28 @@ fn App() -> impl IntoView {
         }
     };
 
+    let removed_view = move || {
+        view! {
+            <div class="lobby">
+                <div class="lobby-card room-removed">
+                    <h2>{move || t(lang.get(), "removed_title")}</h2>
+                    <p class="lobby-desc">{move || t(lang.get(), "removed_desc")}</p>
+                    <button
+                        id="back-to-start-btn"
+                        class="btn btn-primary lobby-submit"
+                        on:click=move |_| {
+                            if let Some(win) = window() {
+                                let _ = win.location().set_href("/");
+                            }
+                        }
+                    >
+                        {move || t(lang.get(), "btn_back_to_start")}
+                    </button>
+                </div>
+            </div>
+        }
+    };
+
     let message_view = move |msg: ChatMessageUi| {
         if let Some(notice) = msg.notice {
             return view! {
@@ -394,6 +473,8 @@ fn App() -> impl IntoView {
                         Notice::Joined(name) => t_replace_1(lang.get(), "sys_joined", "{name}", name),
                         Notice::Left(name) => t_replace_1(lang.get(), "sys_left", "{name}", name),
                         Notice::LateJoin => t(lang.get(), "sys_late_join").to_string(),
+                        Notice::HistoryShown => t(lang.get(), "sys_history_shown").to_string(),
+                        Notice::Rekeyed => t(lang.get(), "sys_rekeyed").to_string(),
                     }}
                 </div>
             }
@@ -449,12 +530,27 @@ fn App() -> impl IntoView {
                     >
                         {move || format!("👥 {}", members.get().len())}
                     </button>
+                    {move || history_on().then(|| view! {
+                        <span class="history-badge" title=move || t(lang.get(), "history_badge_title")>
+                            {move || t(lang.get(), "history_badge")}
+                        </span>
+                    })}
                     <button class="btn btn-secondary copy-invite-btn" on:click=copy_invite_link>
                         {move || if copied.get() { t(lang.get(), "btn_copied") } else { t(lang.get(), "btn_copy_link") }}
                     </button>
                     {is_admin_link.then(|| view! {
                         <button class="btn btn-secondary copy-admin-btn" on:click=copy_admin_link>
                             {move || t(lang.get(), "btn_copy_admin")}
+                        </button>
+                    })}
+                    {move || am_admin.get().then(|| view! {
+                        <button
+                            id="rotate-link-btn"
+                            class="btn btn-secondary"
+                            on:click=rotate_link
+                            title=move || t(lang.get(), "title_rotate_link")
+                        >
+                            {move || t(lang.get(), "btn_rotate_link")}
                         </button>
                     })}
                 </div>
@@ -633,7 +729,7 @@ fn App() -> impl IntoView {
                         <For
                             each=move || members.get()
                             key=|m| (m.pubkey.clone(), m.name.clone(), m.is_admin, m.link.clone())
-                            children=move |m| member_row(lang, m)
+                            children=move |m| member_row(lang, m, am_admin, kick_member)
                         />
                     </ul>
                 </aside>
@@ -767,6 +863,7 @@ fn App() -> impl IntoView {
                 Screen::Join => join_view().into_view(),
                 Screen::Room => room_view().into_view(),
                 Screen::Full => full_view().into_view(),
+                Screen::Removed => removed_view().into_view(),
             }}
 
             // QR code of the invite link (never the admin link) for phone pairing
@@ -1077,8 +1174,16 @@ fn audio_option_row(
     }
 }
 
-/// One member in the side panel: name, key tag, admin badge and how we reach them.
-fn member_row(lang: ReadSignal<Language>, member: MemberUi) -> impl IntoView {
+/// One member in the side panel: name, key tag, admin badge, how we reach them, and a
+/// Kick button for admins.
+fn member_row(
+    lang: ReadSignal<Language>,
+    member: MemberUi,
+    am_admin: Memo<bool>,
+    on_kick: impl Fn(String, String) + Copy + 'static,
+) -> impl IntoView {
+    let kickable = member.link != LinkUi::Me && !member.is_admin;
+    let kick_target = (member.pubkey.clone(), member.name.clone());
     let (kind, dot) = match member.link {
         LinkUi::Me => ("me", "link-me"),
         LinkUi::Direct => ("direct", "link-direct"),
@@ -1106,6 +1211,18 @@ fn member_row(lang: ReadSignal<Language>, member: MemberUi) -> impl IntoView {
                     LinkUi::Connecting => t(lang.get(), "link_connecting").to_string(),
                 }}
             </span>
+            {move || (kickable && am_admin.get()).then(|| {
+                let (pubkey, name) = kick_target.clone();
+                view! {
+                    <button
+                        class="btn btn-sm btn-danger kick-btn"
+                        title=move || t(lang.get(), "title_kick")
+                        on:click=move |_| on_kick(pubkey.clone(), name.clone())
+                    >
+                        {move || t(lang.get(), "btn_kick")}
+                    </button>
+                }
+            })}
         </li>
     }
 }

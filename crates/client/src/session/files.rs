@@ -389,6 +389,7 @@ impl RoomSession {
             is_self,
             text: caption.clone().unwrap_or_default(),
             time: current_time_string(),
+            ts: envelope.ts,
             notice: None,
             file: Some(FileOfferInfo {
                 file_id: file_id.clone(),

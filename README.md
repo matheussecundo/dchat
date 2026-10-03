@@ -79,7 +79,7 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
    - **8a Mesh core (Completed)**: one `RTCPeerConnection` per member pair with perfect negotiation; recipient-addressed signaling; session nicknames shown with a short key tag; live member list; room messages signed by their author and gossip-relayed to members without a direct link; per-room member cap with deterministic "latest joiner loses" and an admin seat; admin link vs invite link; optional TURN server in the URL.
    - **8b Voice lounge (Completed)**: Discord-style drop-in voice/video lounge replacing the 1:1 ring flow; per-person mic, speaker, camera (with front/rear flip) and screen-share toggles; video grid with fullscreen; speaking indicator; "X joined voice" prompt; per-room voice and video limits; audio processing settings carry over.
    - **8c Group file sharing (Completed)**: room-wide file cards; each member pulls the file straight from the sender over their own direct link; the sender uploads to at most 2 members at once and queues the rest; decline, cancel and withdraw; transfers stop if the sender leaves.
-   - 8d Admin kick and invite rotation (rekey), opt-in message history for late joiners.
+   - **8d Moderation & history (Completed)**: admins can kick a member or move everyone to a new link (the room ID and key change, sealed to each remaining member); opt-in history so late joiners see the last 200 messages.
    - 8e Typing indicator, reactions, edit/delete, private DMs and @mentions.
 
 ---
@@ -90,9 +90,12 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 2. **Invite**: tap **🔗 Copy Link** or **📱 Scan QR**. Both share the *invite* link. Only the creator also sees **🔑 Copy Admin Link**, which adds the admin secret (`admsk`); share it only with co-moderators.
 3. **Join**: whoever opens the invite picks a name and taps **🚪 Enter Room**. Names live in memory only and are shown with a 4-character key tag (`Ana · 3f2a`), so two people with the same name stay distinct. The tag tells people apart; it is not proof of identity.
 4. **Member list**: each member shows how you reach them: `direct`, `via <name>` (no direct link, text is relayed through that member), or `connecting…`. The admin carries an `ADMIN` badge.
-5. **Member limit**: when a room is full, the member who joined last sees *Room is full*. Everyone applies the same rule (join time, then key), so all members agree on who stays. An admin session always gets a seat and bumps the latest non-admin.
+5. **Moderation (admin link only)**: next to each member, **Kick** moves everyone else to a new room ID and key; the kicked member sees *You were removed from the room*. **🔄 New Link** does the same without removing anyone, so the old invite stops working. Chat history on screen is kept and anyone in voice is reconnected automatically. Share the new invite (**🔗 Copy Link**) with anyone who was offline during the move: they can't follow on their own. Kicking needs an admin online, and admins can't kick each other.
+6. **Member limit**: when a room is full, the member who joined last sees *Room is full*. Everyone applies the same rule (join time, then key), so all members agree on who stays. An admin session always gets a seat and bumps the latest non-admin.
 
-Every room message is signed with its author's session key, so a member relaying it cannot alter it or forge messages from someone else. Joining late shows only the messages sent after you arrive.
+Every room message is signed with its author's session key, so a member relaying it cannot alter it or forge messages from someone else.
+
+**History for late joiners** is off by default: you only see messages sent while you are in the room. The creator can tick *Let late joiners see the last 200 messages*, which adds `&hist=1` to the link and shows a 🕒 badge. Members then keep recent messages in memory (never on disk) and hand them to newcomers as signed originals, so they can't be altered. Each message carries its author's own setting: someone who joined with a link without `hist=1` keeps their messages out of history. History disappears when the last member leaves. Like any chat, "off" can't stop someone who is present from copying a message.
 
 ### Voice Lounge
 
@@ -126,6 +129,7 @@ Everything after `#` stays in the browser and is never sent to any server.
 | `max` | `max=10` | Member limit; default 25, `0` = unlimited (no hard ceiling; large rooms load every member) |
 | `maxa` | `maxa=4` | Voice limit: members in the lounge at once; default 8, `0` = unlimited |
 | `maxv` | `maxv=2` | Video limit: cameras/screens on at once; default 6, `0` = unlimited |
+| `hist` | `hist=1` | Late joiners may see the last 200 shareable messages (off when absent) |
 | `relays` | `relays=wss://a,wss://b` | Custom Nostr relays |
 | `turn` | `turn=turns:turn.example.com:5349` | Optional TURN server(s), comma-separated |
 | `turnuser`, `turnpass` | `turnuser=me&turnpass=s3cret` | TURN credentials (percent-encode special characters) |

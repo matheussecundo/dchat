@@ -1,4 +1,5 @@
 use crate::crypto::EncryptedPayload;
+use crate::crypto::{decrypt_json, encrypt_json};
 use crate::nostr::{verify_message, NostrBurnerKey, NostrError};
 use serde::{Deserialize, Serialize};
 
@@ -106,7 +107,13 @@ pub enum RoomBody {
     },
     /// The author's current direct WebRTC links; `seq` increases with each update.
     LinkState { seq: u64, direct: Vec<String> },
-    Chat { text: String },
+    /// `shareable`: the author allows this message in the history shown to late joiners
+    /// (set from the author's own room link, `&hist=1`).
+    Chat {
+        text: String,
+        #[serde(default)]
+        shareable: bool,
+    },
     /// The author's voice-lounge state. `voice_ts` / `video_ts` are when they joined
     /// voice / turned video on, ordering the voice and video caps like `join_ts` does
     /// for the member cap. `seq` increases with each update.
@@ -134,6 +141,13 @@ pub enum RoomBody {
     FileCancel { to: Option<String>, file_id: String },
     /// The author tells a requester its 1-based place in the upload queue.
     FileQueued { to: String, file_id: String, position: usize },
+    /// A late joiner asks a neighbor for the shareable recent messages it holds.
+    HistoryRequest { to: String },
+    /// Signed originals of recent shareable chat messages, oldest first.
+    HistoryChunk { to: String, envelopes: Vec<RoomEnvelope> },
+    /// Admin only: move the room to a new ID and key. Each remaining member gets its own
+    /// grant sealed to its session key; `kicked` (if any) gets none.
+    AdminRekey { kicked: Option<String>, grants: Vec<SealedGrant> },
     Leave,
 }
 
@@ -142,7 +156,10 @@ impl RoomBody {
     /// link between the two and are never gossip-relayed.
     pub fn recipient(&self) -> Option<&str> {
         match self {
-            RoomBody::FileRequest { to, .. } | RoomBody::FileQueued { to, .. } => Some(to),
+            RoomBody::FileRequest { to, .. }
+            | RoomBody::FileQueued { to, .. }
+            | RoomBody::HistoryRequest { to }
+            | RoomBody::HistoryChunk { to, .. } => Some(to),
             RoomBody::FileCancel { to, .. } => to.as_deref(),
             _ => None,
         }
@@ -185,6 +202,36 @@ impl RoomEnvelope {
     }
 }
 
+/// A rekey grant for one member, readable only with that member's session key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SealedGrant {
+    pub to: String,
+    pub payload: EncryptedPayload,
+}
+
+/// The new room a rekey moves members to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RoomGrant {
+    pub room: String,
+    /// Base64url room key, as in the URL fragment.
+    pub key: String,
+}
+
+impl SealedGrant {
+    /// Seal `grant` from `sender` to the member whose session pubkey is `to`.
+    pub fn seal(sender: &NostrBurnerKey, to: &str, grant: &RoomGrant) -> Result<Self, NostrError> {
+        let key = sender.shared_key(to)?;
+        let payload = encrypt_json(&key, grant).map_err(|e| NostrError::Crypto(e.to_string()))?;
+        Ok(Self { to: to.to_string(), payload })
+    }
+
+    /// Open a grant sealed to `recipient` by the member whose session pubkey is `sender`.
+    pub fn open(&self, recipient: &NostrBurnerKey, sender: &str) -> Option<RoomGrant> {
+        let key = recipient.shared_key(sender).ok()?;
+        decrypt_json(&key, &self.payload).ok()
+    }
+}
+
 /// Bytes an admin key signs to vouch that `session_pubkey` is an admin of `room_id`.
 /// Binding the session key stops one member from replaying another's proof.
 pub fn admin_proof_message(room_id: &str, session_pubkey: &str) -> Vec<u8> {
@@ -198,7 +245,7 @@ mod tests {
     #[test]
     fn test_envelope_sign_verify_and_tamper() {
         let key = NostrBurnerKey::generate().unwrap();
-        let env = RoomEnvelope::sign(&key, 42, RoomBody::Chat { text: "hi".into() }).unwrap();
+        let env = RoomEnvelope::sign(&key, 42, RoomBody::Chat { text: "hi".into(), shareable: false }).unwrap();
         assert!(env.verify());
 
         let json = serde_json::to_string(&env).unwrap();
@@ -206,7 +253,7 @@ mod tests {
         assert!(parsed.verify());
 
         let mut forged = env.clone();
-        forged.body = RoomBody::Chat { text: "bye".into() };
+        forged.body = RoomBody::Chat { text: "bye".into(), shareable: false };
         assert!(!forged.verify());
 
         let mut reattributed = env.clone();
@@ -226,7 +273,29 @@ mod tests {
         assert_eq!(withdraw.recipient(), None);
         let stop = RoomBody::FileCancel { to: Some("b".into()), file_id: "f".into() };
         assert_eq!(stop.recipient(), Some("b"));
-        assert_eq!(RoomBody::Chat { text: "x".into() }.recipient(), None);
+        assert_eq!(RoomBody::Chat { text: "x".into(), shareable: true }.recipient(), None);
+        assert_eq!(RoomBody::HistoryRequest { to: "c".into() }.recipient(), Some("c"));
+        let rekey = RoomBody::AdminRekey { kicked: Some("x".into()), grants: vec![] };
+        assert_eq!(rekey.recipient(), None, "rekeys are gossiped so relayed members get theirs");
+    }
+
+    #[test]
+    fn test_sealed_grant_only_opens_for_its_recipient() {
+        let admin = NostrBurnerKey::generate().unwrap();
+        let bo = NostrBurnerKey::generate().unwrap();
+        let cy = NostrBurnerKey::generate().unwrap();
+        let grant = RoomGrant { room: "newroom".into(), key: "k3y".into() };
+        let sealed = SealedGrant::seal(&admin, bo.pubkey(), &grant).unwrap();
+        assert_eq!(sealed.to, bo.pubkey());
+        assert_eq!(sealed.open(&bo, admin.pubkey()), Some(grant));
+        assert_eq!(sealed.open(&cy, admin.pubkey()), None, "another member cannot open it");
+        assert_eq!(sealed.open(&bo, cy.pubkey()), None, "wrong sender key fails");
+    }
+
+    #[test]
+    fn test_chat_shareable_defaults_to_false() {
+        let parsed: RoomBody = serde_json::from_str(r#"{"type":"Chat","data":{"text":"hi"}}"#).unwrap();
+        assert_eq!(parsed, RoomBody::Chat { text: "hi".into(), shareable: false });
     }
 
     #[test]

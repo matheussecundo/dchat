@@ -1018,6 +1018,31 @@ header {
   unicode-bidi: isolate;
 }
 
+/* Admin and history */
+.lobby-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.history-badge {
+  font-size: 0.75rem;
+  color: #93c5fd;
+  background-color: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 9999px;
+  padding: 2px 8px;
+  cursor: help;
+}
+
+.kick-btn {
+  margin-inline-start: auto;
+  padding: 1px 8px;
+  font-size: 0.7rem;
+}
+
 /* Room-wide file cards */
 .file-share-counts {
   display: flex;
