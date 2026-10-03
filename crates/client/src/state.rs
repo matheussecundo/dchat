@@ -1,4 +1,6 @@
-use protocol::{generate_key, generate_room_id, key_from_base64, key_to_base64, KEY_LENGTH};
+use protocol::{
+    generate_key, generate_room_id, key_from_base64, key_to_base64, FragmentParams, KEY_LENGTH,
+};
 use serde::{Deserialize, Serialize};
 use web_sys::window;
 
@@ -141,58 +143,40 @@ pub fn format_file_size(bytes: u64) -> String {
     }
 }
 
+/// Parameters of the current URL fragment (empty when unavailable).
+pub fn current_fragment() -> FragmentParams {
+    window()
+        .and_then(|w| w.location().hash().ok())
+        .map(|hash| FragmentParams::parse(&hash))
+        .unwrap_or_default()
+}
+
 /// Parse or initialize the ephemeral room ID and 256-bit secret key from the URL hash.
-/// Format: #room=<room_id>&key=<base64_secret_key>
+/// Format: #room=<room_id>&key=<base64_secret_key>[&other=params...]
+/// Every other fragment parameter (e.g. `relays`) is preserved when the hash is rewritten.
 /// Invariant: URL hash fragments are NEVER sent to the HTTP or WebSocket server.
 pub fn get_or_init_credentials() -> Option<(String, [u8; KEY_LENGTH], String)> {
-    let win = window()?;
-    let location = win.location();
+    let location = window()?.location();
     let hash = location.hash().ok()?;
+    let mut params = FragmentParams::parse(&hash);
 
-    let mut room_id: Option<String> = None;
-    let mut key_b64: Option<String> = None;
+    // A key without a room is not trusted: a fresh room always gets a fresh key.
+    let existing_room = params.get("room").map(str::to_string);
+    let existing_key = existing_room
+        .as_ref()
+        .and(params.get("key"))
+        .and_then(|k| key_from_base64(k).ok().map(|bytes| (bytes, k.to_string())));
+    let room = existing_room.unwrap_or_else(generate_room_id);
+    let (key_bytes, b64_str) = existing_key.unwrap_or_else(|| {
+        let k = generate_key();
+        (k, key_to_base64(&k))
+    });
 
-    if hash.starts_with('#') {
-        let query = &hash[1..];
-        for pair in query.split('&') {
-            let mut parts = pair.split('=');
-            match (parts.next(), parts.next()) {
-                (Some("room"), Some(val)) if !val.is_empty() => {
-                    room_id = Some(val.to_string());
-                }
-                (Some("key"), Some(val)) if !val.is_empty() => {
-                    key_b64 = Some(val.to_string());
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let (room, key_bytes, b64_str) = match (room_id, key_b64) {
-        (Some(r), Some(k_str)) => {
-            if let Ok(k) = key_from_base64(&k_str) {
-                (r, k, k_str)
-            } else {
-                let k = generate_key();
-                let b64 = key_to_base64(&k);
-                (r, k, b64)
-            }
-        }
-        (Some(r), None) => {
-            let k = generate_key();
-            let b64 = key_to_base64(&k);
-            (r, k, b64)
-        }
-        (None, _) => {
-            let r = generate_room_id();
-            let k = generate_key();
-            let b64 = key_to_base64(&k);
-            (r, k, b64)
-        }
-    };
+    params.set("room", &room);
+    params.set("key", &b64_str);
 
     // Update URL hash without page reload if it changed
-    let target_hash = format!("#room={}&key={}", room, b64_str);
+    let target_hash = params.to_hash();
     if hash != target_hash {
         let _ = location.set_hash(&target_hash);
     }
@@ -224,23 +208,16 @@ pub fn current_time_string() -> String {
 pub fn get_default_relays() -> Vec<String> {
     let mut relays = Vec::new();
 
-    if let Some(win) = window() {
-        if let Ok(hash) = win.location().hash() {
-            if hash.starts_with('#') {
-                for pair in hash[1..].split('&') {
-                    let mut parts = pair.split('=');
-                    if let (Some("relays"), Some(val)) = (parts.next(), parts.next()) {
-                        for r in val.split(',') {
-                            let trimmed = r.trim();
-                            if !trimmed.is_empty() {
-                                relays.push(trimmed.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    if let Some(val) = current_fragment().get("relays") {
+        relays.extend(
+            val.split(',')
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+                .map(str::to_string),
+        );
+    }
 
+    if let Some(win) = window() {
         if let Ok(hostname) = win.location().hostname() {
             let is_local = hostname == "localhost" || hostname == "127.0.0.1";
             let is_lan = hostname.starts_with("192.168.")

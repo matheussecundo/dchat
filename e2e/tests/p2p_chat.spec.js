@@ -86,3 +86,17 @@ test('2-peer ephemeral WebRTC P2P chat, zero storage, and memory wipe', async ({
   await context1.close();
   await context2.close();
 });
+
+test('custom URL fragment params survive room/key initialization', async ({ page }) => {
+  const relay = 'ws://127.0.0.1:3333/nostr';
+  await page.goto(`/#relays=${relay}&future=1`);
+  await page.waitForSelector('text=🔒 dchat');
+
+  await page.waitForFunction(() => window.location.hash.includes('room=') && window.location.hash.includes('&key='));
+  const hash = await page.evaluate(() => window.location.hash);
+  expect(hash).toContain(`relays=${relay}`);
+  expect(hash).toContain('future=1');
+
+  // The custom relay is the one used for signaling.
+  await expect(page.locator('.status-indicator')).toContainText('Waiting for Peer', { timeout: 10000 });
+});
