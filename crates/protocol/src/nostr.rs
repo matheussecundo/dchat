@@ -265,6 +265,15 @@ impl NostrBurnerKey {
     }
 }
 
+/// Parse a 64-byte BIP-340 signature. The length is checked first because k256's
+/// `Signature::try_from` panics on short input instead of returning an error.
+fn parse_signature(sig_bytes: &[u8]) -> Option<Signature> {
+    if sig_bytes.len() != 64 {
+        return None;
+    }
+    Signature::try_from(sig_bytes).ok()
+}
+
 /// Verify a NostrEvent signature according to NIP-01 and BIP-340.
 pub fn verify_event(event: &NostrEvent) -> Result<bool, NostrError> {
     let serialized = serialize_for_id(
@@ -290,9 +299,9 @@ pub fn verify_event(event: &NostrEvent) -> Result<bool, NostrError> {
     };
 
     let sig_bytes = hex::decode(&event.sig)?;
-    let signature = match Signature::try_from(sig_bytes.as_slice()) {
-        Ok(s) => s,
-        Err(_) => return Ok(false),
+    let signature = match parse_signature(&sig_bytes) {
+        Some(s) => s,
+        None => return Ok(false),
     };
 
     Ok(verifying_key.verify_raw(&id_bytes, &signature).is_ok())
@@ -385,6 +394,18 @@ mod tests {
         event.content = "Tampered content".into();
         let is_valid = verify_event(&event).expect("Verify");
         assert!(!is_valid, "Tampered event must fail verification");
+    }
+
+    #[test]
+    fn test_malformed_signature_rejected_without_panic() {
+        let key = NostrBurnerKey::generate().expect("Generate burner key");
+        let mut event = key
+            .create_event(KIND_EPHEMERAL_SIGNAL, vec![], "x".into(), 1700000000)
+            .expect("Create event");
+        for bad in ["00", "", &"ab".repeat(63), &"ab".repeat(65)] {
+            event.sig = bad.to_string();
+            assert!(!verify_event(&event).unwrap_or(false));
+        }
     }
 
     #[test]
