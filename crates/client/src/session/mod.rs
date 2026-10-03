@@ -2,6 +2,7 @@
 //! for room messages, and the roster that drives the member list and caps.
 //! Everything lives in RAM and is gone on reload.
 
+mod files;
 mod lounge;
 
 use crate::mesh::{LinkEvent, LinkEventHandler, PeerLink};
@@ -11,6 +12,7 @@ use crate::state::{
     current_fragment, current_time_string, get_default_relays, ChatMessageUi, ConnectionStatus,
     LinkUi, LoungeMemberUi, MemberUi, MyVoiceUi, Notice,
 };
+use files::Files;
 use lounge::{Lounge, VoiceInfo};
 use leptos::*;
 use protocol::crypto::{decrypt_json, encrypt_json};
@@ -94,6 +96,7 @@ struct Inner {
     last_presence_echo: Cell<f64>,
     closed: Cell<bool>,
     lounge: Lounge,
+    files: Files,
 }
 
 impl RoomSession {
@@ -141,6 +144,7 @@ impl RoomSession {
                 last_presence_echo: Cell::new(0.0),
                 closed: Cell::new(false),
                 lounge: Lounge::default(),
+                files: Files::default(),
             }),
         };
 
@@ -306,6 +310,7 @@ impl RoomSession {
             LinkEvent::Closed => self.drop_link(remote, true),
             LinkEvent::Message(text) => self.on_frame(remote, &text),
             LinkEvent::Track(track, stream) => self.on_remote_track(remote, track, stream),
+            LinkEvent::Chunk(packet) => self.on_file_chunk(remote, &packet),
         }
     }
 
@@ -315,6 +320,7 @@ impl RoomSession {
         };
         link.close();
         self.forget_member_media(remote, false);
+        self.on_file_peer_lost(remote);
         if failed {
             self.inner
                 .retry_after
@@ -397,6 +403,15 @@ impl RoomSession {
             return;
         }
         self.inner.dedup.borrow_mut().insert(&envelope.id);
+
+        // Direct-only messages (file requests and the like) must come straight from
+        // their author over this link, are for us alone and are never relayed.
+        if let Some(to) = envelope.body.recipient() {
+            if to == self.inner.me && envelope.author == from {
+                self.apply(&envelope);
+            }
+            return;
+        }
         self.apply(&envelope);
 
         let targets = self
@@ -464,6 +479,7 @@ impl RoomSession {
                     text: text.clone(),
                     time: current_time_string(),
                     notice: None,
+                    file: None,
                 });
             }
             RoomBody::VoiceState { seq, in_voice, voice_ts, mic_muted, video, video_ts } => {
@@ -477,12 +493,28 @@ impl RoomSession {
                 };
                 self.on_voice_state(envelope, info);
             }
+            RoomBody::FileOffer { .. } => self.on_file_offer(envelope),
+            RoomBody::FileRequest { .. } | RoomBody::FileQueued { .. } | RoomBody::FileCancel { .. } => {
+                self.on_file_message(author, &envelope.body);
+            }
             RoomBody::Leave => {
                 if author != self.inner.me {
                     self.remove_member(author);
                 }
             }
         }
+    }
+
+    /// Sign `body` and send it over the direct link to `to` only (no local apply, no relay).
+    fn send_direct(&self, to: &str, body: RoomBody) -> bool {
+        let Some(link) = self.link(to) else {
+            return false;
+        };
+        let Ok(envelope) = RoomEnvelope::sign(&self.inner.identity, js_sys::Date::now() as u64, body) else {
+            return false;
+        };
+        self.inner.dedup.borrow_mut().insert(&envelope.id);
+        self.encode(&envelope).is_some_and(|frame| link.send(&frame))
     }
 
     fn is_valid_admin_proof(&self, author: &str, proof: &str) -> bool {
@@ -503,6 +535,7 @@ impl RoomSession {
             link.close();
         }
         self.forget_member_media(pubkey, true);
+        self.on_file_peer_lost(pubkey);
         self.publish_link_state();
         self.recompute();
     }
@@ -545,8 +578,9 @@ impl RoomSession {
             }
         }
         let names = self.inner.names.borrow();
-        for pk in previous.difference(&present) {
-            if let Some(name) = names.get(pk).filter(|_| *pk != me) {
+        let departed: Vec<String> = previous.difference(&present).filter(|pk| **pk != me).cloned().collect();
+        for pk in &departed {
+            if let Some(name) = names.get(pk) {
                 notices.push(Notice::Left(name.clone()));
             }
         }
@@ -588,7 +622,11 @@ impl RoomSession {
                 text: String::new(),
                 time: current_time_string(),
                 notice: Some(notice),
+                file: None,
             });
+        }
+        for pk in &departed {
+            self.on_file_author_gone(pk);
         }
         self.refresh_status();
         self.recompute_lounge();
@@ -711,6 +749,14 @@ impl RoomSession {
         }) as Box<dyn Fn(String)>);
         let _ = js_sys::Reflect::set(&hooks, &"blockPeer".into(), block_peer.as_ref());
         block_peer.forget();
+
+        // Pause between uploaded chunks, so upload queues and interruptions can be observed.
+        let s = self.clone();
+        let throttle = Closure::wrap(Box::new(move |ms: i32| {
+            s.inner.files.chunk_delay_ms.set(ms);
+        }) as Box<dyn Fn(i32)>);
+        let _ = js_sys::Reflect::set(&hooks, &"throttleUploads".into(), throttle.as_ref());
+        throttle.forget();
 
         let _ = js_sys::Reflect::set(&win, &"__dchat".into(), &hooks);
     }

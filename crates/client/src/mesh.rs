@@ -10,12 +10,13 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     window, MediaStream, MediaStreamTrack, MessageEvent, RtcConfiguration, RtcDataChannel,
-    RtcDataChannelEvent, RtcDataChannelInit, RtcDataChannelState, RtcIceCandidate,
+    RtcDataChannelEvent, RtcDataChannelInit, RtcDataChannelState, RtcDataChannelType, RtcIceCandidate,
     RtcIceCandidateInit, RtcPeerConnection, RtcPeerConnectionIceEvent, RtcPeerConnectionState,
     RtcRtpSender, RtcSdpType, RtcSessionDescriptionInit, RtcSignalingState, RtcTrackEvent,
 };
 
 const CHAT_LABEL: &str = "chat";
+const FILE_LABEL: &str = "file-transfer";
 const ICE_BATCH_DELAY_MS: i32 = 100;
 const ICE_BATCH_MAX: usize = 10;
 
@@ -28,6 +29,8 @@ pub enum LinkEvent {
     Message(String),
     /// The member started sending a media track (with its stream, when announced).
     Track(MediaStreamTrack, Option<MediaStream>),
+    /// A binary packet arrived on the file-transfer channel.
+    Chunk(Vec<u8>),
 }
 
 /// Receives `(remote pubkey, link id, event)`. The id tells a replaced link's late
@@ -44,6 +47,8 @@ pub struct PeerLink {
     making_offer: Rc<Cell<bool>>,
     ignore_offer: Cell<bool>,
     chat: Rc<RefCell<Option<RtcDataChannel>>>,
+    /// Binary channel for encrypted file chunks, separate so transfers never delay chat.
+    files: Rc<RefCell<Option<RtcDataChannel>>>,
     /// Candidates that arrived before the remote description (relays can reorder).
     pending_ice: RefCell<Vec<IceCandidateData>>,
     closed: Rc<Cell<bool>>,
@@ -80,6 +85,7 @@ impl PeerLink {
             making_offer: Rc::new(Cell::new(false)),
             ignore_offer: Cell::new(false),
             chat: Rc::new(RefCell::new(None)),
+            files: Rc::new(RefCell::new(None)),
             pending_ice: RefCell::new(Vec::new()),
             closed: Rc::new(Cell::new(false)),
             pool,
@@ -95,16 +101,27 @@ impl PeerLink {
             let init = RtcDataChannelInit::new();
             init.set_ordered(true);
             let dc = link.pc.create_data_channel_with_data_channel_dict(CHAT_LABEL, &init);
-            attach_chat_callbacks(&dc, &link.remote, id, on_event, notify_closed);
+            attach_chat_callbacks(&dc, &link.remote, id, on_event.clone(), notify_closed);
             *link.chat.borrow_mut() = Some(dc);
+            let file_dc = link.pc.create_data_channel_with_data_channel_dict(FILE_LABEL, &init);
+            attach_file_callbacks(&file_dc, &link.remote, id, on_event);
+            *link.files.borrow_mut() = Some(file_dc);
         } else {
             let chat = link.chat.clone();
+            let files = link.files.clone();
             let remote = link.remote.clone();
             let on_dc = Closure::wrap(Box::new(move |ev: RtcDataChannelEvent| {
                 let dc = ev.channel();
-                if dc.label() == CHAT_LABEL {
-                    attach_chat_callbacks(&dc, &remote, id, on_event.clone(), notify_closed.clone());
-                    *chat.borrow_mut() = Some(dc);
+                match dc.label().as_str() {
+                    CHAT_LABEL => {
+                        attach_chat_callbacks(&dc, &remote, id, on_event.clone(), notify_closed.clone());
+                        *chat.borrow_mut() = Some(dc);
+                    }
+                    FILE_LABEL => {
+                        attach_file_callbacks(&dc, &remote, id, on_event.clone());
+                        *files.borrow_mut() = Some(dc);
+                    }
+                    _ => {}
                 }
             }) as Box<dyn FnMut(RtcDataChannelEvent)>);
             link.pc.set_ondatachannel(Some(on_dc.as_ref().unchecked_ref()));
@@ -129,6 +146,23 @@ impl PeerLink {
         }
     }
 
+    /// Send an encrypted file chunk; returns whether it was handed to the browser.
+    pub fn send_bytes(&self, bytes: &[u8]) -> bool {
+        match self.files.borrow().as_ref() {
+            Some(dc) if dc.ready_state() == RtcDataChannelState::Open => dc.send_with_u8_array(bytes).is_ok(),
+            _ => false,
+        }
+    }
+
+    /// Bytes queued on the file channel (for backpressure); `None` when it is not open.
+    pub fn file_buffered_amount(&self) -> Option<u32> {
+        self.files
+            .borrow()
+            .as_ref()
+            .filter(|dc| dc.ready_state() == RtcDataChannelState::Open)
+            .map(|dc| dc.buffered_amount())
+    }
+
     /// Start sending `track` (as part of `stream`) to this member; triggers renegotiation.
     pub fn add_track(&self, track: &MediaStreamTrack, stream: &MediaStream) -> RtcRtpSender {
         self.pc.add_track_0(track, stream)
@@ -136,8 +170,10 @@ impl PeerLink {
 
     pub fn close(&self) {
         self.closed.set(true);
-        if let Some(dc) = self.chat.borrow().as_ref() {
-            dc.close();
+        for channel in [&self.chat, &self.files] {
+            if let Some(dc) = channel.borrow().as_ref() {
+                dc.close();
+            }
         }
         self.pc.close();
     }
@@ -375,6 +411,18 @@ fn attach_chat_callbacks(
         dc.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
         on_message.forget();
     }
+}
+
+fn attach_file_callbacks(dc: &RtcDataChannel, remote: &str, id: u64, on_event: LinkEventHandler) {
+    dc.set_binary_type(RtcDataChannelType::Arraybuffer);
+    let remote = remote.to_string();
+    let on_message = Closure::wrap(Box::new(move |ev: MessageEvent| {
+        if let Ok(buffer) = ev.data().dyn_into::<js_sys::ArrayBuffer>() {
+            on_event(&remote, id, LinkEvent::Chunk(js_sys::Uint8Array::new(&buffer).to_vec()));
+        }
+    }) as Box<dyn FnMut(MessageEvent)>);
+    dc.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+    on_message.forget();
 }
 
 /// `pc.setLocalDescription()` with no argument: creates the right offer or answer for

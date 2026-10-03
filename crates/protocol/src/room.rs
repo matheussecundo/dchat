@@ -194,6 +194,101 @@ impl GossipDedup {
     }
 }
 
+/// At most this many uploads run at once per author; further requests wait in line.
+pub const MAX_CONCURRENT_UPLOADS: usize = 2;
+
+/// An upload of `file_id` to `peer`.
+pub type Upload = (String, String);
+
+/// What happened to a download request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueDecision {
+    Start,
+    /// 1-based place in line.
+    Queued(usize),
+    /// The same peer already asked for the same file.
+    Duplicate,
+}
+
+/// The author's FIFO of uploads, running at most `max_active` at once.
+#[derive(Debug)]
+pub struct UploadQueue {
+    max_active: usize,
+    active: Vec<Upload>,
+    waiting: VecDeque<Upload>,
+}
+
+impl UploadQueue {
+    pub fn new(max_active: usize) -> Self {
+        Self {
+            max_active: max_active.max(1),
+            active: Vec::new(),
+            waiting: VecDeque::new(),
+        }
+    }
+
+    pub fn request(&mut self, file_id: &str, peer: &str) -> QueueDecision {
+        let upload = (file_id.to_string(), peer.to_string());
+        if self.active.contains(&upload) || self.waiting.contains(&upload) {
+            return QueueDecision::Duplicate;
+        }
+        if self.active.len() < self.max_active {
+            self.active.push(upload);
+            QueueDecision::Start
+        } else {
+            self.waiting.push_back(upload);
+            QueueDecision::Queued(self.waiting.len())
+        }
+    }
+
+    /// Remove every upload matching `pred` and promote waiting ones into freed slots.
+    /// Returns the uploads that must start now.
+    fn remove_where(&mut self, pred: impl Fn(&Upload) -> bool) -> Vec<Upload> {
+        self.active.retain(|u| !pred(u));
+        self.waiting.retain(|u| !pred(u));
+        let mut started = Vec::new();
+        while self.active.len() < self.max_active {
+            let Some(next) = self.waiting.pop_front() else {
+                break;
+            };
+            self.active.push(next.clone());
+            started.push(next);
+        }
+        started
+    }
+
+    /// An upload finished or was cancelled.
+    pub fn finish(&mut self, file_id: &str, peer: &str) -> Vec<Upload> {
+        self.remove_where(|(f, p)| f == file_id && p == peer)
+    }
+
+    /// The peer left: drop all its uploads.
+    pub fn remove_peer(&mut self, peer: &str) -> Vec<Upload> {
+        self.remove_where(|(_, p)| p == peer)
+    }
+
+    /// The file was withdrawn: drop all its uploads.
+    pub fn remove_file(&mut self, file_id: &str) -> Vec<Upload> {
+        self.remove_where(|(f, _)| f == file_id)
+    }
+
+    pub fn is_active(&self, file_id: &str, peer: &str) -> bool {
+        self.active.iter().any(|(f, p)| f == file_id && p == peer)
+    }
+
+    /// Waiting uploads with their 1-based positions, to tell each requester.
+    pub fn positions(&self) -> Vec<(Upload, usize)> {
+        self.waiting.iter().cloned().zip(1..).collect()
+    }
+
+    /// (active, waiting) uploads of one file, for the author's card.
+    pub fn counts(&self, file_id: &str) -> (usize, usize) {
+        let active = self.active.iter().filter(|(f, _)| f == file_id).count();
+        let waiting = self.waiting.iter().filter(|(f, _)| f == file_id).count();
+        (active, waiting)
+    }
+}
+
 /// Parse a cap parameter: absent or invalid uses `default`; `0` / `unlimited` means no cap.
 pub fn parse_cap(value: Option<&str>, default: usize) -> Option<usize> {
     match value.map(str::trim) {
@@ -389,6 +484,45 @@ mod tests {
         assert!(latest_beyond_cap(entries(), Some(3)).is_empty());
         assert!(latest_beyond_cap(entries(), None).is_empty());
         assert_eq!(latest_beyond_cap(entries(), Some(0)).len(), 3);
+    }
+
+    fn up(f: &str, p: &str) -> Upload {
+        (f.to_string(), p.to_string())
+    }
+
+    #[test]
+    fn test_upload_queue_fifo_with_two_slots() {
+        let mut q = UploadQueue::new(MAX_CONCURRENT_UPLOADS);
+        assert_eq!(q.request("f", "a"), QueueDecision::Start);
+        assert_eq!(q.request("f", "b"), QueueDecision::Start);
+        assert_eq!(q.request("f", "c"), QueueDecision::Queued(1));
+        assert_eq!(q.request("g", "d"), QueueDecision::Queued(2));
+        assert_eq!(q.request("f", "c"), QueueDecision::Duplicate);
+        assert_eq!(q.request("f", "a"), QueueDecision::Duplicate);
+        assert_eq!(q.counts("f"), (2, 1));
+
+        // a finishes: c (first in line) starts, d moves up.
+        assert_eq!(q.finish("f", "a"), vec![up("f", "c")]);
+        assert!(q.is_active("f", "c"));
+        assert_eq!(q.positions(), vec![(up("g", "d"), 1)]);
+
+        // Finishing something unknown changes nothing.
+        assert!(q.finish("zzz", "a").is_empty());
+    }
+
+    #[test]
+    fn test_upload_queue_peer_and_file_removal() {
+        let mut q = UploadQueue::new(2);
+        q.request("f", "a");
+        q.request("g", "a");
+        q.request("f", "b");
+        q.request("f", "c");
+        // a leaves: both its uploads go, b and c start.
+        assert_eq!(q.remove_peer("a"), vec![up("f", "b"), up("f", "c")]);
+        assert!(q.positions().is_empty());
+        // The file is withdrawn: nothing left.
+        assert!(q.remove_file("f").is_empty());
+        assert_eq!(q.counts("f"), (0, 0));
     }
 
     #[test]

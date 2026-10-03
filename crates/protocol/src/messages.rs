@@ -118,7 +118,35 @@ pub enum RoomBody {
         video: VideoKind,
         video_ts: u64,
     },
+    /// A file the author shares with the room. Each member who wants it pulls it from
+    /// the author over their direct link; files are never relayed.
+    FileOffer {
+        file_id: String,
+        name: String,
+        size: u64,
+        mime_type: String,
+        caption: Option<String>,
+    },
+    /// Ask the author (`to`) to send their file over our direct link.
+    FileRequest { to: String, file_id: String },
+    /// The author withdraws the offer for everyone (`to: None`), or one side stops a
+    /// single transfer (`to: Some(peer)`).
+    FileCancel { to: Option<String>, file_id: String },
+    /// The author tells a requester its 1-based place in the upload queue.
+    FileQueued { to: String, file_id: String, position: usize },
     Leave,
+}
+
+impl RoomBody {
+    /// The single member this message is for; such messages travel only over the direct
+    /// link between the two and are never gossip-relayed.
+    pub fn recipient(&self) -> Option<&str> {
+        match self {
+            RoomBody::FileRequest { to, .. } | RoomBody::FileQueued { to, .. } => Some(to),
+            RoomBody::FileCancel { to, .. } => to.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 /// A room message signed by its author's session key, so it can be gossip-relayed
@@ -188,6 +216,17 @@ mod tests {
         let mut retimed = env;
         retimed.ts = 43;
         assert!(!retimed.verify());
+    }
+
+    #[test]
+    fn test_room_body_recipient() {
+        let request = RoomBody::FileRequest { to: "a".into(), file_id: "f".into() };
+        assert_eq!(request.recipient(), Some("a"));
+        let withdraw = RoomBody::FileCancel { to: None, file_id: "f".into() };
+        assert_eq!(withdraw.recipient(), None);
+        let stop = RoomBody::FileCancel { to: Some("b".into()), file_id: "f".into() };
+        assert_eq!(stop.recipient(), Some("b"));
+        assert_eq!(RoomBody::Chat { text: "x".into() }.recipient(), None);
     }
 
     #[test]

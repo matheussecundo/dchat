@@ -78,7 +78,7 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 8. **Phase 8: Discord-like Group Rooms over a Serverless Mesh (In Progress)**
    - **8a Mesh core (Completed)**: one `RTCPeerConnection` per member pair with perfect negotiation; recipient-addressed signaling; session nicknames shown with a short key tag; live member list; room messages signed by their author and gossip-relayed to members without a direct link; per-room member cap with deterministic "latest joiner loses" and an admin seat; admin link vs invite link; optional TURN server in the URL.
    - **8b Voice lounge (Completed)**: Discord-style drop-in voice/video lounge replacing the 1:1 ring flow; per-person mic, speaker, camera (with front/rear flip) and screen-share toggles; video grid with fullscreen; speaking indicator; "X joined voice" prompt; per-room voice and video limits; audio processing settings carry over.
-   - 8c Room-wide file sharing with per-downloader transfers.
+   - **8c Group file sharing (Completed)**: room-wide file cards; each member pulls the file straight from the sender over their own direct link; the sender uploads to at most 2 members at once and queues the rest; decline, cancel and withdraw; transfers stop if the sender leaves.
    - 8d Admin kick and invite rotation (rekey), opt-in message history for late joiners.
    - 8e Typing indicator, reactions, edit/delete, private DMs and @mentions.
 
@@ -104,6 +104,15 @@ Each room has one drop-in voice lounge. Nobody is rung:
 - Audio and video only flow between members who are in the lounge, directly peer-to-peer (DTLS-SRTP). A member you only reach `via` someone else is shown with ⚠: you can't hear or see each other without a direct link (see NAT below).
 - **Voice limit** (default 8) and **video limit** (default 6) are set when creating the room. When the lounge is full, **Join Voice** is disabled; if two people race for the last seat, the one who joined last is moved out, using the same rule as the member limit. The limits apply to admins too.
 
+### Sharing Files
+
+Tap **📎**, pick a file, optionally add a caption and send. Everyone in the room sees the card:
+- Each member who taps **⬇️ Download** pulls the file **directly from the sender** over their own WebRTC link. Every 64 KB chunk is sealed with ChaCha20-Poly1305 using the room key. Files are never relayed through other members or any server.
+- The sender uploads to at most **2 members at a time**; others see *⏳ Queued (#n)* until a slot frees up. The sender's card shows how many are sending, waiting and done.
+- **Decline** just hides the buttons for you. The sender can **Withdraw** the offer for everyone, which also stops transfers in progress.
+- Downloads stream to disk when the browser supports the File System Access API; otherwise they are assembled in memory (with a warning above 250 MB).
+- If you have no direct link to the sender (`via` in the member list), the card says *Sender not directly reachable*. If the sender leaves, pending offers are marked unavailable and running transfers stop.
+
 ### URL Fragment Parameters
 
 Everything after `#` stays in the browser and is never sent to any server.
@@ -128,7 +137,7 @@ dchat uses STUN only by default, so it needs no infrastructure of its own. Most 
 What you will see:
 - The member list shows the other person as **`via <name>`** instead of `direct`.
 - **Text still works**: messages are relayed through a member who is connected to both of you. They stay encrypted with the room key and signed by their author, so the relaying member (who is in the room anyway) cannot alter or forge them.
-- **Voice, video and files don't work with that person**: media and file transfers only travel over direct links (the lounge marks them with ⚠).
+- **Voice, video and files don't work with that person**: media and file transfers only travel over direct links (the lounge marks them with ⚠, file cards say *Sender not directly reachable*).
 - If no mutual member exists, the person stays `connecting…` until a path appears.
 
 **Fix: supply a TURN server.** A TURN server forwards encrypted packets between members who can't reach each other. It sees IP addresses and traffic timing, but never message or media content (DTLS/SRTP plus the room key). Add it to the room URL and share that URL:

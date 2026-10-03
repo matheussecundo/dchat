@@ -78,12 +78,13 @@ dchat/
 │           ├── main.rs         # Leptos UI: create/join lobby, room view, member panel, modals
 │           ├── i18n.rs         # Strongly typed i18n, browser detection, RTL handling
 │           ├── media.rs        # Capture (mic/camera/screen), per-member <audio>, video attach, speaking meter
-│           ├── mesh.rs         # PeerLink: one RTCPeerConnection per member, perfect negotiation, batched ICE, tracks
+│           ├── mesh.rs         # PeerLink: one RTCPeerConnection per member (chat + file-transfer channels), perfect negotiation, batched ICE, tracks
 │           ├── names.rs        # Random session names, name sanitizing, pubkey tags
 │           ├── nostr_pool.rs   # Multi-relay pool, fan-out broadcast, deduplication, recipient filtering
 │           ├── qr.rs           # On-the-fly SVG QR code generation
 │           ├── session/
 │           │   ├── mod.rs      # RoomSession: mesh orchestration, signed gossip, roster, caps, e2e hooks
+│           │   ├── files.rs    # Room-wide file cards, per-requester pulls, upload queue, chunk I/O
 │           │   └── lounge.rs   # Voice lounge: seats, per-link senders, voice/video caps, speaking, controls
 │           └── state.rs        # UI types, URL fragment helpers (create room, invite/admin links), relays
 ├── e2e/                        # Playwright automated multi-peer end-to-end tests
@@ -96,7 +97,7 @@ dchat/
 │       ├── audio_call.spec.js  # 2-member lounge audio, mic/speaker mute, leave (replaceTrack null) and rejoin
 │       ├── video_call.spec.js  # Camera tiles, camera flip keeps the mic, camera off, grid teardown
 │       ├── screen_share.spec.js# Screen share, switch to camera on the same sender, stop
-│       ├── file_sharing.spec.js# P2P encrypted file sharing with multi-chunk transfer
+│       ├── file_sharing.spec.js# Room-wide file cards: parallel pulls, decline/withdraw, upload queue, unreachable sender, sender leaving
 │       ├── audio_settings.spec.js # Mic processing checkboxes, live track swap in voice, carry-over, reload reset
 │       └── i18n.spec.js        # UI localization, dynamic switching, Arabic RTL, zero persistence
 ├── README.md                   # User guide, building, running locally, mobile test
@@ -160,10 +161,9 @@ dchat/
 - **Phase 8: Discord-like Group Rooms over a Serverless Mesh (In Progress, branch `group-rooms`)**
   - **8a Mesh core (Completed)**: create/join lobby with session nicknames; full-mesh `PeerLink`s with addressed signaling and perfect negotiation; signed `RoomEnvelope` gossip with relay to members lacking a direct link; roster with mutual-link reachability and `direct` / `via X` / `connecting` link states; per-room member cap (`&max=`, default 25, `0` = unlimited) with deterministic latest-joiner eviction and an admin seat; admin link (`adm`/`admsk`) vs invite link; optional TURN in the fragment; join/leave notices.
   - **8b Voice lounge (Completed)**: drop-in lounge replaces the ring flow (`CallInvite`/`CallAccepted` gone); signed `VoiceState` gossip (seat time, mic, video kind); per-room voice/video caps (`&maxa=`, `&maxv=`) with the same latest-loses rule (admins not exempt); one audio + one video sender per link (`addTrack` once, then `replaceTrack`, `None` to stop: no renegotiation on toggles); camera/screen as one video source with front/rear flip; per-member hidden `<audio class="remote-audio">`; Web Audio speaking meter; video grid with fullscreen; "X joined voice" prompt; audio settings carry over between joins.
-  - 8c Room-wide file cards, per-downloader pulls, upload queue (max 2 concurrent). Merge `group-rooms` to main after 8c.
+  - **8c Group file sharing (Completed)**: `FileOffer` card gossiped to the room; `FileRequest`/`FileQueued`/`FileCancel{to}` are direct-only envelopes (`RoomBody::recipient`), applied only when received straight from their author and never relayed; per-link binary `file-transfer` channel with backpressure; chunks accepted only from the offer's author over its direct link and in order; `UploadQueue` (max 2 concurrent, FIFO, unit-tested); decline (local), cancel, withdraw (room-wide); transfers stop on link loss, offers marked unavailable when the author leaves the present set. Merged to main after 8c.
   - 8d Admin kick / invite rotation (ECDH-sealed rekey), opt-in signed history for late joiners (`&hist=1`).
   - 8e Typing indicator, reactions, edit/delete, ECDH-encrypted DMs, @mentions.
-  - Until 8c lands, the 1:1 file-sharing spec is skipped (`test.skip`) because that flow no longer exists.
 
 ---
 
@@ -217,4 +217,6 @@ When writing or reviewing code, check off every item:
 - [ ] Room messages are `RoomEnvelope`s: signature verified before dedup/apply, attribution taken from the verified author only.
 - [ ] The admin secret (`admsk`) never appears in the invite link, the QR code, logs, or any message.
 - [ ] Untrusted input (names, signatures, SDP, envelopes from peers) is length-checked and never panics the client (k256 signature parsing panics on short input: use `parse_signature`).
-- [ ] `e2e-hooks` code stays behind `#[cfg(feature = "e2e-hooks")]` and out of `make build-client` output.
+- [ ] `e2e-hooks` code (`window.__dchat.selfPubkey/blockPeer/throttleUploads`) stays behind `#[cfg(feature = "e2e-hooks")]` and out of `make build-client` output.
+- [ ] Direct-only room messages (`RoomBody::recipient()` is `Some`) are applied only when `to` is us and the envelope came straight from its author; they are never relayed.
+- [ ] File chunks are accepted only from the offer's author over that author's own link, strictly in order; anything else aborts or is dropped.

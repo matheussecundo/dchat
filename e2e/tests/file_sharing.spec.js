@@ -1,183 +1,148 @@
 import { test, expect } from '@playwright/test';
+import {
+  createRoom,
+  expectDirectMesh,
+  expectNoStorage,
+  inviteFrom,
+  joinRoom,
+  memberRow,
+  newMember,
+  sendMessage,
+} from './helpers.js';
 
-// The 1:1 call/file flow is replaced by the group model; rewritten in milestone 8c.
-test.skip(true, 'Rewritten for group rooms in milestone 8c');
+test.describe.configure({ timeout: 120000 });
 
-test('2-peer ephemeral WebRTC P2P encrypted file sharing with multi-chunk transfer', async ({ browser }) => {
-  const context1 = await browser.newContext({ acceptDownloads: true });
-  const context2 = await browser.newContext({ acceptDownloads: true });
+async function room(browser, names) {
+  const members = [];
+  for (const name of names) members.push(await newMember(browser, name));
+  const invite = inviteFrom(await createRoom(members[0].page, { name: names[0] }));
+  for (let i = 1; i < names.length; i++) await joinRoom(members[i].page, invite, names[i]);
+  for (let i = 0; i < names.length; i++) await expectDirectMesh(members[i].page, names, names[i]);
+  return members;
+}
 
-  const page1 = await context1.newPage();
-  const page2 = await context2.newPage();
+async function shareFile(page, name, content, caption) {
+  await page.setInputFiles('#file-input-hidden', { name, mimeType: 'application/pdf', buffer: Buffer.from(content) });
+  await expect(page.locator('.attachment-chip')).toContainText(name);
+  if (caption) await page.locator('footer.input-bar input').fill(caption);
+  await page.locator('footer.input-bar .send-btn').click();
+  await expect(page.locator('.attachment-chip')).toHaveCount(0);
+}
 
-  page1.on('console', msg => {
-    if (msg.type() === 'error') console.log('Page1 ERROR:', msg.text());
-  });
-  page2.on('console', msg => {
-    if (msg.type() === 'error') console.log('Page2 ERROR:', msg.text());
-  });
-
-  // 1. Peer 1 opens dchat
-  await page1.goto('/');
-  await page1.waitForSelector('text=🔒 dchat');
-  await page1.waitForFunction(() => window.location.hash.includes('#room=') && window.location.hash.includes('&key='));
-  const peer1Url = page1.url();
-
-  // 2. Peer 2 joins using the same secret hash
-  await page2.goto(peer1Url);
-  await page2.waitForSelector('text=🔒 dchat');
-
-  // 3. Wait for P2P connection
-  console.log('Waiting for P2P connection...');
-  await expect(page1.locator('.status-indicator')).toContainText('Connected (E2EE P2P Active)', { timeout: 15000 });
-  await expect(page2.locator('.status-indicator')).toContainText('Connected (E2EE P2P Active)', { timeout: 15000 });
-  console.log('P2P connected!');
-
-  // 4. Test Staging Chip: Peer 1 stages a file and removes it
-  await page1.setInputFiles('#file-input-hidden', {
-    name: 'temporary_draft.txt',
-    mimeType: 'text/plain',
-    buffer: Buffer.from('Will be removed before sending'),
-  });
-  await expect(page1.locator('.attachment-chip')).toBeVisible();
-  await expect(page1.locator('.attachment-chip')).toContainText('temporary_draft.txt');
-  // Click remove button ✕ on chip
-  await page1.locator('.attachment-chip button.btn-remove-attachment').click();
-  await expect(page1.locator('.attachment-chip')).toHaveCount(0);
-
-  // 5. Peer 1 selects a multi-chunk file (150 KB > 64 KB CHUNK_SIZE => 3 chunks)
-  const fileName = 'confidential_report.pdf';
-  const fileContent = 'Zero-Knowledge Confidential Report Header\n' + 'A'.repeat(150000) + '\nReport Footer';
-  const fileBuffer = Buffer.from(fileContent);
-
-  await page1.setInputFiles('#file-input-hidden', {
-    name: fileName,
-    mimeType: 'application/pdf',
-    buffer: fileBuffer,
-  });
-  await expect(page1.locator('.attachment-chip')).toBeVisible();
-  await expect(page1.locator('.attachment-chip')).toContainText(fileName);
-
-  // Peer 1 adds a caption and clicks Send
-  const caption = 'Here is the confidential audit document for your review.';
-  const input1 = page1.locator('footer.input-bar input');
-  await input1.fill(caption);
-  await page1.locator('footer.input-bar button:has-text("Send")').click();
-
-  // Staging chip should be cleared after sending
-  await expect(page1.locator('.attachment-chip')).toHaveCount(0);
-
-  // 6. Verify file card appears on Peer 1 (sender)
-  const p1Card = page1.locator('.file-card');
-  await expect(p1Card).toBeVisible();
-  await expect(p1Card).toContainText(fileName);
-  await expect(p1Card).toContainText('146.5 KB');
-  await expect(page1.locator('.chat-container')).toContainText(caption);
-
-  // 7. Verify file card appears on Peer 2 (receiver)
-  const p2Card = page2.locator('.file-card');
-  await expect(p2Card).toBeVisible({ timeout: 5000 });
-  await expect(p2Card).toContainText(fileName);
-  await expect(p2Card).toContainText('146.5 KB');
-  await expect(page2.locator('.chat-container')).toContainText(caption);
-  const downloadBtn = p2Card.locator('button.file-download-btn');
-  await expect(downloadBtn).toBeVisible();
-  await expect(downloadBtn).toContainText('Download');
-
-  // 8. Trigger download fallback in page2 to capture via Playwright's download event
-  await page2.evaluate(() => {
-    // Delete showSaveFilePicker so browser uses in-memory Blob + anchor download fallback
-    delete window.showSaveFilePicker;
-  });
-
-  const downloadPromise = page2.waitForEvent('download');
-  console.log('Peer 2 clicking Download button...');
-  await downloadBtn.click();
-
+/** Click Download and return the downloaded bytes (in-memory Blob fallback). */
+async function downloadVia(page, card) {
+  await page.evaluate(() => { delete window.showSaveFilePicker; });
+  const downloadPromise = page.waitForEvent('download');
+  await card.locator('.file-download-btn').click();
   const download = await downloadPromise;
-  expect(download.suggestedFilename()).toBe(fileName);
-
-  // Read downloaded file stream and assert exact byte-for-byte fidelity
-  const stream = await download.createReadStream();
   const chunks = [];
-  for await (const chunk of stream) {
-    chunks.push(chunk);
+  for await (const chunk of await download.createReadStream()) chunks.push(chunk);
+  return { name: download.suggestedFilename(), text: Buffer.concat(chunks).toString('utf-8') };
+}
+
+test('room-wide file card: each member pulls it directly, byte-exact, and the author sees the tally', async ({ browser }) => {
+  const [ana, bo, cy] = await room(browser, ['Ana', 'Bo', 'Cy']);
+
+  // Staging chip can be removed before sending.
+  await ana.page.setInputFiles('#file-input-hidden', { name: 'draft.txt', mimeType: 'text/plain', buffer: Buffer.from('x') });
+  await ana.page.locator('.attachment-chip button.btn-remove-attachment').click();
+  await expect(ana.page.locator('.attachment-chip')).toHaveCount(0);
+
+  // 150 KB = 3 encrypted 64 KB chunks.
+  const fileName = 'confidential_report.pdf';
+  const content = 'Zero-Knowledge Confidential Report Header\n' + 'A'.repeat(150000) + '\nReport Footer';
+  await shareFile(ana.page, fileName, content, 'Audit document for both of you.');
+
+  const anaCard = ana.page.locator('.file-card');
+  await expect(anaCard).toContainText('Shared with the room');
+  await expect(anaCard).toContainText('146.5 KB');
+  for (const m of [bo, cy]) {
+    const card = m.page.locator('.file-card');
+    await expect(card).toContainText(fileName, { timeout: 10000 });
+    await expect(m.page.locator('.chat-container')).toContainText('Audit document for both of you.');
+    await expect(card.locator('.file-download-btn')).toBeVisible();
   }
-  const downloadedText = Buffer.concat(chunks).toString('utf-8');
-  expect(downloadedText).toBe(fileContent);
-  console.log('File successfully transferred, decrypted, and verified bit-for-bit!');
 
-  // 9. Verify UI completed status on both sides
-  await expect(p2Card).toContainText('Download complete', { timeout: 10000 });
-  await expect(p1Card).toContainText('Sent successfully', { timeout: 10000 });
+  for (const m of [bo, cy]) {
+    const got = await downloadVia(m.page, m.page.locator('.file-card'));
+    expect(got.name).toBe(fileName);
+    expect(got.text).toBe(content);
+    await expect(m.page.locator('.file-card')).toContainText('Download complete');
+  }
+  await expect(anaCard.locator('.file-count-done')).toHaveText('Received: 2', { timeout: 10000 });
+  await expect(anaCard.locator('.file-count-active')).toHaveText('Sending: 0');
 
-  // 10. Verify Zero Persistence Invariant
-  const p1Storage = await page1.evaluate(() => ({
-    local: localStorage.length,
-    session: sessionStorage.length,
-  }));
-  const p2Storage = await page2.evaluate(() => ({
-    local: localStorage.length,
-    session: sessionStorage.length,
-  }));
-  expect(p1Storage.local).toBe(0);
-  expect(p1Storage.session).toBe(0);
-  expect(p2Storage.local).toBe(0);
-  expect(p2Storage.session).toBe(0);
-  console.log('Zero persistence confirmed: no stored messages or transfers.');
+  for (const m of [ana, bo, cy]) await expectNoStorage(m.page);
+  await bo.page.reload();
+  await expect(bo.page.locator('.file-card')).toHaveCount(0);
 
-  // 11. Verify Reload Memory Wipe
-  await page2.reload();
-  await page2.waitForSelector('text=🔒 dchat');
-  await expect(page2.locator('.file-card')).toHaveCount(0);
-  await expect(page2.locator('.message-bubble')).toHaveCount(0);
-  console.log('Memory wipe confirmed: chat and transfers wiped on reload.');
-
-  await context1.close();
-  await context2.close();
+  for (const m of [ana, bo, cy]) await m.context.close();
 });
 
-test('File offer decline by receiver cancels transfer on both peers', async ({ browser }) => {
-  const context1 = await browser.newContext();
-  const context2 = await browser.newContext();
+test('decline is local; withdrawing an offer reaches everyone', async ({ browser }) => {
+  const [ana, bo, cy] = await room(browser, ['Ana', 'Bo', 'Cy']);
+  await shareFile(ana.page, 'plans.pdf', 'secret plans', null);
 
-  const page1 = await context1.newPage();
-  const page2 = await context2.newPage();
+  await bo.page.locator('.file-card .file-decline-btn').click({ timeout: 10000 });
+  await expect(bo.page.locator('.file-card')).toContainText('Declined');
+  await expect(ana.page.locator('.file-card')).toContainText('Shared with the room');
 
-  // 1. Setup session
-  await page1.goto('/');
-  await page1.waitForSelector('text=🔒 dchat');
-  await page1.waitForFunction(() => window.location.hash.includes('#room=') && window.location.hash.includes('&key='));
-  const peer1Url = page1.url();
+  await ana.page.locator('.file-card .file-withdraw-btn').click();
+  await expect(ana.page.locator('.file-card')).toContainText('Withdrawn by sender');
+  await expect(cy.page.locator('.file-card')).toContainText('Withdrawn by sender', { timeout: 10000 });
+  await expect(cy.page.locator('.file-download-btn')).toHaveCount(0);
 
-  await page2.goto(peer1Url);
-  await page2.waitForSelector('text=🔒 dchat');
-
-  await expect(page1.locator('.status-indicator')).toContainText('Connected (E2EE P2P Active)', { timeout: 15000 });
-  await expect(page2.locator('.status-indicator')).toContainText('Connected (E2EE P2P Active)', { timeout: 15000 });
-
-  // 2. Peer 1 sends a file offer
-  await page1.setInputFiles('#file-input-hidden', {
-    name: 'declined_file.bin',
-    mimeType: 'application/octet-stream',
-    buffer: Buffer.from('Some sensitive bytes'),
-  });
-  await page1.locator('footer.input-bar button:has-text("Send")').click();
-
-  // 3. Peer 2 receives offer and clicks Decline
-  const p2Card = page2.locator('.file-card');
-  await expect(p2Card).toBeVisible({ timeout: 5000 });
-  const declineBtn = p2Card.locator('button:has-text("Decline")');
-  await expect(declineBtn).toBeVisible();
-  await declineBtn.click();
-
-  // 4. Verify cancelled status on Peer 2 and Peer 1
-  await expect(p2Card).toContainText('Cancelled', { timeout: 5000 });
-  const p1Card = page1.locator('.file-card');
-  await expect(p1Card).toContainText('Cancelled', { timeout: 5000 });
-  console.log('File offer decline correctly propagated to both peers!');
-
-  await context1.close();
-  await context2.close();
+  for (const m of [ana, bo, cy]) await m.context.close();
 });
 
+test('uploads run two at a time; the third requester waits its turn', async ({ browser }) => {
+  const [ana, bo, cy, dee] = await room(browser, ['Ana', 'Bo', 'Cy', 'Dee']);
+  await ana.page.evaluate(() => window.__dchat.throttleUploads(400));
+  const content = 'Q'.repeat(5 * 65536); // 5 chunks, ~2 s per upload when throttled
+  await shareFile(ana.page, 'queue.bin', content, null);
+
+  for (const m of [bo, cy, dee]) {
+    await m.page.evaluate(() => { delete window.showSaveFilePicker; });
+    await expect(m.page.locator('.file-download-btn')).toBeVisible({ timeout: 10000 });
+  }
+  const downloads = [bo, cy, dee].map((m) => m.page.waitForEvent('download', { timeout: 60000 }));
+  await bo.page.locator('.file-download-btn').click();
+  await cy.page.locator('.file-download-btn').click();
+  await expect(ana.page.locator('.file-count-active')).toHaveText('Sending: 2', { timeout: 10000 });
+  await dee.page.locator('.file-download-btn').click();
+
+  await expect(dee.page.locator('.file-queued')).toHaveText('⏳ Queued (#1)', { timeout: 10000 });
+  await expect(ana.page.locator('.file-count-waiting')).toHaveText('Waiting: 1');
+
+  for (const d of downloads) await d;
+  await expect(dee.page.locator('.file-card')).toContainText('Download complete', { timeout: 30000 });
+  await expect(ana.page.locator('.file-count-done')).toHaveText('Received: 3', { timeout: 10000 });
+
+  for (const m of [ana, bo, cy, dee]) await m.context.close();
+});
+
+test('files need a direct link, and a transfer stops when the sender leaves', async ({ browser }) => {
+  const [ana, bo, cy] = await room(browser, ['Ana', 'Bo', 'Cy']);
+
+  // Ana and Cy cannot connect directly: Cy sees the card but cannot download it.
+  const anaKey = await ana.page.evaluate(() => window.__dchat.selfPubkey());
+  const cyKey = await cy.page.evaluate(() => window.__dchat.selfPubkey());
+  await ana.page.evaluate((pk) => window.__dchat.blockPeer(pk), cyKey);
+  await cy.page.evaluate((pk) => window.__dchat.blockPeer(pk), anaKey);
+  await expect(memberRow(cy.page, 'Ana')).toHaveAttribute('data-link', 'via', { timeout: 15000 });
+
+  await ana.page.evaluate(() => window.__dchat.throttleUploads(500));
+  await shareFile(ana.page, 'big.bin', 'Z'.repeat(10 * 65536), null);
+  await expect(cy.page.locator('.file-card .file-unreachable')).toHaveText('Sender not directly reachable', { timeout: 10000 });
+  await expect(cy.page.locator('.file-download-btn')).toHaveCount(0);
+
+  // Bo starts downloading; Ana leaves mid-transfer.
+  await bo.page.evaluate(() => { delete window.showSaveFilePicker; });
+  await bo.page.locator('.file-download-btn').click({ timeout: 10000 });
+  await expect(bo.page.locator('.file-progress-label')).toBeVisible({ timeout: 10000 });
+  await ana.context.close();
+  await expect(bo.page.locator('.file-card')).toContainText(/Interrupted|Sender left the room/, { timeout: 20000 });
+  await expect(cy.page.locator('.file-card')).toContainText('Sender left the room', { timeout: 20000 });
+
+  for (const m of [bo, cy]) await m.context.close();
+});

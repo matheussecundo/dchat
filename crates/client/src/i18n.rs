@@ -113,6 +113,11 @@ pub fn t_replace_1(lang: Language, key: &'static str, placeholder: &str, val: &s
     template.replace(placeholder, val)
 }
 
+/// Helper for large file warning description.
+pub fn large_file_warning_desc(lang: Language, file_name: &str) -> String {
+    t_replace_1(lang, "large_file_desc", "{name}", file_name)
+}
+
 /// Detect browser locale using `window.navigator.languages` and `window.navigator.language`.
 pub fn detect_browser_language() -> Language {
     if let Some(win) = window() {

@@ -116,6 +116,49 @@ pub struct RoomCaps {
     pub video: Option<usize>,
 }
 
+/// A file card's state, as seen by this tab.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum FileTransferStatus {
+    /// Someone else's offer we may download.
+    Offered,
+    Queued { position: usize },
+    Downloading { progress: u8, speed_kb: u64 },
+    Completed,
+    Declined,
+    Cancelled,
+    Withdrawn,
+    SenderLeft,
+    /// The direct link dropped mid-transfer.
+    Interrupted,
+    /// Our own offer: uploads running, waiting, finished.
+    Sharing { active: usize, waiting: usize, done: usize },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileOfferInfo {
+    pub file_id: String,
+    pub name: String,
+    pub size: u64,
+    pub mime_type: String,
+    pub status: FileTransferStatus,
+}
+
+pub fn format_file_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.1} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.1} KB", b / KB)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 /// System lines shown in the chat timeline.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Notice {
@@ -133,6 +176,7 @@ pub struct ChatMessageUi {
     pub text: String,
     pub time: String,
     pub notice: Option<Notice>,
+    pub file: Option<FileOfferInfo>,
 }
 
 /// Parameters of the current URL fragment (empty when unavailable).

@@ -7,18 +7,26 @@ mod qr;
 mod session;
 mod state;
 
-use i18n::{detect_browser_language, t, t_replace_1, update_document_direction, Language};
+use i18n::{
+    detect_browser_language, large_file_warning_desc, t, t_replace_1, update_document_direction,
+    Language,
+};
 use leptos::*;
 use names::{pubkey_tag, random_name, sanitize_name, MAX_NAME_CHARS};
 use protocol::{parse_cap, VideoKind, DEFAULT_MEMBER_CAP, DEFAULT_VIDEO_CAP, DEFAULT_VOICE_CAP};
 use qr::generate_qr_svg;
 use session::{RoomSession, SessionSignals};
 use state::{
-    admin_url, create_room, invite_url, read_credentials, AudioSettings, ChatMessageUi,
-    ConnectionStatus, LinkUi, LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RoomCaps,
+    admin_url, create_room, format_file_size, invite_url, read_credentials, AudioSettings,
+    ChatMessageUi, ConnectionStatus, FileOfferInfo, FileTransferStatus, LinkUi, LoungeMemberUi,
+    MemberUi, MyVoiceUi, Notice, RoomCaps,
 };
 use std::collections::{HashMap, HashSet};
+use wasm_bindgen::JsCast;
 use web_sys::{window, HtmlInputElement};
+
+/// Without direct-to-disk streaming, downloads above this size are buffered in RAM: warn first.
+const LARGE_FILE_BYTES: u64 = 250 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Screen {
@@ -65,6 +73,10 @@ fn App() -> impl IntoView {
     let (speaking, set_speaking) = create_signal(HashSet::<String>::new());
     let (voice_prompt, set_voice_prompt) = create_signal(Option::<String>::None);
     let (audio_settings, set_audio_settings) = create_signal(AudioSettings::default());
+
+    // File sharing
+    let (staged_file, set_staged_file) = create_signal(Option::<web_sys::File>::None);
+    let (large_file_warning, set_large_file_warning) = create_signal(Option::<(String, String)>::None);
     let (show_audio_settings, set_show_audio_settings) = create_signal(false);
 
     let session_ref = store_value(None::<RoomSession>);
@@ -117,15 +129,24 @@ fn App() -> impl IntoView {
 
     let send_message = move || {
         let text = input_text.get_untracked().trim().to_string();
-        if text.is_empty() {
+        let staged = staged_file.get_untracked();
+        if text.is_empty() && staged.is_none() {
             return;
         }
         session_ref.with_value(|session| {
-            if let Some(session) = session {
-                match session.send_chat(&text) {
-                    Ok(()) => set_input_text.set(String::new()),
-                    Err(err) => log::warn!("Failed to send message: {err}"),
+            let Some(session) = session else {
+                return;
+            };
+            let result = match staged {
+                Some(file) => session.share_file(file, (!text.is_empty()).then_some(text)),
+                None => session.send_chat(&text),
+            };
+            match result {
+                Ok(()) => {
+                    set_input_text.set(String::new());
+                    set_staged_file.set(None);
                 }
+                Err(err) => log::warn!("Failed to send: {err}"),
             }
         });
     };
@@ -223,6 +244,30 @@ fn App() -> impl IntoView {
             );
         }
     });
+
+    let download_file = move |file_id: String| {
+        let large = messages.with(|msgs| {
+            msgs.iter()
+                .find(|m| m.id == file_id)
+                .and_then(|m| m.file.as_ref())
+                .filter(|f| f.size > LARGE_FILE_BYTES)
+                .map(|f| f.name.clone())
+        });
+        let has_picker = window()
+            .and_then(|w| js_sys::Reflect::get(&w, &"showSaveFilePicker".into()).ok())
+            .is_some_and(|f| f.is_function());
+        match large {
+            Some(name) if !has_picker => set_large_file_warning.set(Some((file_id, name))),
+            _ => with_session(&|s| s.download_file(&file_id)),
+        }
+    };
+    let file_action = move |action: FileAction, file_id: String| match action {
+        FileAction::Download => download_file(file_id),
+        FileAction::Decline => with_session(&|s| s.decline_file(&file_id)),
+        FileAction::Cancel => with_session(&|s| s.cancel_download(&file_id)),
+        FileAction::Withdraw => with_session(&|s| s.withdraw_file(&file_id)),
+    };
+    let has_messages = create_memo(move |_| messages.with(|m| !m.is_empty()));
 
     let is_connected = move || status.get() == ConnectionStatus::Connected;
     let display_name = move |pubkey: &str| {
@@ -356,9 +401,13 @@ fn App() -> impl IntoView {
         }
         let row_class = if msg.is_self { "message-row self" } else { "message-row peer" };
         let author = msg.author.clone();
+        let body = match msg.file {
+            Some(file) => file_card(lang, file, msg.text, msg.author.clone(), members, file_action).into_view(),
+            None => view! { <div class="message-bubble" dir="auto">{msg.text}</div> }.into_view(),
+        };
         view! {
             <div class=row_class>
-                <div class="message-bubble" dir="auto">{msg.text}</div>
+                {body}
                 <div class="message-meta">
                     <span class="message-author" dir="auto">{move || display_name(&author)}</span>
                     <span class="message-tag">{format!(" · {}", pubkey_tag(&msg.author))}</span>
@@ -545,7 +594,7 @@ fn App() -> impl IntoView {
             <div class="room-body">
                 <main class="chat-container">
                     {move || {
-                        if messages.with(|m| m.is_empty()) {
+                        if !has_messages.get() {
                             view! {
                                 <div class="empty-state">
                                     <h3>{move || t(lang.get(), "empty_title")}</h3>
@@ -554,6 +603,7 @@ fn App() -> impl IntoView {
                                         <li>{move || t(lang.get(), "check_e2ee")}</li>
                                         <li>{move || t(lang.get(), "check_audio")}</li>
                                         <li>{move || t(lang.get(), "check_video")}</li>
+                                        <li>{move || t(lang.get(), "check_files")}</li>
                                         <li>{move || t(lang.get(), "check_zk")}</li>
                                         <li>{move || t(lang.get(), "check_zero_storage")}</li>
                                         <li>{move || t(lang.get(), "check_destruction")}</li>
@@ -565,7 +615,7 @@ fn App() -> impl IntoView {
                             view! {
                                 <For
                                     each=move || messages.get()
-                                    key=|msg| msg.id.clone()
+                                    key=|msg| (msg.id.clone(), msg.file.as_ref().map(|f| f.status.clone()))
                                     children=message_view
                                 />
                             }
@@ -589,11 +639,61 @@ fn App() -> impl IntoView {
                 </aside>
             </div>
 
+            {move || staged_file.get().map(|file| view! {
+                <div class="attachment-chip">
+                    <span class="attachment-icon">"📎"</span>
+                    <span class="attachment-name">{file.name()}</span>
+                    <span class="attachment-size">{format!("({})", format_file_size(file.size() as u64))}</span>
+                    <button
+                        class="btn-remove-attachment"
+                        on:click=move |_| set_staged_file.set(None)
+                        title=move || t(lang.get(), "file_remove_title")
+                    >
+                        "✕"
+                    </button>
+                </div>
+            })}
+
+            <input
+                type="file"
+                id="file-input-hidden"
+                style="display: none;"
+                on:change=move |ev| {
+                    let target: HtmlInputElement = event_target(&ev);
+                    if let Some(file) = target.files().and_then(|files| files.get(0)) {
+                        set_staged_file.set(Some(file));
+                    }
+                    target.set_value("");
+                }
+            />
+
             <footer class="input-bar">
+                <button
+                    class="btn btn-secondary attach-btn"
+                    disabled=move || !is_connected()
+                    on:click=move |_| {
+                        if let Some(input) = window()
+                            .and_then(|w| w.document())
+                            .and_then(|d| d.get_element_by_id("file-input-hidden"))
+                            .and_then(|el| el.dyn_into::<HtmlInputElement>().ok())
+                        {
+                            input.click();
+                        }
+                    }
+                    title=move || t(lang.get(), "file_attach_title")
+                >
+                    "📎"
+                </button>
                 <input
                     type="text"
                     placeholder=move || {
-                        if is_connected() { t(lang.get(), "placeholder_connected") } else { t(lang.get(), "placeholder_waiting") }
+                        if !is_connected() {
+                            t(lang.get(), "placeholder_waiting")
+                        } else if staged_file.with(|f| f.is_some()) {
+                            t(lang.get(), "placeholder_caption")
+                        } else {
+                            t(lang.get(), "placeholder_connected")
+                        }
                     }
                     prop:value=move || input_text.get()
                     on:input=move |ev| {
@@ -608,7 +708,7 @@ fn App() -> impl IntoView {
                 />
                 <button
                     class="btn btn-primary send-btn"
-                    disabled=move || !is_connected() || input_text.get().trim().is_empty()
+                    disabled=move || !is_connected() || (input_text.get().trim().is_empty() && staged_file.with(|f| f.is_none()))
                     on:click=move |_| send_message()
                 >
                     {move || t(lang.get(), "btn_send")}
@@ -757,10 +857,139 @@ fn App() -> impl IntoView {
                 }
             })}
 
+            // Large file notice (no direct-to-disk streaming in this browser)
+            {move || large_file_warning.get().map(|(file_id, name)| view! {
+                <div class="modal-backdrop">
+                    <div class="modal-content">
+                        <h3>{move || t(lang.get(), "large_file_title")}</h3>
+                        <p>{move || large_file_warning_desc(lang.get(), &name)}</p>
+                        <p class="modal-subtext">{move || t(lang.get(), "large_file_subdesc")}</p>
+                        <div class="modal-actions">
+                            <button class="btn btn-secondary" on:click=move |_| set_large_file_warning.set(None)>
+                                {move || t(lang.get(), "btn_cancel")}
+                            </button>
+                            <button
+                                class="btn btn-primary"
+                                on:click=move |_| {
+                                    set_large_file_warning.set(None);
+                                    with_session(&|s| s.download_file(&file_id));
+                                }
+                            >
+                                {move || t(lang.get(), "btn_proceed_anyway")}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            })}
+
             {move || toast.get().map(|key| {
                 set_timeout(move || set_toast.set(None), std::time::Duration::from_secs(3));
                 view! { <div class="toast">{move || t(lang.get(), key)}</div> }
             })}
+        </div>
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FileAction {
+    Download,
+    Decline,
+    Cancel,
+    Withdraw,
+}
+
+/// A shared file card. Rendered again whenever its status changes (it is part of the key).
+fn file_card(
+    lang: ReadSignal<Language>,
+    file: FileOfferInfo,
+    caption: String,
+    author: String,
+    members: ReadSignal<Vec<MemberUi>>,
+    on_action: impl Fn(FileAction, String) + Copy + 'static,
+) -> impl IntoView {
+    let id = file.file_id.clone();
+    let button = move |action: FileAction, class: &'static str, key: &'static str| {
+        let id = id.clone();
+        view! {
+            <button class=class on:click=move |_| on_action(action, id.clone())>
+                {move || t(lang.get(), key)}
+            </button>
+        }
+    };
+    let status_line = |key: &'static str, class: &'static str| {
+        view! { <span class=format!("file-status-text {class}")>{move || t(lang.get(), key)}</span> }.into_view()
+    };
+    let actions = match file.status {
+        FileTransferStatus::Sharing { active, waiting, done } => view! {
+            <div class="file-status-row">
+                <span class="file-status-text">{move || t(lang.get(), "file_shared_room")}</span>
+                {button(FileAction::Withdraw, "btn btn-sm btn-danger file-withdraw-btn", "file_withdraw")}
+            </div>
+            <div class="file-share-counts">
+                <span class="file-count-active">{move || t_replace_1(lang.get(), "file_sending", "{n}", &active.to_string())}</span>
+                <span class="file-count-waiting">{move || t_replace_1(lang.get(), "file_waiting_count", "{n}", &waiting.to_string())}</span>
+                <span class="file-count-done">{move || t_replace_1(lang.get(), "file_done_count", "{n}", &done.to_string())}</span>
+            </div>
+        }
+        .into_view(),
+        FileTransferStatus::Offered => {
+            let reachable = move || members.with(|m| m.iter().any(|x| x.pubkey == author && x.link == LinkUi::Direct));
+            let download = button(FileAction::Download, "btn btn-sm btn-primary file-download-btn", "file_download");
+            let decline = button(FileAction::Decline, "btn btn-sm btn-secondary file-decline-btn", "file_decline");
+            view! {
+                <div class="file-status-row">
+                    {move || if reachable() {
+                        view! { {download.clone()} }.into_view()
+                    } else {
+                        view! { <span class="file-status-text cancelled file-unreachable">{move || t(lang.get(), "file_unreachable")}</span> }.into_view()
+                    }}
+                    {decline}
+                </div>
+            }
+            .into_view()
+        }
+        FileTransferStatus::Queued { position } => view! {
+            <div class="file-status-row">
+                <span class="file-status-text file-queued">{move || t_replace_1(lang.get(), "file_queued", "{n}", &position.to_string())}</span>
+                {button(FileAction::Cancel, "btn btn-sm btn-danger file-cancel-btn", "btn_cancel")}
+            </div>
+        }
+        .into_view(),
+        FileTransferStatus::Downloading { progress, speed_kb } => {
+            let speed = if speed_kb > 1024 { format!("{:.1} MB/s", speed_kb as f64 / 1024.0) } else { format!("{speed_kb} KB/s") };
+            view! {
+                <div class="file-progress-container">
+                    <div class="file-progress-bar">
+                        <div class="file-progress-fill" style=format!("width: {progress}%;")></div>
+                    </div>
+                    <div class="file-progress-meta">
+                        <span class="file-progress-label">
+                            {move || format!("{}: {}% ({})", t(lang.get(), "file_downloading"), progress, speed)}
+                        </span>
+                        {button(FileAction::Cancel, "btn btn-sm btn-danger file-cancel-btn", "btn_cancel")}
+                    </div>
+                </div>
+            }
+            .into_view()
+        }
+        FileTransferStatus::Completed => status_line("file_download_complete", "completed"),
+        FileTransferStatus::Declined => status_line("file_declined", "cancelled"),
+        FileTransferStatus::Cancelled => status_line("file_cancelled", "cancelled"),
+        FileTransferStatus::Withdrawn => status_line("file_withdrawn", "cancelled"),
+        FileTransferStatus::SenderLeft => status_line("file_sender_left", "cancelled"),
+        FileTransferStatus::Interrupted => status_line("file_interrupted", "cancelled"),
+    };
+    view! {
+        <div class="file-card" data-file-id=file.file_id.clone()>
+            <div class="file-card-header">
+                <span class="file-icon">"📦"</span>
+                <div class="file-info">
+                    <span class="file-name" dir="auto">{file.name}</span>
+                    <span class="file-size">{format_file_size(file.size)}</span>
+                </div>
+            </div>
+            {(!caption.is_empty()).then(|| view! { <div class="file-caption" dir="auto">{caption}</div> })}
+            <div class="file-card-actions">{actions}</div>
         </div>
     }
 }
