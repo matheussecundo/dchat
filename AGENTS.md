@@ -33,6 +33,20 @@ Every agent modifying this codebase must enforce these non-negotiable security a
      ```
      Or persistently with UFW: `sudo ufw allow 8443/tcp` (`sudo ufw delete allow 8443/tcp` to remove).
 
+5. **Group Mesh Invariants (Phase 8)**:
+   - **Topology**: full mesh, one `RTCPeerConnection` (`mesh::PeerLink`) per member pair. No SFU or any other server ever handles messages or media.
+   - **Addressed signaling**: `Offer`/`Answer`/`IceBatch` carry the recipient session pubkey in `to` (inside the encrypted payload); `NostrRelayPool` drops signals addressed to someone else. The lower pubkey of each pair dials; perfect negotiation (polite = higher pubkey) handles any later glare.
+   - **Signed room messages**: every data-channel message is a `RoomEnvelope` signed by its author's session key (`sign_message`, domain-separated from Nostr event signatures) and encrypted with the room key. Receivers verify the signature **before** recording the message id for dedup, then relay it to neighbors without a direct link to the author (`Roster::forward_targets`). Attribution always comes from the verified `author`, never from a self-declared name.
+   - **Admin secret**: `admsk` exists only in the creator's admin link. The invite link, the QR code and **🔗 Copy Link** always use `invite_url()`, which strips it.
+   - **Deterministic caps**: every member evaluates `Roster::evicted` / `latest_beyond_cap` on the same data; a member who finds itself evicted (room, voice seat or video slot) backs off on its own. Caps are enforced by honest clients, not cryptographically.
+   - **Lounge media**: media flows only between members who both hold a voice seat over an open direct link (`sync_media_for`). Each link has at most one audio and one video `RtcRtpSender`; toggles use `replaceTrack`, never add/remove, so SDP does not grow.
+
+6. **NAT Traversal (known limitation, must stay documented)**:
+   - ICE uses STUN only by default (`stun:stun.l.google.com:19302`). Pairs behind carrier-grade NAT (mobile data) or symmetric NAT often cannot link directly: roughly 10–20% of pairs, and more pairs fail as a room grows.
+   - Such pairs show `via <name>` in the member list: **text** still flows, gossip-relayed through a mutual member (signed, room-key encrypted). **Audio, video and files** need a direct link and are unavailable for that pair. With no mutual member the person stays `connecting…`.
+   - The fix is an optional TURN server supplied in the URL fragment (`&turn=…&turnuser=…&turnpass=…`, see `build_rtc_config` in `session.rs`). TURN relays encrypted packets only; it sees IPs and timing, never content.
+   - The README section "When Members Can't Connect Directly (NAT)" is the user-facing version; keep both in sync.
+
 ---
 
 ## 2. Repository Layout
@@ -44,8 +58,10 @@ dchat/
 │   ├── protocol/               # Shared types, messages, ChaCha20-Poly1305 crypto
 │   │   └── src/
 │   │       ├── crypto.rs       # 256-bit keygen, encrypt/decrypt, base64 helpers
-│   │       ├── messages.rs     # SignalPayload, DataChannelMessage, ICE types
-│   │       ├── nostr.rs        # NIP-01/16 types, BIP-340 Schnorr burner keys (k256), topic hashing
+│   │       ├── fragment.rs     # Order-preserving URL fragment parser (keeps unknown params)
+│   │       ├── messages.rs     # Addressed SignalPayload, signed RoomEnvelope/RoomBody, ICE types
+│   │       ├── nostr.rs        # NIP-01/16 types, BIP-340 Schnorr keys (k256), message signing, topic hashing
+│   │       ├── room.rs         # Roster, link graph, gossip routing, member/voice/video cap eviction, RoomParams (pure, unit-tested)
 │   │       └── lib.rs
 │   ├── server/                 # Axum backend: Static file server + dev TLS + local mock Nostr relay
 │   │   └── src/
@@ -59,20 +75,30 @@ dchat/
 │       ├── service-worker.js   # Caches immutable static assets ONLY (never state)
 │       ├── translations.json   # Embedded UI translation table for top 10 global languages
 │       └── src/
-│           ├── main.rs         # Leptos reactive UI, QR modal, Nostr relay modal, chat view
+│           ├── main.rs         # Leptos UI: create/join lobby, room view, member panel, modals
 │           ├── i18n.rs         # Strongly typed i18n, browser detection, RTL handling
-│           ├── nostr_pool.rs   # Multi-relay pool, fan-out broadcast, deduplication, burner key
+│           ├── media.rs        # Capture (mic/camera/screen), per-member <audio>, video attach, speaking meter
+│           ├── mesh.rs         # PeerLink: one RTCPeerConnection per member (chat + file-transfer channels), perfect negotiation, batched ICE, tracks
+│           ├── names.rs        # Random session names, name sanitizing, pubkey tags
+│           ├── nostr_pool.rs   # Multi-relay pool, fan-out broadcast, deduplication, recipient filtering
 │           ├── qr.rs           # On-the-fly SVG QR code generation
-│           ├── state.rs        # Reactive connection state, URL hash & relay parser
-│           └── webrtc.rs       # RtcPeerConnection & RTCDataChannel lifecycle with debounced ICE
-├── e2e/                        # Playwright automated 2-peer end-to-end tests
-│   ├── playwright.config.js    # Automatic server launch and browser runner
+│           ├── session/
+│           │   ├── mod.rs      # RoomSession: mesh orchestration, signed gossip, roster, caps, e2e hooks
+│           │   ├── files.rs    # Room-wide file cards, per-requester pulls, upload queue, chunk I/O
+│           │   └── lounge.rs   # Voice lounge: seats, per-link senders, voice/video caps, speaking, controls
+│           └── state.rs        # UI types, URL fragment helpers (create room, invite/admin links), relays
+├── e2e/                        # Playwright automated multi-peer end-to-end tests
+│   ├── playwright.config.js    # Automatic server launch (serves crates/client/dist-e2e) and browser runner
 │   └── tests/
-│       ├── p2p_chat.spec.js    # 2-peer handshake, E2EE message exchange, reload wipe
-│       ├── audio_call.spec.js  # 2-peer audio call handshake, mute toggle, and end call
-│       ├── video_call.spec.js  # 2-peer video call handshake, camera controls, and termination
-│       ├── file_sharing.spec.js# P2P encrypted file sharing with multi-chunk transfer
-│       ├── audio_settings.spec.js # Mic processing checkboxes, live track swap, reload reset
+│       ├── helpers.js          # createRoom / joinRoom / memberRow helpers shared by specs
+│       ├── group_chat.spec.js  # 3-member mesh, fan-out, caps + admin seat, relayed text without a direct link
+│       ├── group_voice.spec.js # 3-member lounge: join prompt, mesh audio, mute state, speaking, voice/video caps
+│       ├── p2p_chat.spec.js    # 2-member room, E2EE message exchange, reload wipe, fragment params
+│       ├── audio_call.spec.js  # 2-member lounge audio, mic/speaker mute, leave (replaceTrack null) and rejoin
+│       ├── video_call.spec.js  # Camera tiles, camera flip keeps the mic, camera off, grid teardown
+│       ├── screen_share.spec.js# Screen share, switch to camera on the same sender, stop
+│       ├── file_sharing.spec.js# Room-wide file cards: parallel pulls, decline/withdraw, upload queue, unreachable sender, sender leaving
+│       ├── audio_settings.spec.js # Mic processing checkboxes, live track swap in voice, carry-over, reload reset
 │       └── i18n.spec.js        # UI localization, dynamic switching, Arabic RTL, zero persistence
 ├── README.md                   # User guide, building, running locally, mobile test
 └── AGENTS.md                   # This document
@@ -132,6 +158,12 @@ dchat/
   - Unsupported switches (per `getSupportedConstraints()`) are disabled with a hint.
   - Local speaker mute on the hidden `#remote-audio` element for all call types; resets on call end. The peer is not notified.
   - Settings are RAM-only signals: they survive across calls within a tab and reset on reload.
+- **Phase 8: Discord-like Group Rooms over a Serverless Mesh (In Progress, branch `group-rooms`)**
+  - **8a Mesh core (Completed)**: create/join lobby with session nicknames; full-mesh `PeerLink`s with addressed signaling and perfect negotiation; signed `RoomEnvelope` gossip with relay to members lacking a direct link; roster with mutual-link reachability and `direct` / `via X` / `connecting` link states; per-room member cap (`&max=`, default 25, `0` = unlimited) with deterministic latest-joiner eviction and an admin seat; admin link (`adm`/`admsk`) vs invite link; optional TURN in the fragment; join/leave notices.
+  - **8b Voice lounge (Completed)**: drop-in lounge replaces the ring flow (`CallInvite`/`CallAccepted` gone); signed `VoiceState` gossip (seat time, mic, video kind); per-room voice/video caps (`&maxa=`, `&maxv=`) with the same latest-loses rule (admins not exempt); one audio + one video sender per link (`addTrack` once, then `replaceTrack`, `None` to stop: no renegotiation on toggles); camera/screen as one video source with front/rear flip; per-member hidden `<audio class="remote-audio">`; Web Audio speaking meter; video grid with fullscreen; "X joined voice" prompt; audio settings carry over between joins.
+  - **8c Group file sharing (Completed)**: `FileOffer` card gossiped to the room; `FileRequest`/`FileQueued`/`FileCancel{to}` are direct-only envelopes (`RoomBody::recipient`), applied only when received straight from their author and never relayed; per-link binary `file-transfer` channel with backpressure; chunks accepted only from the offer's author over its direct link and in order; `UploadQueue` (max 2 concurrent, FIFO, unit-tested); decline (local), cancel, withdraw (room-wide); transfers stop on link loss, offers marked unavailable when the author leaves the present set. Merged to main after 8c.
+  - 8d Admin kick / invite rotation (ECDH-sealed rekey), opt-in signed history for late joiners (`&hist=1`).
+  - 8e Typing indicator, reactions, edit/delete, ECDH-encrypted DMs, @mentions.
 
 ---
 
@@ -153,19 +185,24 @@ cargo check -p client --target wasm32-unknown-unknown
 ```
 *Expected: 0 errors, 0 warnings.*
 
-### Step 3: Trunk Frontend Build
-Rebuild the static distribution bundle:
+Also check the test-hook build compiles cleanly:
 ```bash
-cd crates/client && trunk build index.html && cd ../..
+cargo check -p client --target wasm32-unknown-unknown --features e2e-hooks
 ```
-*Expected: `dist/` directory populated with `client-..._bg.wasm`, `client-...js`, and assets.*
 
-### Step 4: Playwright End-to-End Test (2-Peer Simulation)
-Run the headless multi-browser test that spins up the server, connects 2 peers, negotiates WebRTC, sends encrypted messages, verifies zero storage, and confirms memory wipe on reload:
+### Step 3: Trunk Frontend Build
+Rebuild the production bundle and the E2E bundle (with `e2e-hooks`, never deployed):
+```bash
+make build-client build-client-e2e
+```
+*Expected: `crates/client/dist/` and `crates/client/dist-e2e/` populated with `client-..._bg.wasm`, `client-...js`, and assets. `grep -c __dchat crates/client/dist/*.wasm` must print `0`.*
+
+### Step 4: Playwright End-to-End Tests (Multi-Peer Simulation)
+Run the headless multi-browser suite: it spins up the server on `dist-e2e`, builds 2–4 member meshes, negotiates WebRTC, exchanges signed encrypted messages, checks caps, relayed text and zero storage, and confirms memory wipe on reload:
 ```bash
 cd e2e && npm test && cd ..
 ```
-*Expected: Test passes in under 5 seconds with green status.*
+*Expected: all specs green (skips only for flows not yet rewritten in the current Phase 8 milestone). The suite takes about 15–30 seconds; mesh specs each allow up to 90 seconds.*
 
 ---
 
@@ -177,3 +214,9 @@ When writing or reviewing code, check off every item:
 - [ ] URL hash fragment keys are never included in HTTP query parameters or WebSocket URLs.
 - [ ] The signaling server remains blind to message contents (payloads typed as `EncryptedPayload`).
 - [ ] Service Worker cache strictly limits itself to immutable static assets (`.wasm`, `.js`, `.css`, `.html`).
+- [ ] Room messages are `RoomEnvelope`s: signature verified before dedup/apply, attribution taken from the verified author only.
+- [ ] The admin secret (`admsk`) never appears in the invite link, the QR code, logs, or any message.
+- [ ] Untrusted input (names, signatures, SDP, envelopes from peers) is length-checked and never panics the client (k256 signature parsing panics on short input: use `parse_signature`).
+- [ ] `e2e-hooks` code (`window.__dchat.selfPubkey/blockPeer/throttleUploads`) stays behind `#[cfg(feature = "e2e-hooks")]` and out of `make build-client` output.
+- [ ] Direct-only room messages (`RoomBody::recipient()` is `Some`) are applied only when `to` is us and the envelope came straight from its author; they are never relayed.
+- [ ] File chunks are accepted only from the offer's author over that author's own link, strictly in order; anything else aborts or is dropped.

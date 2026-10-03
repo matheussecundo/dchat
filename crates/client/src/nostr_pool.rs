@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 pub struct NostrRelayPool {
-    pub burner_key: NostrBurnerKey,
+    pub burner_key: Rc<NostrBurnerKey>,
     #[allow(dead_code)]
     pub room_id: String,
     pub key: [u8; KEY_LENGTH],
@@ -23,15 +23,16 @@ pub struct NostrRelayPool {
 }
 
 impl NostrRelayPool {
+    /// `burner_key` is the session identity: it signs relay events here and room
+    /// envelopes in the session, so peers can tie both to the same member.
     pub fn new(
         room_id: String,
         key: [u8; KEY_LENGTH],
+        burner_key: Rc<NostrBurnerKey>,
         relays: Vec<String>,
         on_signal: Rc<dyn Fn(String, SignalPayload)>,
         on_relay_connected: Rc<dyn Fn(usize)>,
-    ) -> Result<Rc<Self>, String> {
-        let burner_key = NostrBurnerKey::generate()
-            .map_err(|e| format!("Failed to generate Nostr burner key: {e}"))?;
+    ) -> Rc<Self> {
         let topic = hash_room_topic(&room_id);
 
         let pool = Rc::new(Self {
@@ -149,6 +150,13 @@ impl NostrRelayPool {
                         };
 
                         if let Ok(signal) = decrypt_json::<SignalPayload>(&pool_c.key, &enc_payload) {
+                            // Addressed signals for other members are dropped here.
+                            if signal
+                                .recipient()
+                                .is_some_and(|to| to != pool_c.burner_key.pubkey())
+                            {
+                                continue;
+                            }
                             on_signal_c(event.pubkey, signal);
                         } else {
                             log::warn!("Failed to decrypt incoming Nostr signal payload with room key");
@@ -169,11 +177,7 @@ impl NostrRelayPool {
             });
         }
 
-        Ok(pool)
-    }
-
-    pub fn self_pubkey(&self) -> &str {
-        self.burner_key.pubkey()
+        pool
     }
 
     /// Broadcast a SignalPayload across all active relays in the pool.

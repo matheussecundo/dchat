@@ -3,6 +3,10 @@ name = "client"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Test-only `window.__dchat` probes for Playwright (see session.rs). Never in release builds.
+e2e-hooks = []
+
 [dependencies]
 protocol = { path = "../protocol" }
 leptos = { version = "0.6", features = ["csr"] }
@@ -71,4 +75,12 @@ features = [
   "Url",
   "HtmlAnchorElement",
   "RtcDataChannelType",
+  "RtcSignalingState",
+  "EventTarget",
+  "AudioContext",
+  "BaseAudioContext",
+  "AudioNode",
+  "AnalyserNode",
+  "MediaStreamAudioSourceNode",
+  "NodeList",
 ]

@@ -1,99 +1,53 @@
 import { test, expect } from '@playwright/test';
+import { createRoom, expectNoStorage, inviteFrom, joinRoom, newMember, sendMessage } from './helpers.js';
 
-test('2-peer ephemeral WebRTC P2P chat, zero storage, and memory wipe', async ({ browser }) => {
-  // 1. Create two isolated browser contexts representing Peer 1 and Peer 2
-  const context1 = await browser.newContext();
-  const context2 = await browser.newContext();
+test('2-member room: ephemeral WebRTC chat, zero storage, and memory wipe', async ({ browser }) => {
+  const peer1 = await newMember(browser, 'Page1');
+  const peer2 = await newMember(browser, 'Page2');
 
-  const page1 = await context1.newPage();
-  const page2 = await context2.newPage();
+  // 1. Peer 1 creates a room: room ID and key land in the URL fragment only.
+  const adminUrl = await createRoom(peer1.page, { name: 'Peer One' });
+  console.log('Peer 1 session URL:', adminUrl);
+  await expect(peer1.page.locator('.status-indicator')).toContainText('Waiting for Peer', { timeout: 10000 });
 
-  // Log console errors if any
-  page1.on('console', msg => {
-    if (msg.type() === 'error') console.log('Page1 ERROR:', msg.text());
-  });
-  page2.on('console', msg => {
-    if (msg.type() === 'error') console.log('Page2 ERROR:', msg.text());
-  });
+  // 2. Peer 2 opens the invite link and picks a name.
+  await joinRoom(peer2.page, inviteFrom(adminUrl), 'Peer Two');
 
-  // 2. Peer 1 opens the app
-  await page1.goto('/');
-  await page1.waitForSelector('text=🔒 dchat');
+  // 3. WebRTC P2P connection established on both sides.
+  await expect(peer1.page.locator('.status-indicator')).toContainText('Connected (E2EE P2P Active)', { timeout: 15000 });
+  await expect(peer2.page.locator('.status-indicator')).toContainText('Connected (E2EE P2P Active)', { timeout: 15000 });
 
-  // Peer 1 URL should have generated room and key in hash
-  await page1.waitForFunction(() => window.location.hash.includes('#room=') && window.location.hash.includes('&key='));
-  const peer1Url = page1.url();
-  console.log('Peer 1 session URL:', peer1Url);
-
-  // Peer 1 status should be waiting for peer
-  await expect(page1.locator('.status-indicator')).toContainText('Waiting for Peer');
-
-  // 3. Peer 2 opens the exact URL
-  await page2.goto(peer1Url);
-  await page2.waitForSelector('text=🔒 dchat');
-
-  // 4. Wait for WebRTC P2P connection to be established on both peers
-  console.log('Waiting for WebRTC P2P connection...');
-  await expect(page1.locator('.status-indicator')).toContainText('Connected (E2EE P2P Active)', { timeout: 15000 });
-  await expect(page2.locator('.status-indicator')).toContainText('Connected (E2EE P2P Active)', { timeout: 15000 });
-  console.log('P2P connection established on both peers!');
-
-  // 5. Peer 1 sends a message to Peer 2
+  // 4. Messages both ways.
   const message1 = 'Hello from Peer 1 - completely ephemeral!';
-  const input1 = page1.locator('footer.input-bar input');
-  await input1.fill(message1);
-  await page1.locator('footer.input-bar button:has-text("Send")').click();
+  await sendMessage(peer1.page, message1);
+  await expect(peer1.page.locator('.chat-container')).toContainText(message1);
+  await expect(peer2.page.locator('.chat-container')).toContainText(message1, { timeout: 5000 });
 
-  // Verify message appears on Peer 1 and Peer 2
-  await expect(page1.locator('.chat-container')).toContainText(message1);
-  await expect(page2.locator('.chat-container')).toContainText(message1, { timeout: 5000 });
-  console.log('Peer 2 received message from Peer 1!');
-
-  // 6. Peer 2 replies to Peer 1
   const message2 = 'Hello back from Peer 2 - verified zero-knowledge!';
-  const input2 = page2.locator('footer.input-bar input');
-  await input2.fill(message2);
-  await page2.locator('footer.input-bar button:has-text("Send")').click();
+  await sendMessage(peer2.page, message2);
+  await expect(peer2.page.locator('.chat-container')).toContainText(message2);
+  await expect(peer1.page.locator('.chat-container')).toContainText(message2, { timeout: 5000 });
 
-  // Verify reply appears on both peers
-  await expect(page2.locator('.chat-container')).toContainText(message2);
-  await expect(page1.locator('.chat-container')).toContainText(message2, { timeout: 5000 });
-  console.log('Peer 1 received reply from Peer 2!');
+  // 5. Zero persistence invariant.
+  await expectNoStorage(peer1.page);
+  await expectNoStorage(peer2.page);
 
-  // 7. Verify Zero Persistence Invariant: no localStorage, no sessionStorage
-  const p1Storage = await page1.evaluate(() => ({
-    local: localStorage.length,
-    session: sessionStorage.length,
-  }));
-  const p2Storage = await page2.evaluate(() => ({
-    local: localStorage.length,
-    session: sessionStorage.length,
-  }));
+  // 6. Reload destroys the session in memory: back to the join screen, no messages.
+  await peer1.page.reload();
+  await expect(peer1.page.locator('#enter-room-btn')).toBeVisible();
+  await expect(peer1.page.locator('.message-bubble')).toHaveCount(0);
 
-  expect(p1Storage.local).toBe(0);
-  expect(p1Storage.session).toBe(0);
-  expect(p2Storage.local).toBe(0);
-  expect(p2Storage.session).toBe(0);
-  console.log('Zero persistence confirmed: localStorage & sessionStorage are empty.');
-
-  // 8. Verify Ephemeral Memory Destruction: Reloading Peer 1 wipes all messages
-  await page1.reload();
-  await page1.waitForSelector('text=🔒 dchat');
-  await expect(page1.locator('.chat-container')).toContainText('Ephemeral P2P Encrypted Session');
-  await expect(page1.locator('.message-bubble')).toHaveCount(0);
-  console.log('Memory wipe confirmed: chat history destroyed on reload.');
-
-  await context1.close();
-  await context2.close();
+  await peer1.context.close();
+  await peer2.context.close();
 });
 
-test('custom URL fragment params survive room/key initialization', async ({ page }) => {
+test('custom URL fragment params survive room creation', async ({ page }) => {
   const relay = 'ws://127.0.0.1:3333/nostr';
   await page.goto(`/#relays=${relay}&future=1`);
-  await page.waitForSelector('text=🔒 dchat');
+  await page.locator('#create-room-btn').click();
 
-  await page.waitForFunction(() => window.location.hash.includes('room=') && window.location.hash.includes('&key='));
-  const hash = await page.evaluate(() => window.location.hash);
+  await page.waitForFunction(() => location.hash.includes('room=') && location.hash.includes('key='));
+  const hash = await page.evaluate(() => location.hash);
   expect(hash).toContain(`relays=${relay}`);
   expect(hash).toContain('future=1');
 

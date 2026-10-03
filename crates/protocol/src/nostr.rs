@@ -211,11 +211,18 @@ impl NostrBurnerKey {
     pub fn generate() -> Result<Self, NostrError> {
         let mut secret = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut secret);
-        let signing_key = SigningKey::from_bytes(&secret)
+        Self::from_secret_bytes(&secret)
+    }
+
+    /// Restore a keypair from its 32-byte secret in hex (e.g. the admin key in a URL fragment).
+    pub fn from_secret_hex(secret_hex: &str) -> Result<Self, NostrError> {
+        Self::from_secret_bytes(&hex::decode(secret_hex)?)
+    }
+
+    fn from_secret_bytes(secret: &[u8]) -> Result<Self, NostrError> {
+        let signing_key = SigningKey::from_bytes(secret)
             .map_err(|e| NostrError::Crypto(format!("Invalid private key: {e}")))?;
-        let verifying_key = signing_key.verifying_key();
-        let pubkey_bytes = verifying_key.to_bytes();
-        let pubkey_hex = hex::encode(pubkey_bytes);
+        let pubkey_hex = hex::encode(signing_key.verifying_key().to_bytes());
         Ok(Self {
             signing_key,
             pubkey_hex,
@@ -224,6 +231,15 @@ impl NostrBurnerKey {
 
     pub fn pubkey(&self) -> &str {
         &self.pubkey_hex
+    }
+
+    pub fn secret_hex(&self) -> String {
+        hex::encode(self.signing_key.to_bytes())
+    }
+
+    /// BIP-340 sign an arbitrary dchat message (domain-separated, see `message_digest`).
+    pub fn sign_message(&self, msg: &[u8]) -> Result<String, NostrError> {
+        Ok(hex::encode(self.sign_raw_32(&message_digest(msg))?.to_bytes()))
     }
 
     /// Sign and construct a NostrEvent with BIP-340 Schnorr signature.
@@ -265,6 +281,15 @@ impl NostrBurnerKey {
     }
 }
 
+/// Digest signed by `sign_message`; the prefix keeps dchat message signatures from ever
+/// being valid as signatures over a Nostr event id (or vice versa).
+fn message_digest(msg: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"dchat:msg:");
+    hasher.update(msg);
+    hasher.finalize().into()
+}
+
 /// Parse a 64-byte BIP-340 signature. The length is checked first because k256's
 /// `Signature::try_from` panics on short input instead of returning an error.
 fn parse_signature(sig_bytes: &[u8]) -> Option<Signature> {
@@ -272,6 +297,22 @@ fn parse_signature(sig_bytes: &[u8]) -> Option<Signature> {
         return None;
     }
     Signature::try_from(sig_bytes).ok()
+}
+
+/// Verify a `NostrBurnerKey::sign_message` signature against an x-only pubkey in hex.
+pub fn verify_message(pubkey_hex: &str, msg: &[u8], sig_hex: &str) -> bool {
+    let (Ok(pubkey_bytes), Ok(sig_bytes)) = (hex::decode(pubkey_hex), hex::decode(sig_hex)) else {
+        return false;
+    };
+    let (Ok(verifying_key), Some(signature)) = (
+        VerifyingKey::from_bytes(&pubkey_bytes),
+        parse_signature(&sig_bytes),
+    ) else {
+        return false;
+    };
+    verifying_key
+        .verify_raw(&message_digest(msg), &signature)
+        .is_ok()
 }
 
 /// Verify a NostrEvent signature according to NIP-01 and BIP-340.
@@ -376,6 +417,27 @@ mod tests {
 
         assert!(vk.verify_raw(&id_bytes, &sig).is_ok(), "sig must cover the raw id");
         assert!(vk.verify(&id_bytes, &sig).is_err(), "sig must not cover sha256(id)");
+    }
+
+    #[test]
+    fn test_message_signing_roundtrip() {
+        let key = NostrBurnerKey::generate().expect("Generate key");
+        let sig = key.sign_message(b"hello room").expect("Sign");
+        assert!(verify_message(key.pubkey(), b"hello room", &sig));
+        assert!(!verify_message(key.pubkey(), b"hello rooM", &sig));
+
+        let other = NostrBurnerKey::generate().expect("Generate key");
+        assert!(!verify_message(other.pubkey(), b"hello room", &sig));
+        assert!(!verify_message("zz", b"hello room", &sig));
+        assert!(!verify_message(key.pubkey(), b"hello room", "00"));
+    }
+
+    #[test]
+    fn test_secret_hex_roundtrip() {
+        let key = NostrBurnerKey::generate().expect("Generate key");
+        let restored = NostrBurnerKey::from_secret_hex(&key.secret_hex()).expect("Restore");
+        assert_eq!(restored.pubkey(), key.pubkey());
+        assert!(NostrBurnerKey::from_secret_hex("not-hex").is_err());
     }
 
     #[test]
