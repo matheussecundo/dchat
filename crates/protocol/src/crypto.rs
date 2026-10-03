@@ -117,6 +117,95 @@ pub fn generate_room_id() -> String {
         .collect()
 }
 
+pub const CHUNK_SIZE: usize = 64 * 1024; // 64 KB optimal for SCTP data channel
+pub const CHUNK_HEADER_SIZE: usize = 16 + 4 + 4 + NONCE_LENGTH; // 36 bytes
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkHeader {
+    pub file_id: [u8; 16],
+    pub chunk_index: u32,
+    pub total_chunks: u32,
+}
+
+/// Encrypt a chunk of a file for P2P binary transfer over RTCDataChannel.
+/// Packet format:
+/// [16-byte file_id][4-byte chunk_index][4-byte total_chunks][12-byte nonce][ciphertext + 16-byte Poly1305 tag]
+/// The first 24 bytes (file_id + chunk_index + total_chunks) are also passed as AEAD AAD (Associated Data).
+pub fn encrypt_chunk(
+    key: &[u8; KEY_LENGTH],
+    file_id: &[u8; 16],
+    chunk_index: u32,
+    total_chunks: u32,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let mut nonce_bytes = [0u8; NONCE_LENGTH];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let mut aad = [0u8; 24];
+    aad[0..16].copy_from_slice(file_id);
+    aad[16..20].copy_from_slice(&chunk_index.to_be_bytes());
+    aad[20..24].copy_from_slice(&total_chunks.to_be_bytes());
+
+    let payload = chacha20poly1305::aead::Payload {
+        msg: plaintext,
+        aad: &aad,
+    };
+
+    let ciphertext = cipher
+        .encrypt(nonce, payload)
+        .map_err(|_| CryptoError::EncryptionFailed)?;
+
+    let mut packet = Vec::with_capacity(CHUNK_HEADER_SIZE + ciphertext.len());
+    packet.extend_from_slice(file_id);
+    packet.extend_from_slice(&chunk_index.to_be_bytes());
+    packet.extend_from_slice(&total_chunks.to_be_bytes());
+    packet.extend_from_slice(&nonce_bytes);
+    packet.extend_from_slice(&ciphertext);
+
+    Ok(packet)
+}
+
+/// Decrypt a binary chunk packet received over RTCDataChannel.
+/// Validates chunk header, AEAD integrity (header + ciphertext), and decrypts payload.
+pub fn decrypt_chunk(
+    key: &[u8; KEY_LENGTH],
+    packet: &[u8],
+) -> Result<(ChunkHeader, Vec<u8>), CryptoError> {
+    if packet.len() < CHUNK_HEADER_SIZE + 16 {
+        return Err(CryptoError::DecryptionFailed);
+    }
+
+    let mut file_id = [0u8; 16];
+    file_id.copy_from_slice(&packet[0..16]);
+    let chunk_index = u32::from_be_bytes(packet[16..20].try_into().unwrap());
+    let total_chunks = u32::from_be_bytes(packet[20..24].try_into().unwrap());
+
+    let nonce = Nonce::from_slice(&packet[24..36]);
+    let ciphertext = &packet[36..];
+
+    let aad = &packet[0..24];
+    let payload = chacha20poly1305::aead::Payload {
+        msg: ciphertext,
+        aad,
+    };
+
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let plaintext = cipher
+        .decrypt(nonce, payload)
+        .map_err(|_| CryptoError::DecryptionFailed)?;
+
+    Ok((
+        ChunkHeader {
+            file_id,
+            chunk_index,
+            total_chunks,
+        },
+        plaintext,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +264,57 @@ mod tests {
         let encrypted = encrypt_json(&key, &data).expect("Encrypt json");
         let decrypted: TestData = decrypt_json(&key, &encrypted).expect("Decrypt json");
         assert_eq!(data, decrypted);
+    }
+
+    #[test]
+    fn test_chunk_encryption_roundtrip() {
+        let key = generate_key();
+        let file_id = [42u8; 16];
+        let chunk_index = 3;
+        let total_chunks = 10;
+        let plaintext = b"This is a chunk of a shared file over WebRTC RTCDataChannel";
+
+        let packet = encrypt_chunk(&key, &file_id, chunk_index, total_chunks, plaintext)
+            .expect("Encrypt chunk");
+        assert_eq!(packet.len(), CHUNK_HEADER_SIZE + plaintext.len() + 16);
+
+        let (header, decrypted) = decrypt_chunk(&key, &packet).expect("Decrypt chunk");
+        assert_eq!(header.file_id, file_id);
+        assert_eq!(header.chunk_index, chunk_index);
+        assert_eq!(header.total_chunks, total_chunks);
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_tampered_chunk_payload_fails() {
+        let key = generate_key();
+        let file_id = [7u8; 16];
+        let mut packet = encrypt_chunk(&key, &file_id, 0, 1, b"Valid data").expect("Encrypt");
+        // Tamper last byte of ciphertext
+        let last_idx = packet.len() - 1;
+        packet[last_idx] ^= 0xFF;
+        let res = decrypt_chunk(&key, &packet);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_tampered_chunk_header_fails_aead() {
+        let key = generate_key();
+        let file_id = [9u8; 16];
+        let mut packet = encrypt_chunk(&key, &file_id, 0, 5, b"Chunk data").expect("Encrypt");
+        // Tamper chunk_index in header (bytes 16..20)
+        packet[19] = 1; // changed chunk_index from 0 to 1
+        let res = decrypt_chunk(&key, &packet);
+        assert!(res.is_err(), "Header tampering must be detected by AEAD AAD");
+    }
+
+    #[test]
+    fn test_wrong_key_chunk_fails() {
+        let key1 = generate_key();
+        let key2 = generate_key();
+        let file_id = [1u8; 16];
+        let packet = encrypt_chunk(&key1, &file_id, 0, 1, b"Secret chunk").expect("Encrypt");
+        let res = decrypt_chunk(&key2, &packet);
+        assert!(res.is_err());
     }
 }

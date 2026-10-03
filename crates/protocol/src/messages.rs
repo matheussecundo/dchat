@@ -38,11 +38,19 @@ pub enum ServerMessage {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IceCandidateData {
+    pub candidate: String,
+    pub sdp_mid: Option<String>,
+    pub sdp_m_line_index: Option<u16>,
+}
+
 /// The inner signaling payload that is encrypted into an `EncryptedPayload` using
-/// the secret key from the URL hash. The server never sees this in plaintext!
+/// the secret key from the URL hash. The server/relays never see this in plaintext!
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", content = "content")]
 pub enum SignalPayload {
+    Presence,
     Offer {
         sdp: String,
     },
@@ -54,6 +62,10 @@ pub enum SignalPayload {
         sdp_mid: Option<String>,
         sdp_m_line_index: Option<u16>,
     },
+    IceBatch {
+        candidates: Vec<IceCandidateData>,
+    },
+    PeerLeft,
 }
 
 /// Messages sent peer-to-peer over the WebRTC RTCDataChannel (also encrypted with ChaCha20-Poly1305).
@@ -65,6 +77,25 @@ pub enum DataChannelMessage {
         sender: String,
         text: String,
         timestamp: u64,
+    },
+    FileOffer {
+        id: String,
+        sender: String,
+        name: String,
+        size: u64,
+        mime_type: String,
+        caption: Option<String>,
+        timestamp: u64,
+    },
+    FileRequest {
+        id: String,
+    },
+    FileCancel {
+        id: String,
+        reason: String,
+    },
+    FileComplete {
+        id: String,
     },
     CallInvite,
     VideoCallInvite,

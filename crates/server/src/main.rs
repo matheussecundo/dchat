@@ -1,3 +1,4 @@
+mod nostr_relay;
 mod signaling;
 mod tls;
 
@@ -6,6 +7,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use clap::Parser;
+use nostr_relay::{handle_nostr_websocket, NostrRelayState};
 use qrcode::render::unicode;
 use qrcode::QrCode;
 use signaling::{handle_websocket, AppState};
@@ -15,6 +17,12 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
+
+#[derive(Clone, Default)]
+pub struct ServerState {
+    pub signaling: AppState,
+    pub nostr: NostrRelayState,
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Ephemeral P2P Chat Signaling & Static Server")]
@@ -40,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::subscriber::set_global_default(subscriber)?;
 
     let args = Args::parse();
-    let state = AppState::default();
+    let state = ServerState::default();
 
     let lan_ip: Option<IpAddr> = local_ip_address::local_ip().ok();
 
@@ -60,6 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        .route("/nostr", get(nostr_ws_handler))
         .route("/health", get(|| async { "OK" }))
         .fallback_service(serve_dir)
         .layer(CorsLayer::permissive())
@@ -116,7 +125,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    State(state): State<AppState>,
+    State(state): State<ServerState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_websocket(socket, state))
+    ws.on_upgrade(move |socket| handle_websocket(socket, state.signaling))
+}
+
+async fn nostr_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<ServerState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_nostr_websocket(socket, state.nostr))
 }

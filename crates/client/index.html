@@ -10,7 +10,7 @@
     <link data-trunk rel="rust" href="Cargo.toml" data-bin="client">
 </head>
 <body>
-    <div id="app"></div>
+    <audio id="remote-audio" autoplay playsinline style="display: none;"></audio>
     <script>
       if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
