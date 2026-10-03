@@ -22,7 +22,7 @@ export default defineConfig({
     },
   },
   webServer: {
-    command: 'cd .. && cargo run -p server -- --http --port 3333 --static-dir crates/client/dist',
+    command: 'cd .. && cargo run -p server -- --http --port 3333 --static-dir crates/client/dist-e2e',
     url: 'http://127.0.0.1:3333/health',
     reuseExistingServer: true,
     timeout: 60000,

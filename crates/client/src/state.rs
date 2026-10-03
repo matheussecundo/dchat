@@ -1,7 +1,8 @@
 use protocol::{
-    generate_key, generate_room_id, key_from_base64, key_to_base64, FragmentParams, KEY_LENGTH,
+    format_cap, generate_key, generate_room_id, invite_fragment, key_from_base64, key_to_base64,
+    FragmentParams, NostrBurnerKey, DEFAULT_MEMBER_CAP, KEY_LENGTH,
 };
-use serde::{Deserialize, Serialize};
+use wasm_bindgen::JsValue;
 use web_sys::window;
 
 use crate::i18n::{t, Language};
@@ -18,11 +19,6 @@ pub enum ConnectionStatus {
 }
 
 impl ConnectionStatus {
-    #[allow(dead_code)]
-    pub fn label(&self) -> &'static str {
-        self.label_i18n(Language::En)
-    }
-
     pub fn label_i18n(&self, lang: Language) -> &'static str {
         match self {
             ConnectionStatus::Idle => t(lang, "status_idle"),
@@ -48,99 +44,43 @@ impl ConnectionStatus {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CallType {
-    None,
-    Audio,
-    Video,
-    ScreenShare,
-}
-
-impl CallType {
-    #[allow(dead_code)]
-    pub fn label(&self) -> &'static str {
-        self.label_i18n(Language::En)
-    }
-
-    pub fn label_i18n(&self, lang: Language) -> &'static str {
-        match self {
-            CallType::None => t(lang, "call_type_none"),
-            CallType::Audio => t(lang, "call_type_audio"),
-            CallType::Video => t(lang, "call_type_video"),
-            CallType::ScreenShare => t(lang, "call_type_screen"),
-        }
-    }
-}
-
-/// Browser-native microphone processing requested via getUserMedia constraints.
-/// Held in RAM only; resets to all-on on reload.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AudioSettings {
-    pub noise_suppression: bool,
-    pub echo_cancellation: bool,
-    pub auto_gain_control: bool,
-}
-
-impl Default for AudioSettings {
-    fn default() -> Self {
-        Self {
-            noise_suppression: true,
-            echo_cancellation: true,
-            auto_gain_control: true,
-        }
-    }
+/// How this tab reaches a member.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum LinkUi {
+    Me,
+    Direct,
+    /// No direct link; text is relayed through the named member.
+    Via(String),
+    /// A direct link is being negotiated and no relay path exists yet.
+    Connecting,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CallState {
-    Idle,
-    Calling(CallType),
-    Incoming(CallType),
-    Active(CallType),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FileTransferStatus {
-    Offered,
-    Downloading { progress: u8, speed_kb: u64 },
-    Completed,
-    Cancelled { reason: String },
-    Interrupted,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileOfferInfo {
-    pub file_id: String,
+pub struct MemberUi {
+    pub pubkey: String,
     pub name: String,
-    pub size: u64,
-    pub mime_type: String,
-    pub status: FileTransferStatus,
+    pub tag: String,
+    pub is_admin: bool,
+    pub link: LinkUi,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// System lines shown in the chat timeline.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Notice {
+    Joined(String),
+    Left(String),
+    LateJoin,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatMessageUi {
     pub id: String,
-    pub sender: String,
+    /// Author session pubkey; the display name is looked up live so it can arrive later.
+    pub author: String,
     pub is_self: bool,
     pub text: String,
     pub time: String,
-    pub file: Option<FileOfferInfo>,
-}
-
-pub fn format_file_size(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    let b = bytes as f64;
-    if b >= GB {
-        format!("{:.1} GB", b / GB)
-    } else if b >= MB {
-        format!("{:.1} MB", b / MB)
-    } else if b >= KB {
-        format!("{:.1} KB", b / KB)
-    } else {
-        format!("{} B", bytes)
-    }
+    pub notice: Option<Notice>,
 }
 
 /// Parameters of the current URL fragment (empty when unavailable).
@@ -151,46 +91,64 @@ pub fn current_fragment() -> FragmentParams {
         .unwrap_or_default()
 }
 
-/// Parse or initialize the ephemeral room ID and 256-bit secret key from the URL hash.
-/// Format: #room=<room_id>&key=<base64_secret_key>[&other=params...]
-/// Every other fragment parameter (e.g. `relays`) is preserved when the hash is rewritten.
-/// Invariant: URL hash fragments are NEVER sent to the HTTP or WebSocket server.
-pub fn get_or_init_credentials() -> Option<(String, [u8; KEY_LENGTH], String)> {
-    let location = window()?.location();
-    let hash = location.hash().ok()?;
-    let mut params = FragmentParams::parse(&hash);
-
-    // A key without a room is not trusted: a fresh room always gets a fresh key.
-    let existing_room = params.get("room").map(str::to_string);
-    let existing_key = existing_room
-        .as_ref()
-        .and(params.get("key"))
-        .and_then(|k| key_from_base64(k).ok().map(|bytes| (bytes, k.to_string())));
-    let room = existing_room.unwrap_or_else(generate_room_id);
-    let (key_bytes, b64_str) = existing_key.unwrap_or_else(|| {
-        let k = generate_key();
-        (k, key_to_base64(&k))
-    });
-
-    params.set("room", &room);
-    params.set("key", &b64_str);
-
-    // Update URL hash without page reload if it changed
-    let target_hash = params.to_hash();
-    if hash != target_hash {
-        let _ = location.set_hash(&target_hash);
-    }
-
-    Some((room, key_bytes, b64_str))
-}
-
-pub fn get_full_share_url() -> String {
+/// Rewrite the fragment without adding a history entry (so Back never lands on a
+/// half-initialized room).
+pub fn replace_fragment(params: &FragmentParams) {
     if let Some(win) = window() {
-        if let Ok(href) = win.location().href() {
-            return href;
+        if let Ok(history) = win.history() {
+            let _ = history.replace_state_with_url(&JsValue::NULL, "", Some(&params.to_hash()));
         }
     }
-    String::new()
+}
+
+/// The room ID and 256-bit key from the URL fragment, when both are present and valid.
+/// Format: #room=<room_id>&key=<base64_secret_key>[&other=params...]
+/// Invariant: URL hash fragments are NEVER sent to the HTTP or WebSocket server.
+pub fn read_credentials() -> Option<(String, [u8; KEY_LENGTH])> {
+    let params = current_fragment();
+    let room = params.get("room")?.to_string();
+    let key = key_from_base64(params.get("key")?).ok()?;
+    Some((room, key))
+}
+
+/// Create a new room in the fragment: fresh room ID, room key and admin keypair, plus the
+/// member cap when it differs from the default. Other parameters (e.g. `relays`) are kept.
+/// The admin secret only ever lives in this creator's fragment (the admin link).
+pub fn create_room(member_cap: Option<usize>) -> Result<(), String> {
+    let admin = NostrBurnerKey::generate().map_err(|e| e.to_string())?;
+    let mut params = current_fragment();
+    params.set("room", &generate_room_id());
+    params.set("key", &key_to_base64(&generate_key()));
+    params.set("adm", admin.pubkey());
+    params.set("admsk", &admin.secret_hex());
+    if member_cap == Some(DEFAULT_MEMBER_CAP) {
+        params.remove("max");
+    } else {
+        params.set("max", &format_cap(member_cap));
+    }
+    replace_fragment(&params);
+    Ok(())
+}
+
+fn page_base_url() -> String {
+    window()
+        .and_then(|w| {
+            let loc = w.location();
+            Some(format!("{}{}", loc.origin().ok()?, loc.pathname().ok()?))
+        })
+        .unwrap_or_default()
+}
+
+/// The link to share with members: the current fragment without the admin secret.
+pub fn invite_url() -> String {
+    format!("{}{}", page_base_url(), invite_fragment(&current_fragment()).to_hash())
+}
+
+/// The full admin link, when this tab holds the admin secret.
+pub fn admin_url() -> Option<String> {
+    let params = current_fragment();
+    params.get("admsk")?;
+    Some(format!("{}{}", page_base_url(), params.to_hash()))
 }
 
 pub fn current_time_string() -> String {

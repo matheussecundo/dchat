@@ -1,4 +1,4 @@
-.PHONY: all build build-client build-server test test-rust test-e2e serve serve-http clean
+.PHONY: all build build-client build-client-e2e build-server test test-rust test-e2e serve serve-http clean
 
 all: build test
 
@@ -8,6 +8,10 @@ build-client:
 	@echo "==> Building WebAssembly client with Trunk..."
 	cd crates/client && trunk build index.html --release
 
+build-client-e2e:
+	@echo "==> Building WebAssembly client with E2E test hooks (dist-e2e, never deployed)..."
+	cd crates/client && trunk build index.html --release --features e2e-hooks --dist dist-e2e
+
 build-server:
 	@echo "==> Building Axum server..."
 	cargo build -p server --release
@@ -16,8 +20,8 @@ test-rust:
 	@echo "==> Running Rust unit and integration tests..."
 	cargo test --workspace
 
-test-e2e: build-client
-	@echo "==> Running Playwright 2-peer browser E2E tests..."
+test-e2e: build-client-e2e
+	@echo "==> Running Playwright multi-peer browser E2E tests..."
 	cd e2e && npm test
 
 test: test-rust test-e2e
@@ -32,4 +36,4 @@ serve-http: build-client
 
 clean:
 	cargo clean
-	rm -rf crates/client/dist
+	rm -rf crates/client/dist crates/client/dist-e2e

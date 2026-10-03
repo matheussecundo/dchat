@@ -1,5 +1,8 @@
 import { test, expect } from '@playwright/test';
 
+// The 1:1 call/file flow is replaced by the group model; rewritten in milestone 8b.
+test.skip(true, 'Rewritten for group rooms in milestone 8b');
+
 test('2-peer screen sharing handshake, stream delivery, and clean termination', async ({ browser }) => {
   const context1 = await browser.newContext({
     permissions: ['camera', 'microphone'],

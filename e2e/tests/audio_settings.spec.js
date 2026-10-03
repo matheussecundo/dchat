@@ -1,5 +1,8 @@
 import { test, expect } from '@playwright/test';
 
+// The 1:1 call/file flow is replaced by the group model; rewritten in milestone 8b.
+test.skip(true, 'Rewritten for group rooms in milestone 8b');
+
 // Reads the mic track currently being sent to the peer.
 const senderAudio = (page) => page.evaluate(() => {
   const track = window.__pcs[0].getSenders().find(s => s.track?.kind === 'audio')?.track;

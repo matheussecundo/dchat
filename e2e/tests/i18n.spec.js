@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 
+
 test('UI localization, dynamic language switching, RTL for Arabic, and zero persistence', async ({ browser }) => {
   const context = await browser.newContext();
   const page = await context.newPage();
@@ -7,6 +8,8 @@ test('UI localization, dynamic language switching, RTL for Arabic, and zero pers
   // 1. Open app and verify default English localization and LTR direction
   await page.goto('/');
   await page.waitForSelector('text=🔒 dchat');
+  await expect(page.locator('.lobby-card h2')).toContainText('Create a private room');
+  await page.locator('#create-room-btn').click();
 
   // Verify language dropdown exists and defaults to English
   const langSelect = page.locator('select.lang-select');

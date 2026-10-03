@@ -1,5 +1,8 @@
 import { test, expect } from '@playwright/test';
 
+// The 1:1 call/file flow is replaced by the group model; rewritten in milestone 8c.
+test.skip(true, 'Rewritten for group rooms in milestone 8c');
+
 test('2-peer ephemeral WebRTC P2P encrypted file sharing with multi-chunk transfer', async ({ browser }) => {
   const context1 = await browser.newContext({ acceptDownloads: true });
   const context2 = await browser.newContext({ acceptDownloads: true });

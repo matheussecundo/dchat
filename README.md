@@ -9,6 +9,7 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 ## Key Features & Security Guarantees
 
 * **Pure Rust to WebAssembly**: Built with **Leptos (CSR)** targeting `wasm32-unknown-unknown` without Emscripten.
+* **Group Rooms over a P2P Mesh**: One link opens a room for a small group (25 members by default). Every member connects directly to every other member: there is no media or message server, only Nostr relays for the initial handshake.
 * **Zero Persistence**: Strictly **no** `localStorage`, `sessionStorage`, `indexedDB`, or cookies. Everything is held in volatile RAM.
 * **Zero-Knowledge URL Keys**: The room ID and 256-bit symmetric encryption key reside in the URL fragment (`#room=<id>&key=<secret>`). URL hash fragments are never sent to any server over HTTP or WebSocket handshakes.
 * **Decentralized Nostr Signaling**: Replaces proprietary signaling servers with public, open Nostr relays using NIP-16 Ephemeral Events (Kind 20001, dropped upon dispatch, zero disk storage).
@@ -73,6 +74,58 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
    - Switches the browser doesn't support are disabled with a hint.
    - Speaker mute silences incoming peer audio locally in audio, video and screen-share calls; it resets when the call ends.
    - Zero Persistence Invariant: settings live in Wasm RAM only and reset to all-on on reload.
+
+8. **Phase 8: Discord-like Group Rooms over a Serverless Mesh (In Progress)**
+   - **8a Mesh core (Completed)**: one `RTCPeerConnection` per member pair with perfect negotiation; recipient-addressed signaling; session nicknames shown with a short key tag; live member list; room messages signed by their author and gossip-relayed to members without a direct link; per-room member cap with deterministic "latest joiner loses" and an admin seat; admin link vs invite link; optional TURN server in the URL.
+   - 8b Drop-in voice/video lounge with screen share and speaking indicator (replaces the 1:1 call flow).
+   - 8c Room-wide file sharing with per-downloader transfers.
+   - 8d Admin kick and invite rotation (rekey), opt-in message history for late joiners.
+   - 8e Typing indicator, reactions, edit/delete, private DMs and @mentions.
+
+---
+
+## Group Rooms
+
+1. **Create**: open the app, pick a name for this session and a member limit, then tap **✨ Create Room**. The room ID, the room key and an admin key are generated in your browser and placed in the URL fragment.
+2. **Invite**: tap **🔗 Copy Link** or **📱 Scan QR**. Both share the *invite* link. Only the creator also sees **🔑 Copy Admin Link**, which adds the admin secret (`admsk`); share it only with co-moderators.
+3. **Join**: whoever opens the invite picks a name and taps **🚪 Enter Room**. Names live in memory only and are shown with a 4-character key tag (`Ana · 3f2a`), so two people with the same name stay distinct. The tag tells people apart; it is not proof of identity.
+4. **Member list**: each member shows how you reach them: `direct`, `via <name>` (no direct link, text is relayed through that member), or `connecting…`. The admin carries an `ADMIN` badge.
+5. **Member limit**: when a room is full, the member who joined last sees *Room is full*. Everyone applies the same rule (join time, then key), so all members agree on who stays. An admin session always gets a seat and bumps the latest non-admin.
+
+Every room message is signed with its author's session key, so a member relaying it cannot alter it or forge messages from someone else. Joining late shows only the messages sent after you arrive.
+
+### URL Fragment Parameters
+
+Everything after `#` stays in the browser and is never sent to any server.
+
+| Parameter | Example | Meaning |
+|---|---|---|
+| `room` | `room=jr9m4r26` | Room ID (hashed before it reaches relays) |
+| `key` | `key=Zm9v…` | 256-bit room key (base64url) |
+| `adm` | `adm=9f3c…` | Admin public key; sessions proving it get the `ADMIN` badge and a guaranteed seat |
+| `admsk` | `admsk=…` | Admin secret key: **admin link only**, never in the invite or QR code |
+| `max` | `max=10` | Member limit; default 25, `0` = unlimited (no hard ceiling; large rooms load every member) |
+| `relays` | `relays=wss://a,wss://b` | Custom Nostr relays |
+| `turn` | `turn=turns:turn.example.com:5349` | Optional TURN server(s), comma-separated |
+| `turnuser`, `turnpass` | `turnuser=me&turnpass=s3cret` | TURN credentials (percent-encode special characters) |
+
+### When Members Can't Connect Directly (NAT)
+
+dchat uses STUN only by default, so it needs no infrastructure of its own. Most home and office networks connect fine. But two members behind **carrier-grade NAT** (common on mobile data) or **symmetric NAT** often cannot open a direct WebRTC link: roughly 10–20% of pairs. In a group mesh, the more members a room has, the more likely it is that some pair fails.
+
+What you will see:
+- The member list shows the other person as **`via <name>`** instead of `direct`.
+- **Text still works**: messages are relayed through a member who is connected to both of you. They stay encrypted with the room key and signed by their author, so the relaying member (who is in the room anyway) cannot alter or forge them.
+- **Calls and files don't work with that person**: media and file transfers only travel over direct links.
+- If no mutual member exists, the person stays `connecting…` until a path appears.
+
+**Fix: supply a TURN server.** A TURN server forwards encrypted packets between members who can't reach each other. It sees IP addresses and traffic timing, but never message or media content (DTLS/SRTP plus the room key). Add it to the room URL and share that URL:
+
+```
+https://your-domain.com/#room=…&key=…&turn=turns:turn.example.com:5349&turnuser=alice&turnpass=s3cret
+```
+
+Run your own with [coturn](https://github.com/coturn/coturn) or use a hosted provider. Everyone who opens the link uses it. Credentials in the link are visible to all members, so use credentials scoped to this purpose.
 
 ---
 
@@ -172,13 +225,14 @@ The server will bind to `0.0.0.0:8443`, detect your machine's LAN IP, and render
 3. **Accept the Dev Certificate**: Because the certificate is self-signed for local development, your browser will display a warning:
    - **Chrome (Android)**: Tap *Advanced* → *Proceed to 192.168.x.x (unsafe)*.
    - **Safari (iOS)**: Tap *Show Details* → *Visit this website* → Confirm.
-4. Phone 1 will load the app and auto-generate an ephemeral room and encryption key in the URL hash (e.g. `#room=9x2f4b&key=...`).
+4. Phone 1 loads the lobby: pick a name and tap **✨ Create Room**. An ephemeral room and encryption key are generated in the URL hash (e.g. `#room=9x2f4b&key=...`).
 
 ### Step 3: Connect Phone 2
 1. On Phone 1's screen, tap the **"📱 Scan QR"** button at the top.
-2. A modal will appear with a QR code encoding Phone 1's exact room URL and encryption key.
+2. A modal will appear with a QR code encoding the room's invite link (room ID and key, without the admin secret).
 3. Open the camera on Phone 2 and scan Phone 1's screen.
-4. Phone 2 opens the room. The WebRTC handshake will complete in milliseconds, and both status badges will change to **"Connected (E2EE P2P Active)"** with a green indicator!
+4. Phone 2 opens the room, picks a name and taps **🚪 Enter Room**. The WebRTC handshake completes in moments, both status badges change to **"Connected (E2EE P2P Active)"**, and each phone lists the other in the member list.
+5. More phones or laptops can join the same way; every member connects directly to every other member.
 
 ### Step 4: Chat & Verify Ephemerality
 - Type messages on either phone and watch them appear in real time over the direct encrypted `RTCDataChannel`.
@@ -196,11 +250,15 @@ Verifies 256-bit key generation, ChaCha20-Poly1305 encryption/decryption roundtr
 cargo test --workspace
 ```
 
-### 2. Playwright Multi-Browser End-to-End (E2E) Test
-Simulates two separate browser instances performing the full WebRTC handshake, sending encrypted messages, verifying that `localStorage` and `sessionStorage` are completely empty, and confirming memory wipe on page reload:
+### 2. Playwright Multi-Browser End-to-End (E2E) Tests
+Simulates several isolated browser members: WebRTC mesh handshakes, signed message fan-out, member caps and the admin seat, text relayed between members without a direct link, empty `localStorage`/`sessionStorage`, and memory wipe on reload.
+
+The E2E suite runs against a separate bundle built with the `e2e-hooks` feature (test-only `window.__dchat` probes, e.g. to simulate a pair that cannot connect). That bundle goes to `crates/client/dist-e2e/` and is never deployed; production builds contain no hooks.
 ```bash
-cd e2e
-npm test
+make test-e2e
+# or, step by step:
+cd crates/client && trunk build index.html --release --features e2e-hooks --dist dist-e2e && cd ../..
+cd e2e && npm test
 ```
 
 ---

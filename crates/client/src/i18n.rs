@@ -113,32 +113,6 @@ pub fn t_replace_1(lang: Language, key: &'static str, placeholder: &str, val: &s
     template.replace(placeholder, val)
 }
 
-/// Helper for calling peer banner string.
-pub fn calling_peer_text(lang: Language, call_type_label: &str) -> String {
-    t_replace_1(lang, "calling_peer", "{type}", call_type_label)
-}
-
-/// Helper for incoming call title string.
-pub fn incoming_call_title(lang: Language, call_type_label: &str) -> String {
-    t_replace_1(lang, "incoming_title", "{type}", call_type_label)
-}
-
-/// Helper for incoming call description string.
-pub fn incoming_call_desc(lang: Language, call_type_label: &str) -> String {
-    t_replace_1(lang, "incoming_desc", "{type}", call_type_label)
-}
-
-/// Helper for large file warning description.
-pub fn large_file_warning_desc(lang: Language, file_name: &str) -> String {
-    t_replace_1(lang, "large_file_desc", "{name}", file_name)
-}
-
-/// Helper for file download toast.
-#[allow(dead_code)]
-pub fn toast_downloaded_text(lang: Language, file_name: &str) -> String {
-    t_replace_1(lang, "toast_downloaded", "{name}", file_name)
-}
-
 /// Detect browser locale using `window.navigator.languages` and `window.navigator.language`.
 pub fn detect_browser_language() -> Language {
     if let Some(win) = window() {
@@ -220,11 +194,11 @@ mod tests {
 
     #[test]
     fn test_interpolation() {
-        let res = calling_peer_text(Language::En, "Audio");
-        assert!(res.contains("Calling Peer with Audio"));
-
-        let res_es = calling_peer_text(Language::Es, "Audio");
-        assert!(res_es.contains("Audio"));
+        assert_eq!(t_replace_1(Language::En, "sys_joined", "{name}", "Ana"), "Ana joined");
+        for lang in Language::ALL {
+            let joined = t_replace_1(lang, "sys_joined", "{name}", "Ana");
+            assert!(joined.contains("Ana") && !joined.contains("{name}"), "{}", lang.code());
+        }
     }
 
     #[test]
