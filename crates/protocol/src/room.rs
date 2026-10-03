@@ -195,6 +195,70 @@ impl GossipDedup {
     }
 }
 
+/// The reactions members can add to a message.
+pub const REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🎉"];
+
+/// Who reacted with what to each message. Each member's latest toggle per
+/// (message, emoji) wins, so reordered gossip converges.
+#[derive(Debug, Default)]
+pub struct Reactions {
+    toggles: HashMap<(String, String), HashMap<String, (u64, bool)>>,
+}
+
+impl Reactions {
+    /// Apply `author`'s toggle; returns whether the tally of `target` may have changed.
+    /// Only the fixed `REACTIONS` set is accepted.
+    pub fn apply(&mut self, target: &str, emoji: &str, author: &str, ts: u64, on: bool) -> bool {
+        if !REACTIONS.contains(&emoji) {
+            return false;
+        }
+        let entry = self.toggles.entry((target.to_string(), emoji.to_string())).or_default();
+        match entry.get(author) {
+            Some((known_ts, _)) if *known_ts > ts => false,
+            _ => {
+                entry.insert(author.to_string(), (ts, on));
+                true
+            }
+        }
+    }
+
+    pub fn has(&self, target: &str, emoji: &str, author: &str) -> bool {
+        self.toggles
+            .get(&(target.to_string(), emoji.to_string()))
+            .and_then(|by| by.get(author))
+            .is_some_and(|(_, on)| *on)
+    }
+
+    /// `(emoji, reactors)` for `target`, in `REACTIONS` order, skipping empty ones.
+    pub fn tally(&self, target: &str) -> Vec<(String, Vec<String>)> {
+        REACTIONS
+            .iter()
+            .filter_map(|emoji| {
+                let by = self.toggles.get(&(target.to_string(), emoji.to_string()))?;
+                let mut who: Vec<String> = by.iter().filter(|(_, (_, on))| *on).map(|(a, _)| a.clone()).collect();
+                who.sort();
+                (!who.is_empty()).then(|| (emoji.to_string(), who))
+            })
+            .collect()
+    }
+}
+
+/// Whether `text` @-mentions `name`: case-insensitive `@name`, not glued to a letter or
+/// digit on either side, so "@Ana" matches "@ana," but not "@Anabel" or "x@ana.example".
+pub fn mentions(text: &str, name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
+    }
+    let text = text.to_lowercase();
+    let needle = format!("@{}", name.to_lowercase());
+    text.match_indices(&needle).any(|(i, m)| {
+        let before_ok = text[..i].chars().next_back().map_or(true, |c| !c.is_alphanumeric());
+        let after_ok = text[i + m.len()..].chars().next().map_or(true, |c| !c.is_alphanumeric());
+        before_ok && after_ok
+    })
+}
+
 /// How many recent messages a member keeps for late joiners when history is on.
 pub const HISTORY_LIMIT: usize = 200;
 
@@ -599,6 +663,37 @@ mod tests {
         let batches = history.batches(1);
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0][0].id, msgs[1].id);
+    }
+
+    #[test]
+    fn test_reactions_latest_toggle_wins() {
+        let mut r = Reactions::default();
+        assert!(r.apply("m1", "👍", "ana", 10, true));
+        assert!(r.apply("m1", "👍", "bo", 11, true));
+        assert!(r.apply("m1", "🎉", "bo", 12, true));
+        assert!(!r.apply("m1", "💩", "bo", 13, true), "only the fixed set");
+        assert_eq!(r.tally("m1"), vec![
+            ("👍".to_string(), vec!["ana".to_string(), "bo".to_string()]),
+            ("🎉".to_string(), vec!["bo".to_string()]),
+        ]);
+        // An older toggle arriving late does not undo a newer one.
+        assert!(r.apply("m1", "👍", "ana", 20, false));
+        assert!(!r.apply("m1", "👍", "ana", 15, true));
+        assert!(!r.has("m1", "👍", "ana"));
+        assert!(r.has("m1", "👍", "bo"));
+        assert!(r.tally("other").is_empty());
+    }
+
+    #[test]
+    fn test_mentions() {
+        assert!(mentions("hey @Ana, look", "Ana"));
+        assert!(mentions("@teal otter you there?", "Teal Otter"));
+        assert!(mentions("ping @ana", "Ana"));
+        assert!(!mentions("hey @Anabel", "Ana"));
+        assert!(!mentions("hey Ana", "Ana"));
+        assert!(!mentions("email ana@example.com", "example"), "an email address is not a mention");
+        assert!(mentions("(@Ana)", "Ana"));
+        assert!(!mentions("hi @", ""));
     }
 
     #[test]

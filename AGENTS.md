@@ -87,6 +87,7 @@ dchat/
 │           ├── session/
 │           │   ├── mod.rs      # RoomSession: mesh orchestration, signed gossip, roster, caps, e2e hooks
 │           │   ├── admin.rs    # Kick / rotate link: ECDH-sealed AdminRekey, migration to the new room
+│           │   ├── extras.rs   # Typing, reactions, edit/delete, ECDH-sealed DMs, @mention detection
 │           │   ├── files.rs    # Room-wide file cards, per-requester pulls, upload queue, chunk I/O
 │           │   ├── history.rs  # Opt-in history (&hist=1): signed shareable messages for late joiners
 │           │   └── lounge.rs   # Voice lounge: seats, per-link senders, voice/video caps, speaking, controls
@@ -99,6 +100,7 @@ dchat/
 │       ├── group_voice.spec.js # 3-member lounge: join prompt, mesh audio, mute state, speaking, voice/video caps
 │       ├── group_admin.spec.js # Kick (removed screen, others migrate with chat), rotate link (voice rejoin, old invite stranded)
 │       ├── group_history.spec.js # hist=1 backlog incl. departed authors' names, default off, per-author shareable flag
+│       ├── group_extras.spec.js  # Typing, reactions, edit/delete, direct + relayed DMs (relay can't read), @mention highlight
 │       ├── p2p_chat.spec.js    # 2-member room, E2EE message exchange, reload wipe, fragment params
 │       ├── audio_call.spec.js  # 2-member lounge audio, mic/speaker mute, leave (replaceTrack null) and rejoin
 │       ├── video_call.spec.js  # Camera tiles, camera flip keeps the mic, camera off, grid teardown
@@ -164,12 +166,12 @@ dchat/
   - Unsupported switches (per `getSupportedConstraints()`) are disabled with a hint.
   - Local speaker mute on the hidden `#remote-audio` element for all call types; resets on call end. The peer is not notified.
   - Settings are RAM-only signals: they survive across calls within a tab and reset on reload.
-- **Phase 8: Discord-like Group Rooms over a Serverless Mesh (In Progress, branch `group-rooms`)**
+- **Phase 8: Discord-like Group Rooms over a Serverless Mesh (Completed)**
   - **8a Mesh core (Completed)**: create/join lobby with session nicknames; full-mesh `PeerLink`s with addressed signaling and perfect negotiation; signed `RoomEnvelope` gossip with relay to members lacking a direct link; roster with mutual-link reachability and `direct` / `via X` / `connecting` link states; per-room member cap (`&max=`, default 25, `0` = unlimited) with deterministic latest-joiner eviction and an admin seat; admin link (`adm`/`admsk`) vs invite link; optional TURN in the fragment; join/leave notices.
   - **8b Voice lounge (Completed)**: drop-in lounge replaces the ring flow (`CallInvite`/`CallAccepted` gone); signed `VoiceState` gossip (seat time, mic, video kind); per-room voice/video caps (`&maxa=`, `&maxv=`) with the same latest-loses rule (admins not exempt); one audio + one video sender per link (`addTrack` once, then `replaceTrack`, `None` to stop: no renegotiation on toggles); camera/screen as one video source with front/rear flip; per-member hidden `<audio class="remote-audio">`; Web Audio speaking meter; video grid with fullscreen; "X joined voice" prompt; audio settings carry over between joins.
   - **8c Group file sharing (Completed)**: `FileOffer` card gossiped to the room; `FileRequest`/`FileQueued`/`FileCancel{to}` are direct-only envelopes (`RoomBody::recipient`), applied only when received straight from their author and never relayed; per-link binary `file-transfer` channel with backpressure; chunks accepted only from the offer's author over its direct link and in order; `UploadQueue` (max 2 concurrent, FIFO, unit-tested); decline (local), cancel, withdraw (room-wide); transfers stop on link loss, offers marked unavailable when the author leaves the present set. Merged to main after 8c.
   - **8d Moderation & history (Completed)**: `AdminRekey { kicked, grants }` is gossiped and signed by an admin session (verified via its Hello admin proof); each grant (new room ID + key) is sealed with ECDH between the admin's and the member's session keys (`NostrBurnerKey::shared_key`, `SealedGrant`), so relays and the kicked member can't read it; recipients wait 1.5 s (relay flush), leave, rewrite the fragment and start a new session (chat kept, voice auto-rejoined, join notices muted for 5 s); the kicked member gets a removed screen. History: `Chat.shareable` from the author's own link, `HistoryBuffer` (200, signed originals) served to up to 2 neighbors on request in batches of 40 together with the authors' archived Hellos (names only, never roster); inserted by timestamp. Links stuck in `disconnected` for 10 s now count as lost so killed tabs leave promptly.
-  - 8e Typing indicator, reactions, edit/delete, ECDH-encrypted DMs, @mentions.
+  - **8e Chat extras (Completed)**: `Typing` (throttled 3 s, expires after 4.5 s); `Reaction{target, emoji, on}` limited to `REACTIONS`, latest toggle per member wins (`Reactions`, unit-tested); `Edit`/`Delete` honored only from the original author (`message_authors`), and they drop the message from history; `Dm{to, sealed}` sealed with `seal_json` (ECDH session keys), sent only over the direct link when there is one, otherwise gossiped; only the recipient opens it and the recipient never relays it; `mentions()` with word boundaries on both sides; chime via Web Audio; `(n)` title badge while hidden; DM threads end when the peer leaves.
 
 ---
 
@@ -227,4 +229,6 @@ When writing or reviewing code, check off every item:
 - [ ] Direct-only room messages (`RoomBody::recipient()` is `Some`) are applied only when `to` is us and the envelope came straight from its author; they are never relayed.
 - [ ] File chunks are accepted only from the offer's author over that author's own link, strictly in order; anything else aborts or is dropped.
 - [ ] `AdminRekey` is honored only from a member whose Hello carried a valid admin proof; grants are sealed per recipient (never the room key in clear).
+- [ ] DM plaintext is only ever sealed with `seal_json` to the recipient's session key; the recipient never relays a DM; no DM text in logs.
+- [ ] Edits/deletes are applied only when the envelope author equals the original message author.
 - [ ] History serves only `shareable` chat envelopes (author's choice) and the receiver verifies every signature; Hellos from history only label names, never join the roster.

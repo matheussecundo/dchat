@@ -181,7 +181,7 @@ pub struct RekeyTarget {
     pub rejoin_voice: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChatMessageUi {
     pub id: String,
     /// Author session pubkey; the display name is looked up live so it can arrive later.
@@ -193,6 +193,23 @@ pub struct ChatMessageUi {
     pub ts: u64,
     pub notice: Option<Notice>,
     pub file: Option<FileOfferInfo>,
+    /// `(emoji, reactor pubkeys)` in display order.
+    pub reactions: Vec<(String, Vec<String>)>,
+    pub edited: bool,
+    pub mentions_me: bool,
+    /// Bumped on every in-place change, so the row re-renders.
+    pub rev: u32,
+}
+
+/// One line of a private conversation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DmUi {
+    pub id: String,
+    pub from_me: bool,
+    pub text: String,
+    pub time: String,
+    /// "The other member left" marker (text holds their name).
+    pub notice: bool,
 }
 
 /// Parameters of the current URL fragment (empty when unavailable).

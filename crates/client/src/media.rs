@@ -187,6 +187,37 @@ pub fn resume_remote_audio() {
     }
 }
 
+/// A short two-tone ping for @mentions (silently skipped if the browser blocks audio).
+pub fn play_chime() {
+    let Ok(ctx) = AudioContext::new() else {
+        return;
+    };
+    let start = ctx.current_time();
+    for (i, freq) in [880.0_f32, 1320.0].iter().enumerate() {
+        let (Ok(osc), Ok(gain)) = (ctx.create_oscillator(), ctx.create_gain()) else {
+            return;
+        };
+        osc.frequency().set_value(*freq);
+        let at = start + i as f64 * 0.12;
+        let _ = gain.gain().set_value_at_time(0.0001, at);
+        let _ = gain.gain().exponential_ramp_to_value_at_time(0.15, at + 0.02);
+        let _ = gain.gain().exponential_ramp_to_value_at_time(0.0001, at + 0.2);
+        if osc.connect_with_audio_node(&gain).is_err() || gain.connect_with_audio_node(&ctx.destination()).is_err() {
+            return;
+        }
+        let _ = osc.start_with_when(at);
+        let _ = osc.stop_with_when(at + 0.22);
+    }
+    // Free the context once the ping has played.
+    let close = wasm_bindgen::closure::Closure::once(move || {
+        let _ = ctx.close();
+    });
+    if let Some(w) = window() {
+        let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(close.as_ref().unchecked_ref(), 1000);
+    }
+    close.forget();
+}
+
 /// RMS above which a member counts as speaking, and how long the highlight lingers.
 const SPEAKING_RMS: f32 = 0.02;
 pub const SPEAKING_HOLD_MS: f64 = 400.0;

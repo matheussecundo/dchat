@@ -75,12 +75,12 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
    - Speaker mute silences incoming peer audio locally in audio, video and screen-share calls; it resets when the call ends.
    - Zero Persistence Invariant: settings live in Wasm RAM only and reset to all-on on reload.
 
-8. **Phase 8: Discord-like Group Rooms over a Serverless Mesh (In Progress)**
+8. **Phase 8: Discord-like Group Rooms over a Serverless Mesh (Completed)**
    - **8a Mesh core (Completed)**: one `RTCPeerConnection` per member pair with perfect negotiation; recipient-addressed signaling; session nicknames shown with a short key tag; live member list; room messages signed by their author and gossip-relayed to members without a direct link; per-room member cap with deterministic "latest joiner loses" and an admin seat; admin link vs invite link; optional TURN server in the URL.
    - **8b Voice lounge (Completed)**: Discord-style drop-in voice/video lounge replacing the 1:1 ring flow; per-person mic, speaker, camera (with front/rear flip) and screen-share toggles; video grid with fullscreen; speaking indicator; "X joined voice" prompt; per-room voice and video limits; audio processing settings carry over.
    - **8c Group file sharing (Completed)**: room-wide file cards; each member pulls the file straight from the sender over their own direct link; the sender uploads to at most 2 members at once and queues the rest; decline, cancel and withdraw; transfers stop if the sender leaves.
    - **8d Moderation & history (Completed)**: admins can kick a member or move everyone to a new link (the room ID and key change, sealed to each remaining member); opt-in history so late joiners see the last 200 messages.
-   - 8e Typing indicator, reactions, edit/delete, private DMs and @mentions.
+   - **8e Chat extras (Completed)**: typing indicator, emoji reactions, editing and deleting your own messages, private DMs sealed end-to-end between two members, and @mentions with a highlight, a title badge and a chime.
 
 ---
 
@@ -96,6 +96,14 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 Every room message is signed with its author's session key, so a member relaying it cannot alter it or forge messages from someone else.
 
 **History for late joiners** is off by default: you only see messages sent while you are in the room. The creator can tick *Let late joiners see the last 200 messages*, which adds `&hist=1` to the link and shows a 🕒 badge. Members then keep recent messages in memory (never on disk) and hand them to newcomers as signed originals, so they can't be altered. Each message carries its author's own setting: someone who joined with a link without `hist=1` keeps their messages out of history. History disappears when the last member leaves. Like any chat, "off" can't stop someone who is present from copying a message.
+
+### Chat Extras
+
+- **Typing**: *"Bo is typing…"* appears above the message box.
+- **Reactions**: hover a message and tap 😀 to add 👍 ❤️ 😂 😮 😢 🎉; tap a reaction chip to add or remove yours.
+- **Edit / delete your own messages**: ✏️ puts the text back in the box (Enter saves, Esc cancels) and others see *(edited)*. 🗑️ removes it for everyone. Both are signed by you; deletion is best effort, since anyone may have already read or copied the message. Edited or deleted messages leave the history shown to late joiners.
+- **Private messages**: ✉️ next to a member opens a private chat. Messages are sealed with a key only the two of you can derive (ECDH between your session keys). With a direct link they travel only over that link; otherwise other members relay them without being able to read them. The conversation ends when either of you leaves, because session keys are per tab.
+- **@mentions**: write `@Name` and that member sees the message highlighted, hears a short chime and, if the tab is in the background, gets a `(n)` badge in the tab title.
 
 ### Voice Lounge
 

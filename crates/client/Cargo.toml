@@ -83,4 +83,9 @@ features = [
   "AnalyserNode",
   "MediaStreamAudioSourceNode",
   "NodeList",
+  "OscillatorNode",
+  "AudioScheduledSourceNode",
+  "GainNode",
+  "AudioParam",
+  "AudioDestinationNode",
 ]

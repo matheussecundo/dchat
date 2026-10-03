@@ -79,6 +79,10 @@ impl RoomSession {
                 RoomBody::Chat { text, shareable: true } => {
                     self.inner.dedup.borrow_mut().insert(&envelope.id);
                     self.record_history(envelope);
+                    self.inner
+                        .message_authors
+                        .borrow_mut()
+                        .insert(envelope.id.clone(), envelope.author.clone());
                     self.insert_message_by_time(ChatMessageUi {
                         id: envelope.id.clone(),
                         author: envelope.author.clone(),
@@ -86,8 +90,7 @@ impl RoomSession {
                         text: text.clone(),
                         time: clock_time(envelope.ts),
                         ts: envelope.ts,
-                        notice: None,
-                        file: None,
+                        ..Default::default()
                     });
                     shown += 1;
                 }
@@ -103,7 +106,7 @@ impl RoomSession {
                 time: clock_time(self.inner.join_ts),
                 ts: self.inner.join_ts,
                 notice: Some(Notice::HistoryShown),
-                file: None,
+                ..Default::default()
             });
         }
     }

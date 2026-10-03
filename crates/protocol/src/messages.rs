@@ -145,6 +145,17 @@ pub enum RoomBody {
     HistoryRequest { to: String },
     /// Signed originals of recent shareable chat messages, oldest first.
     HistoryChunk { to: String, envelopes: Vec<RoomEnvelope> },
+    /// The author is typing (sent at most every few seconds; expires on its own).
+    Typing,
+    /// Add (`on`) or remove the author's `emoji` reaction to message `target`.
+    Reaction { target: String, emoji: String, on: bool },
+    /// Replace the text of the author's own message `target`.
+    Edit { target: String, text: String },
+    /// Remove the author's own message `target` (best effort on honest clients).
+    Delete { target: String },
+    /// A private message to `to`, sealed with the two members' session keys (ECDH).
+    /// Relayable like any message, but only `to` can open it and `to` never relays it.
+    Dm { to: String, sealed: EncryptedPayload },
     /// Admin only: move the room to a new ID and key. Each remaining member gets its own
     /// grant sealed to its session key; `kicked` (if any) gets none.
     AdminRekey { kicked: Option<String>, grants: Vec<SealedGrant> },
@@ -202,6 +213,28 @@ impl RoomEnvelope {
     }
 }
 
+/// Seal `value` from `sender` to the member whose session pubkey is `to` (ECDH + AEAD).
+pub fn seal_json<T: Serialize>(sender: &NostrBurnerKey, to: &str, value: &T) -> Result<EncryptedPayload, NostrError> {
+    let key = sender.shared_key(to)?;
+    encrypt_json(&key, value).map_err(|e| NostrError::Crypto(e.to_string()))
+}
+
+/// Open a payload sealed to `recipient` by the member whose session pubkey is `sender`.
+pub fn open_json<T: serde::de::DeserializeOwned>(
+    recipient: &NostrBurnerKey,
+    sender: &str,
+    payload: &EncryptedPayload,
+) -> Option<T> {
+    let key = recipient.shared_key(sender).ok()?;
+    decrypt_json(&key, payload).ok()
+}
+
+/// The plaintext inside a `RoomBody::Dm`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DmContent {
+    pub text: String,
+}
+
 /// A rekey grant for one member, readable only with that member's session key.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SealedGrant {
@@ -220,15 +253,15 @@ pub struct RoomGrant {
 impl SealedGrant {
     /// Seal `grant` from `sender` to the member whose session pubkey is `to`.
     pub fn seal(sender: &NostrBurnerKey, to: &str, grant: &RoomGrant) -> Result<Self, NostrError> {
-        let key = sender.shared_key(to)?;
-        let payload = encrypt_json(&key, grant).map_err(|e| NostrError::Crypto(e.to_string()))?;
-        Ok(Self { to: to.to_string(), payload })
+        Ok(Self {
+            to: to.to_string(),
+            payload: seal_json(sender, to, grant)?,
+        })
     }
 
     /// Open a grant sealed to `recipient` by the member whose session pubkey is `sender`.
     pub fn open(&self, recipient: &NostrBurnerKey, sender: &str) -> Option<RoomGrant> {
-        let key = recipient.shared_key(sender).ok()?;
-        decrypt_json(&key, &self.payload).ok()
+        open_json(recipient, sender, &self.payload)
     }
 }
 
@@ -290,6 +323,17 @@ mod tests {
         assert_eq!(sealed.open(&bo, admin.pubkey()), Some(grant));
         assert_eq!(sealed.open(&cy, admin.pubkey()), None, "another member cannot open it");
         assert_eq!(sealed.open(&bo, cy.pubkey()), None, "wrong sender key fails");
+    }
+
+    #[test]
+    fn test_dm_seal_roundtrip() {
+        let ana = NostrBurnerKey::generate().unwrap();
+        let bo = NostrBurnerKey::generate().unwrap();
+        let cy = NostrBurnerKey::generate().unwrap();
+        let sealed = seal_json(&ana, bo.pubkey(), &DmContent { text: "psst".into() }).unwrap();
+        assert_eq!(open_json::<DmContent>(&bo, ana.pubkey(), &sealed), Some(DmContent { text: "psst".into() }));
+        assert_eq!(open_json::<DmContent>(&cy, ana.pubkey(), &sealed), None);
+        assert_eq!(RoomBody::Dm { to: bo.pubkey().into(), sealed }.recipient(), None, "DMs are relayable");
     }
 
     #[test]
