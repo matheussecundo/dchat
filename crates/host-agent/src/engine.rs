@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 
 /// More held keys than any real use needs; beyond this, presses are ignored.
 const MAX_HELD_KEYS: usize = 16;
+/// A pushed stick or held button with no update for this long goes back to neutral
+/// (pad states travel on a lossy channel; viewers resend them while active).
+const PAD_STALE: Duration = Duration::from_millis(500);
 
 pub enum EngineCmd {
     /// Everything member `who` may do now (both `None`: their control ends).
@@ -40,6 +43,7 @@ struct Member {
     keys: BTreeSet<DomCode>,
     buttons: BTreeSet<MouseButton>,
     pad_active: bool,
+    last_pad: Instant,
     last_seen: Instant,
 }
 
@@ -112,6 +116,16 @@ impl Engine {
 
     /// Watchdog: someone holds keys, buttons or a pushed stick but has gone quiet.
     pub fn tick(&mut self, now: Instant) -> Vec<EngineEvent> {
+        // Controllers first: a stale pushed stick is neutralized quickly.
+        for member in self.members.values_mut() {
+            if let (Some(slot), true) = (member.pad, member.pad_active) {
+                if now.duration_since(member.last_pad) > PAD_STALE {
+                    let _ = self.injector.pad_update(slot, &PadState::NEUTRAL);
+                    member.pad_active = false;
+                    let _ = self.injector.flush();
+                }
+            }
+        }
         let stale: Vec<u32> = self
             .members
             .iter()
@@ -155,6 +169,7 @@ impl Engine {
             keys: BTreeSet::new(),
             buttons: BTreeSet::new(),
             pad_active: false,
+            last_pad: now,
             last_seen: now,
         });
         let (old_kbm, old_pad) = (member.kbm, member.pad);
@@ -270,6 +285,7 @@ impl Engine {
                 InputEvent::Key { .. } => Ok(()),
                 InputEvent::Pad { index, state } if member.pad == Some(index) => {
                     member.pad_active = !state.is_resting();
+                    member.last_pad = now;
                     self.injector.pad_update(index, &state)
                 }
                 InputEvent::PadGone { index } if member.pad == Some(index) => {
@@ -557,6 +573,22 @@ mod tests {
         assert_eq!(taken(&log), vec![Injected::PadUpdate { slot: 0, state: pressed }]);
         grant(&mut e, 1, None, None, now);
         assert_eq!(taken(&log), vec![Injected::PadUpdate { slot: 0, state: PadState::NEUTRAL }, Injected::PadUnplug { slot: 0 }]);
+    }
+
+    #[test]
+    fn test_stale_controller_states_go_back_to_neutral() {
+        let now = Instant::now();
+        let (mut e, log) = engine(4, false);
+        grant(&mut e, 1, None, Some(2), now);
+        let pushed = PadState { axes: [20000, 0, 0, 0], ..PadState::NEUTRAL };
+        e.handle(EngineCmd::Input { who: 1, events: vec![InputEvent::Pad { index: 2, state: pushed }] }, now);
+        taken(&log);
+        e.tick(now + Duration::from_millis(400));
+        assert!(taken(&log).is_empty());
+        e.tick(now + Duration::from_millis(600));
+        assert_eq!(taken(&log), vec![Injected::PadUpdate { slot: 2, state: PadState::NEUTRAL }]);
+        e.tick(now + Duration::from_millis(900));
+        assert!(taken(&log).is_empty(), "only once");
     }
 
     #[test]

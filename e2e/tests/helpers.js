@@ -229,3 +229,25 @@ export const STUB_POINTER_LOCK = () => {
     setTimeout(() => document.dispatchEvent(new Event('pointerlockchange')), 0);
   };
 };
+
+/** Init script: one "standard" gamepad the test drives with `window.__pressPad(i, on)`. */
+export const MOCK_GAMEPAD = () => {
+  const pad = {
+    id: 'Test pad (STANDARD GAMEPAD)',
+    index: 0,
+    connected: true,
+    mapping: 'standard',
+    timestamp: 0,
+    axes: [0, 0, 0, 0],
+    buttons: Array.from({ length: 17 }, () => ({ pressed: false, touched: false, value: 0 })),
+  };
+  navigator.getGamepads = () => [pad, null, null, null];
+  window.__pressPad = (index, on) => {
+    pad.buttons[index] = { pressed: on, touched: on, value: on ? 1 : 0 };
+    pad.timestamp += 1;
+  };
+  window.__tiltPad = (axis, value) => {
+    pad.axes[axis] = value;
+    pad.timestamp += 1;
+  };
+};

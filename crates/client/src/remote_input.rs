@@ -5,7 +5,8 @@
 
 use crate::layout::{contain_rect, picture_fraction};
 use protocol::{
-    is_release_chord, normalize_position, DomCode, InputEvent, MouseButton, PointerMode, RelAccumulator, WheelAccumulator,
+    is_release_chord, normalize_position, pad_state_from, DomCode, InputEvent, MouseButton, PadSampler, PadState,
+    PointerMode, RelAccumulator, WheelAccumulator,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -292,4 +293,80 @@ fn keyboard_lock(on: bool) {
             }
         }
     }
+}
+
+/// How often the controller is read (browsers have no gamepad events for buttons or sticks).
+const PAD_POLL_MS: i32 = 8;
+
+/// Sends this viewer's game controller while they hold a controller slot. Uses the first
+/// controller in the browser's "standard" layout; nothing is sent while the tab is hidden
+/// (the host's pad goes back to neutral). Browsers only show a controller after one of its
+/// buttons is pressed on this page.
+pub struct PadPoller {
+    interval: Option<(i32, Closure<dyn FnMut()>)>,
+    sink: InputSink,
+}
+
+impl PadPoller {
+    pub fn start(sink: InputSink) -> Result<Self, JsValue> {
+        let win = window().ok_or("no window")?;
+        let sampler = RefCell::new(PadSampler::default());
+        let connected = Cell::new(false);
+        let tick_sink = sink.clone();
+        let callback = Closure::wrap(Box::new(move || {
+            let visible = window().and_then(|w| w.document()).is_some_and(|d| !d.hidden());
+            match read_standard_pad().filter(|_| visible) {
+                Some(state) => {
+                    connected.set(true);
+                    if let Some(state) = sampler.borrow_mut().sample(state, js_sys::Date::now()) {
+                        tick_sink(vec![InputEvent::Pad { index: 0, state }]);
+                    }
+                }
+                None => {
+                    if connected.replace(false) {
+                        *sampler.borrow_mut() = PadSampler::default();
+                        tick_sink(vec![InputEvent::PadGone { index: 0 }]);
+                    }
+                }
+            }
+        }) as Box<dyn FnMut()>);
+        let id = win.set_interval_with_callback_and_timeout_and_arguments_0(callback.as_ref().unchecked_ref(), PAD_POLL_MS)?;
+        Ok(Self { interval: Some((id, callback)), sink })
+    }
+}
+
+impl Drop for PadPoller {
+    fn drop(&mut self) {
+        if let (Some((id, _callback)), Some(win)) = (self.interval.take(), window()) {
+            win.clear_interval_with_handle(id);
+        }
+        (self.sink)(vec![InputEvent::PadGone { index: 0 }]);
+    }
+}
+
+/// The first connected "standard" controller, read through plain properties.
+fn read_standard_pad() -> Option<PadState> {
+    let navigator = window()?.navigator();
+    let get = js_sys::Reflect::get(&navigator, &"getGamepads".into()).ok()?.dyn_into::<js_sys::Function>().ok()?;
+    let pads = get.call0(&navigator).ok()?.dyn_into::<js_sys::Array>().ok()?;
+    let field = |obj: &JsValue, name: &str| js_sys::Reflect::get(obj, &name.into()).unwrap_or(JsValue::UNDEFINED);
+    pads.iter().filter(|p| !p.is_null() && !p.is_undefined()).find_map(|pad| {
+        let standard = field(&pad, "mapping").as_string().as_deref() == Some("standard");
+        if !standard || field(&pad, "connected").as_bool() != Some(true) {
+            return None;
+        }
+        let buttons: Vec<(bool, f64)> = field(&pad, "buttons")
+            .dyn_into::<js_sys::Array>()
+            .ok()?
+            .iter()
+            .map(|b| (field(&b, "pressed").as_bool().unwrap_or(false), field(&b, "value").as_f64().unwrap_or(0.0)))
+            .collect();
+        let axes: Vec<f64> = field(&pad, "axes")
+            .dyn_into::<js_sys::Array>()
+            .ok()?
+            .iter()
+            .map(|a| a.as_f64().unwrap_or(0.0))
+            .collect();
+        Some(pad_state_from(&buttons, &axes))
+    })
 }

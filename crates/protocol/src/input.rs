@@ -524,6 +524,26 @@ impl InputBudget {
     }
 }
 
+/// A browser gamepad in the "standard" layout as a `PadState`: `buttons` as (pressed,
+/// value) by standard index (6 and 7, the triggers, use their analog value) and `axes` as
+/// -1.0..=1.0 (left X, left Y, right X, right Y).
+pub fn pad_state_from(buttons: &[(bool, f64)], axes: &[f64]) -> PadState {
+    let mut state = PadState::NEUTRAL;
+    let analog = |v: f64| if v.is_finite() { (v.clamp(0.0, 1.0) * 255.0).round() as u8 } else { 0 };
+    for (i, (pressed, value)) in buttons.iter().enumerate().take(17) {
+        match i {
+            6 => state.triggers[0] = analog(*value),
+            7 => state.triggers[1] = analog(*value),
+            _ if *pressed => state.buttons |= 1 << i,
+            _ => {}
+        }
+    }
+    for (i, v) in axes.iter().enumerate().take(4) {
+        state.axes[i] = if v.is_finite() { (v.clamp(-1.0, 1.0) * 32767.0).round() as i16 } else { 0 };
+    }
+    state
+}
+
 /// Ctrl+Alt+Shift+Q: the viewer stops controlling, whatever is focused.
 pub fn is_release_chord(ctrl: bool, alt: bool, shift: bool, code: &str) -> bool {
     ctrl && alt && shift && code == "KeyQ"
@@ -654,6 +674,20 @@ pub(crate) mod tests {
         assert_eq!(sampler.sample(PadState::NEUTRAL, 2500.0), None, "quiet once resting for a while");
         let drifting = PadState { axes: [900, -700, 0, 0], ..PadState::NEUTRAL };
         assert!(drifting.is_resting(), "small stick drift counts as resting");
+    }
+
+    #[test]
+    fn test_browser_gamepads_become_pad_states() {
+        let mut buttons = vec![(false, 0.0); 17];
+        buttons[0] = (true, 1.0); // A
+        buttons[7] = (true, 0.5); // right trigger, half
+        buttons[16] = (true, 1.0); // guide
+        let state = pad_state_from(&buttons, &[1.0, -1.0, 0.25, f64::NAN, 9.0]);
+        assert_eq!(state.buttons, 1 | 1 << 16);
+        assert_eq!(state.triggers, [0, 128]);
+        assert_eq!(state.axes, [32767, -32767, 8192, 0]);
+        assert_eq!(state.buttons & !PAD_BUTTON_MASK, 0, "no trigger bits");
+        assert_eq!(pad_state_from(&[], &[]), PadState::NEUTRAL);
     }
 
     #[test]

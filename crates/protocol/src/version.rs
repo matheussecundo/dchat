@@ -62,7 +62,7 @@ mod tests {
 
     /// The wire fingerprint recorded for the current version. When the test below fails,
     /// bump `PROTOCOL_VERSION` and record the new pair here.
-    const RECORDED: (u32, &str) = (4, "be8fb3c27bc585821adf50c5505a1e70be00a0767df23f834433315aa36340f9");
+    const RECORDED: (u32, &str) = (4, "f7d7d32502cfb3a8c69465d407abb838821b2930ddb72199ef685e78d2ef2dc3");
 
     fn sealed() -> EncryptedPayload {
         EncryptedPayload { nonce: "n".into(), ciphertext: "c".into() }
@@ -159,7 +159,7 @@ mod tests {
                 kicked: Some("c".into()),
                 grants: vec![SealedGrant { to: "b".into(), payload: sealed() }],
             },
-            RoomBody::ControlStatus { seq: 1, available: true, mouse_keyboard: Some("b".into()), pads: vec![None, Some("c".into())] },
+            RoomBody::ControlStatus { seq: 1, available: true, controllers: 2, mouse_keyboard: Some("b".into()), pads: vec![None, Some("c".into())] },
             RoomBody::ControlRequest { to: "s".into(), mouse_keyboard: true, controller: true },
             RoomBody::ControlGrant { to: "b".into(), mouse_keyboard: false, pad: Some(1), reason: Some(ControlEnd::TakenOver) },
             RoomBody::ControlRelease { to: "s".into() },

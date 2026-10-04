@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import {
-  AGENT, CANVAS_SCREEN, STUB_POINTER_LOCK, agentEvents, createRoom, expectDirectMesh, expectNoStorage, inviteFrom,
+  AGENT, CANVAS_SCREEN, MOCK_GAMEPAD, STUB_POINTER_LOCK, agentEvents, createRoom, expectDirectMesh, expectNoStorage, inviteFrom,
   joinRoom, joinVoice, memberRow, newMember, pairAgent, resetAgent, voiceChip,
 } from './helpers.js';
 
@@ -17,6 +17,7 @@ async function sharingRoom(browser, others, surface = 'monitor') {
   for (const name of others) {
     const m = await newMember(browser, name);
     await m.context.addInitScript(STUB_POINTER_LOCK);
+    await m.context.addInitScript(MOCK_GAMEPAD);
     await joinRoom(m.page, invite, name);
     members.push(m);
   }
@@ -212,4 +213,50 @@ test('game mode: pointer lock, relative movement, smooth video, and losing the l
   await bo.page.evaluate(() => document.exitPointerLock());
   await expect(tile(bo.page, anaKey)).toHaveAttribute('data-control', 'granted', { timeout: 5000 });
   for (const m of [ana, bo]) await m.context.close();
+});
+
+test('controllers: several members at once, each in their own slot, released on revoke', async ({ browser }) => {
+  const { members: [ana, bo, cy], anaKey } = await sharingRoom(browser, ['Bo', 'Cy']);
+  await pairAgent(ana.page);
+  await expect(ana.page.locator('#agent-status')).toHaveAttribute('data-status', 'paired', { timeout: 10000 });
+  await ana.page.locator('#control-host-modal .modal-title-row button').click();
+
+  // Bo and Cy each ask for a controller; Ana allows both.
+  for (const viewer of [bo, cy]) {
+    await tile(viewer.page, anaKey).locator('.control-request-pad-btn').click();
+    const prompt = ana.page.locator('.control-prompt');
+    await expect(prompt).toContainText('controller', { timeout: 10000 });
+    await prompt.locator('.control-allow-btn').click();
+    await expect(tile(viewer.page, anaKey)).toHaveAttribute('data-control', 'pad', { timeout: 10000 });
+  }
+  await expect(tile(bo.page, anaKey).locator('.control-pad-badge')).toHaveText('🎮 P1');
+  await expect(tile(cy.page, anaKey).locator('.control-pad-badge')).toHaveText('🎮 P2');
+  await expect(memberRow(ana.page, 'Cy').locator('.control-badge')).toHaveText('🎮P2');
+  let events = await waitForEvents((ev) => ev.filter((e) => e.k === 'PadPlug').length === 2);
+  expect(events.filter((e) => e.k === 'PadPlug').map((e) => e.slot).sort()).toEqual([0, 1]);
+
+  // A on Bo's controller presses A on P1; Cy's stick moves P2.
+  await bo.page.evaluate(() => window.__pressPad(0, true));
+  await cy.page.evaluate(() => window.__tiltPad(0, 1));
+  events = await waitForEvents((ev) =>
+    ev.some((e) => e.k === 'PadUpdate' && e.slot === 0 && e.state.buttons === 1)
+    && ev.some((e) => e.k === 'PadUpdate' && e.slot === 1 && e.state.axes[0] === 32767));
+  expect(events.some((e) => e.k === 'PadUpdate' && e.slot === 0 && e.state.axes[0] !== 0)).toBe(false);
+  expect(events.some((e) => e.k === 'Key' || e.k === 'MoveAbs')).toBe(false);
+
+  // Revoking Cy puts P2 back to neutral and unplugs it; Bo keeps P1.
+  await memberRow(ana.page, 'Cy').locator('.control-revoke-btn').click();
+  events = await waitForEvents((ev) => ev.some((e) => e.k === 'PadUnplug' && e.slot === 1));
+  const unplug = events.findIndex((e) => e.k === 'PadUnplug' && e.slot === 1);
+  expect(events.slice(0, unplug).reverse().find((e) => e.k === 'PadUpdate' && e.slot === 1).state)
+    .toEqual({ buttons: 0, axes: [0, 0, 0, 0], triggers: [0, 0] });
+  await expect(tile(cy.page, anaKey)).toHaveAttribute('data-control', 'offer', { timeout: 10000 });
+  await expect(tile(bo.page, anaKey)).toHaveAttribute('data-control', 'pad');
+
+  // Bo can also take mouse and keyboard while keeping the controller.
+  await tile(bo.page, anaKey).locator('.control-request-btn').click();
+  await ana.page.locator('.control-prompt .control-allow-btn').click({ timeout: 10000 });
+  await expect(tile(bo.page, anaKey)).toHaveAttribute('data-control', 'granted', { timeout: 10000 });
+  await expect(tile(bo.page, anaKey).locator('.control-pad-badge')).toHaveText('🎮 P1');
+  for (const m of [ana, bo, cy]) await m.context.close();
 });

@@ -29,6 +29,7 @@ evdev = "0.13"
 x11rb = { version = "0.13", features = ["randr"] }
 
 [target.'cfg(windows)'.dependencies]
+vigem-client = "0.1"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",

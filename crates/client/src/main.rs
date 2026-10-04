@@ -24,7 +24,7 @@ use protocol::{
 };
 use agent::{AgentLink, AgentSignals, AgentStatus};
 use qr::generate_qr_svg;
-use remote_input::{InputCapture, InputSink};
+use remote_input::{InputCapture, InputSink, PadPoller};
 use std::rc::Rc;
 use session::{RoomSession, SessionSignals};
 use state::{
@@ -124,6 +124,7 @@ fn App() -> impl IntoView {
     let (allow_control, set_allow_control) = create_signal(true);
     let (controlling, set_controlling) = create_signal(None::<String>);
     let capture = store_value(None::<InputCapture>);
+    let pad_poller = store_value(None::<PadPoller>);
     // Toasts and control prompts live in one layer that moves into whatever element is in
     // fullscreen, so they stay visible there.
     let overlay_ref = create_node_ref::<leptos::html::Div>();
@@ -413,6 +414,9 @@ fn App() -> impl IntoView {
         TileControlAction::Request => {
             with_session(&|s| s.request_control(&sharer, ControlWants { mouse_keyboard: true, controller: false }));
         }
+        TileControlAction::RequestPad => {
+            with_session(&|s| s.request_control(&sharer, ControlWants { mouse_keyboard: false, controller: true }));
+        }
         TileControlAction::Release => {
             if controlling.get_untracked().as_deref() == Some(sharer.as_str()) {
                 disengage();
@@ -426,6 +430,20 @@ fn App() -> impl IntoView {
             with_session(&|s| s.set_control_mode(&sharer, next));
         }
     };
+    // A controller slot anywhere: read this viewer's game controller while it lasts.
+    let holds_pad = create_memo(move |_| control.with(|c| c.mine.values().any(|m| m.pad.is_some())));
+    create_effect(move |_| {
+        if !holds_pad.get() {
+            pad_poller.set_value(None);
+            return;
+        }
+        if pad_poller.with_value(Option::is_none) {
+            let sink: InputSink = Rc::new(move |events| with_session(&|s| s.send_pad_input(events.clone())));
+            if let Ok(poller) = PadPoller::start(sink) {
+                pad_poller.set_value(Some(poller));
+            }
+        }
+    });
     // Rights gone (revoked, taken over, share ended): stop capturing right away.
     create_effect(move |_| {
         let Some(sharer) = controlling.get() else {
@@ -1713,6 +1731,12 @@ fn App() -> impl IntoView {
                                 }).map(|err| view! {
                                     <p class="lobby-warning">{move || t_replace_1(lang.get(), "agent_kbm_unavailable", "{error}", &err)}</p>
                                 })}
+                                {move || agent_status.with(|s| match s {
+                                    AgentStatus::Paired { caps, .. } => caps.pads_error.clone(),
+                                    _ => None,
+                                }).map(|err| view! {
+                                    <p class="lobby-hint agent-pads-unavailable">{move || t_replace_1(lang.get(), "agent_pads_unavailable", "{error}", &err)}</p>
+                                })}
                                 <label class="lobby-check" for="allow-control-toggle">
                                     <input
                                         type="checkbox"
@@ -1941,6 +1965,7 @@ fn voice_chip(lang: ReadSignal<Language>, member: LoungeMemberUi, speaking: Read
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TileControlAction {
     Request,
+    RequestPad,
     Release,
     Engage,
     ToggleMode,
@@ -1953,6 +1978,8 @@ enum TileControl {
     Offer,
     Requested,
     Granted,
+    /// A controller slot, no mouse and keyboard.
+    PadOnly,
     Engaged,
 }
 
@@ -1963,6 +1990,7 @@ impl TileControl {
             TileControl::Offer => "offer",
             TileControl::Requested => "requested",
             TileControl::Granted => "granted",
+            TileControl::PadOnly => "pad",
             TileControl::Engaged => "engaged",
         }
     }
@@ -1998,6 +2026,7 @@ fn video_tile(
             match mine {
                 Some(m) if m.mouse_keyboard && controlling.with(|c| c.as_deref() == Some(pk.as_str())) => TileControl::Engaged,
                 Some(m) if m.mouse_keyboard => TileControl::Granted,
+                Some(m) if m.pad.is_some() => TileControl::PadOnly,
                 Some(m) if m.requested => TileControl::Requested,
                 _ if offered => TileControl::Offer,
                 _ => TileControl::Hidden,
@@ -2005,9 +2034,16 @@ fn video_tile(
         })
     };
     let has_surface = create_memo(move |_| matches!(tile_control.get(), TileControl::Granted | TileControl::Engaged));
-    let my_mode = {
+    // Everything the tile's buttons depend on, so they re-render only when it changes.
+    let bar_info = {
         let pk = pk.clone();
-        create_memo(move |_| control.with(|c| c.mine.get(&pk).map(|m| m.mode).unwrap_or_default()))
+        create_memo(move |_| {
+            control.with(|c| {
+                let mine = c.mine.get(&pk).copied().unwrap_or_default();
+                let controllers = c.offers.get(&pk).map_or(0, |o| o.controllers);
+                (mine.mode, mine.pad, mine.requested, controllers)
+            })
+        })
     };
     let holder = {
         let pk = pk.clone();
@@ -2058,15 +2094,53 @@ fn video_tile(
             </button>
             {move || {
                 let pk = pk_bar.clone();
-                my_mode.track();
+                let (mode, pad, requested, controllers) = bar_info.get();
+                // Buttons shared by several states.
+                let pad_badge = move || pad.map(|slot| view! {
+                    <span class="control-pad-badge" title=move || t_replace_1(lang.get(), "control_pad_hint", "{n}", &(slot + 1).to_string())>
+                        {format!("🎮 P{}", slot + 1)}
+                    </span>
+                });
+                let waiting = move || requested.then(|| view! {
+                    <span class="control-waiting">{move || t(lang.get(), "control_waiting")}</span>
+                });
+                let pad_button = {
+                    let pk = pk.clone();
+                    move || (controllers > 0 && pad.is_none() && !requested).then(|| {
+                        let pk = pk.clone();
+                        view! {
+                            <button class="btn btn-sm btn-secondary control-request-pad-btn" on:click=move |_| on_control(pk.clone(), TileControlAction::RequestPad)>
+                                {move || t(lang.get(), "btn_request_pad")}
+                            </button>
+                        }
+                    })
+                };
                 match tile_control.get() {
                     TileControl::Offer => view! {
                         <div class="control-bar">
                             <button class="btn btn-sm btn-call control-request-btn" on:click=move |_| on_control(pk.clone(), TileControlAction::Request)>
                                 {move || t(lang.get(), "btn_request_control")}
                             </button>
+                            {pad_button}
                         </div>
                     }.into_view(),
+                    TileControl::PadOnly => {
+                        let pk_release = pk.clone();
+                        view! {
+                            <div class="control-bar">
+                                {pad_badge}
+                                {waiting}
+                                {(!requested).then(|| view! {
+                                    <button class="btn btn-sm btn-secondary control-request-btn" on:click=move |_| on_control(pk.clone(), TileControlAction::Request)>
+                                        {move || t(lang.get(), "btn_request_control")}
+                                    </button>
+                                })}
+                                <button class="btn btn-sm btn-secondary control-release-btn" on:click=move |_| on_control(pk_release.clone(), TileControlAction::Release)>
+                                    {move || t(lang.get(), "btn_release_control")}
+                                </button>
+                            </div>
+                        }.into_view()
+                    }
                     TileControl::Requested => view! {
                         <div class="control-bar">
                             <span class="control-waiting">{move || t(lang.get(), "control_waiting")}</span>
@@ -2077,10 +2151,12 @@ fn video_tile(
                     }.into_view(),
                     TileControl::Granted => {
                         let pk_mode = pk.clone();
-                        let mode = control.with_untracked(|c| c.mine.get(&pk).map(|m| m.mode).unwrap_or_default());
                         let game = mode == PointerMode::Game;
                         view! {
                             <div class="control-bar">
+                                {pad_badge}
+                                {waiting}
+                                {pad_button}
                                 <button class="btn btn-sm btn-secondary control-release-btn" on:click=move |_| on_control(pk.clone(), TileControlAction::Release)>
                                     {move || t(lang.get(), "btn_release_control")}
                                 </button>

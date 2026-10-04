@@ -9,6 +9,7 @@ pub mod geometry;
 pub mod inject;
 pub mod keymap;
 pub mod monitors;
+pub mod pad_map;
 pub mod pairing;
 pub mod server;
 pub mod status;

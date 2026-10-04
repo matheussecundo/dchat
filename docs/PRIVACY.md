@@ -32,7 +32,7 @@ Messages, voice, video and files are end-to-end encrypted, and nothing is stored
   - It hides you from members, not from relays or the TURN server, which still see your IP address. Use a VPN for that.
 - **Nothing typed is kept by the browser.** Forms and text boxes turn off autofill (`autocomplete="off"`), so names, passwords and relay addresses aren't saved to the browser's form history.
 - **Spell checking can be turned off.** Some browsers' enhanced spell check (Chrome's, Edge's) sends what you type to Google or Microsoft. **⚙️ Settings → Spell check while typing** turns spell checking off for the message boxes. It is on by default.
-- **Remote control only with your click.** Members can ask to control your mouse and keyboard while you share your screen, but nothing happens until you allow it, and only one person at a time. Their input reaches only your computer, sealed over your direct link; your tab and `dchat-host` both drop anything from someone you didn't allow. Everything held down is released when control ends.
+- **Remote control only with your click.** Members can ask to control your mouse and keyboard (one person at a time) or to plug in a game controller while you share your screen, but nothing happens until you allow it. Their input reaches only your computer, sealed over your direct link; your tab and `dchat-host` both drop anything from someone you didn't allow. Everything held down is released when control ends.
 - **No long-term identity.** Each tab makes a fresh session key; nothing ties two visits together.
 - **Short-lived relay events.** Signaling uses ephemeral Nostr events (kind 20001), which compliant relays forward without storing. `dchat-relay` stores nothing and logs no IP addresses.
 

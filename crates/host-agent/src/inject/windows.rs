@@ -4,21 +4,44 @@
 
 use super::win_input::{self, WinInput};
 use super::{Caps, Injector};
-use protocol::{DomCode, MouseButton, PadState, PointerMode};
+use crate::pad_map;
+use protocol::{DomCode, MouseButton, PadState, PointerMode, MAX_PADS};
+use std::collections::HashMap;
 use std::io;
+use std::sync::Arc;
+use vigem_client::{Client, TargetId, XButtons, XGamepad, Xbox360Wired};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, MOUSEINPUT,
 };
 
-#[derive(Default)]
+/// Where to get the driver for virtual controllers.
+const VIGEM_HELP: &str = "controllers need the ViGEmBus driver: install it from https://github.com/nefarius/ViGEmBus/releases, then restart dchat-host";
+
 pub struct SendInputInjector {
     pending: Vec<WinInput>,
+    /// Connection to the ViGEmBus driver, which creates virtual Xbox 360 pads.
+    vigem: Result<Arc<Client>, String>,
+    pads: HashMap<u8, Xbox360Wired<Arc<Client>>>,
 }
 
 impl SendInputInjector {
     pub fn new() -> Self {
-        Self::default()
+        let vigem = Client::connect().map(Arc::new).map_err(|err| match err {
+            vigem_client::Error::BusNotFound => VIGEM_HELP.to_string(),
+            other => format!("the ViGEmBus driver is not usable ({other}); {VIGEM_HELP}"),
+        });
+        Self { pending: Vec::new(), vigem, pads: HashMap::new() }
     }
+}
+
+impl Default for SendInputInjector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn pad_error(err: vigem_client::Error) -> io::Error {
+    io::Error::other(format!("virtual controller: {err}"))
 }
 
 fn to_input(input: &WinInput) -> INPUT {
@@ -38,7 +61,7 @@ impl Injector for SendInputInjector {
     fn caps(&self) -> Caps {
         Caps {
             mouse_keyboard: Ok(()),
-            pads: Err("controllers are not supported by this version of dchat-host yet".into()),
+            pads: self.vigem.as_ref().map(|_| MAX_PADS as u8).map_err(Clone::clone),
             // Windows does not repeat injected keys by itself.
             software_repeat: true,
         }
@@ -69,15 +92,41 @@ impl Injector for SendInputInjector {
         Ok(())
     }
 
-    fn pad_plug(&mut self, _slot: u8) -> io::Result<()> {
-        Err(io::Error::other("controllers are not supported by this version of dchat-host yet"))
-    }
-
-    fn pad_update(&mut self, _slot: u8, _state: &PadState) -> io::Result<()> {
+    fn pad_plug(&mut self, slot: u8) -> io::Result<()> {
+        if self.pads.contains_key(&slot) {
+            return Ok(());
+        }
+        let client = self.vigem.as_ref().map_err(|err| io::Error::other(err.clone()))?.clone();
+        let mut pad = Xbox360Wired::new(client, TargetId::XBOX360_WIRED);
+        pad.plugin().map_err(pad_error)?;
+        pad.wait_ready().map_err(pad_error)?;
+        self.pads.insert(slot, pad);
         Ok(())
     }
 
-    fn pad_unplug(&mut self, _slot: u8) {}
+    fn pad_update(&mut self, slot: u8, state: &PadState) -> io::Result<()> {
+        let Some(pad) = self.pads.get_mut(&slot) else {
+            return Ok(());
+        };
+        let r = pad_map::xinput(state);
+        let report = XGamepad {
+            buttons: XButtons(r.buttons),
+            left_trigger: r.left_trigger,
+            right_trigger: r.right_trigger,
+            thumb_lx: r.lx,
+            thumb_ly: r.ly,
+            thumb_rx: r.rx,
+            thumb_ry: r.ry,
+        };
+        pad.update(&report).map_err(pad_error)
+    }
+
+    /// Unplugging releases whatever the pad had pressed.
+    fn pad_unplug(&mut self, slot: u8) {
+        if let Some(mut pad) = self.pads.remove(&slot) {
+            let _ = pad.unplug();
+        }
+    }
 
     /// One `SendInput` per batch, so a click and its position arrive together.
     fn flush(&mut self) -> io::Result<()> {

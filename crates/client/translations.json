@@ -218,7 +218,10 @@
     "title_revoke_control": "Stop this person's control",
     "control_mode_desktop": "🖱️ Desktop mode",
     "control_mode_game": "🎮 Game mode",
-    "control_mode_title": "Desktop mode: click where you point. Game mode: the mouse is captured and moves the view, for games. Click to switch."
+    "control_mode_title": "Desktop mode: click where you point. Game mode: the mouse is captured and moves the view, for games. Click to switch.",
+    "btn_request_pad": "🎮 Request controller",
+    "control_pad_hint": "Your controller plays as P{n} on this computer. If nothing happens, press a button on it.",
+    "agent_pads_unavailable": "No controllers on this computer: {error}"
   },
   "zh": {
     "scan_qr": "📱 扫描二维码",
@@ -439,7 +442,10 @@
     "title_revoke_control": "停止此人的控制",
     "control_mode_desktop": "🖱️ 桌面模式",
     "control_mode_game": "🎮 游戏模式",
-    "control_mode_title": "桌面模式：指向哪里就点击哪里。游戏模式：鼠标被锁定并用于转动视角，适合游戏。点击切换。"
+    "control_mode_title": "桌面模式：指向哪里就点击哪里。游戏模式：鼠标被锁定并用于转动视角，适合游戏。点击切换。",
+    "btn_request_pad": "🎮 请求手柄",
+    "control_pad_hint": "你的手柄在这台电脑上作为 P{n}。如果没有反应，请按一下手柄上的按键。",
+    "agent_pads_unavailable": "这台电脑无法使用手柄：{error}"
   },
   "hi": {
     "scan_qr": "📱 क्यूआर स्कैन करें",
@@ -660,7 +666,10 @@
     "title_revoke_control": "इस व्यक्ति का नियंत्रण रोकें",
     "control_mode_desktop": "🖱️ डेस्कटॉप मोड",
     "control_mode_game": "🎮 गेम मोड",
-    "control_mode_title": "डेस्कटॉप मोड: जहाँ इशारा करें वहीं क्लिक होता है। गेम मोड: माउस लॉक होकर दृश्य घुमाता है, गेम के लिए। बदलने के लिए क्लिक करें।"
+    "control_mode_title": "डेस्कटॉप मोड: जहाँ इशारा करें वहीं क्लिक होता है। गेम मोड: माउस लॉक होकर दृश्य घुमाता है, गेम के लिए। बदलने के लिए क्लिक करें।",
+    "btn_request_pad": "🎮 कंट्रोलर माँगें",
+    "control_pad_hint": "आपका कंट्रोलर इस कंप्यूटर पर P{n} के रूप में चलता है। कुछ न हो तो उस पर कोई बटन दबाएँ।",
+    "agent_pads_unavailable": "इस कंप्यूटर पर कंट्रोलर उपलब्ध नहीं: {error}"
   },
   "es": {
     "scan_qr": "📱 Escanear QR",
@@ -881,7 +890,10 @@
     "title_revoke_control": "Quitarle el control a esta persona",
     "control_mode_desktop": "🖱️ Modo escritorio",
     "control_mode_game": "🎮 Modo juego",
-    "control_mode_title": "Modo escritorio: haces clic donde apuntas. Modo juego: el ratón queda capturado y mueve la vista, para juegos. Haz clic para cambiar."
+    "control_mode_title": "Modo escritorio: haces clic donde apuntas. Modo juego: el ratón queda capturado y mueve la vista, para juegos. Haz clic para cambiar.",
+    "btn_request_pad": "🎮 Pedir mando",
+    "control_pad_hint": "Tu mando juega como P{n} en este equipo. Si no pasa nada, pulsa un botón del mando.",
+    "agent_pads_unavailable": "No hay mandos en este equipo: {error}"
   },
   "fr": {
     "scan_qr": "📱 Scanner QR",
@@ -1102,7 +1114,10 @@
     "title_revoke_control": "Retirer le contrôle à cette personne",
     "control_mode_desktop": "🖱️ Mode bureau",
     "control_mode_game": "🎮 Mode jeu",
-    "control_mode_title": "Mode bureau : vous cliquez là où vous pointez. Mode jeu : la souris est capturée et déplace la vue, pour les jeux. Cliquez pour changer."
+    "control_mode_title": "Mode bureau : vous cliquez là où vous pointez. Mode jeu : la souris est capturée et déplace la vue, pour les jeux. Cliquez pour changer.",
+    "btn_request_pad": "🎮 Demander une manette",
+    "control_pad_hint": "Votre manette joue en tant que P{n} sur cet ordinateur. Si rien ne se passe, appuyez sur un de ses boutons.",
+    "agent_pads_unavailable": "Pas de manettes sur cet ordinateur : {error}"
   },
   "ar": {
     "scan_qr": "📱 مسح رمز QR",
@@ -1323,7 +1338,10 @@
     "title_revoke_control": "إيقاف تحكم هذا الشخص",
     "control_mode_desktop": "🖱️ وضع سطح المكتب",
     "control_mode_game": "🎮 وضع الألعاب",
-    "control_mode_title": "وضع سطح المكتب: تنقر حيث تشير. وضع الألعاب: تُحتجز الفأرة وتحرّك المشهد، للألعاب. انقر للتبديل."
+    "control_mode_title": "وضع سطح المكتب: تنقر حيث تشير. وضع الألعاب: تُحتجز الفأرة وتحرّك المشهد، للألعاب. انقر للتبديل.",
+    "btn_request_pad": "🎮 طلب يد تحكم",
+    "control_pad_hint": "تعمل يد التحكم لديك بصفة P{n} على هذا الحاسوب. إن لم يحدث شيء، فاضغط زرًا عليها.",
+    "agent_pads_unavailable": "لا تتوفر أيادي تحكم على هذا الحاسوب: {error}"
   },
   "bn": {
     "scan_qr": "📱 কিউআর স্ক্যান",
@@ -1544,7 +1562,10 @@
     "title_revoke_control": "এই ব্যক্তির নিয়ন্ত্রণ থামান",
     "control_mode_desktop": "🖱️ ডেস্কটপ মোড",
     "control_mode_game": "🎮 গেম মোড",
-    "control_mode_title": "ডেস্কটপ মোড: যেখানে নির্দেশ করেন সেখানে ক্লিক হয়। গেম মোড: মাউস আটকে থেকে দৃশ্য ঘোরায়, গেমের জন্য। বদলাতে ক্লিক করুন।"
+    "control_mode_title": "ডেস্কটপ মোড: যেখানে নির্দেশ করেন সেখানে ক্লিক হয়। গেম মোড: মাউস আটকে থেকে দৃশ্য ঘোরায়, গেমের জন্য। বদলাতে ক্লিক করুন।",
+    "btn_request_pad": "🎮 কন্ট্রোলার চান",
+    "control_pad_hint": "আপনার কন্ট্রোলার এই কম্পিউটারে P{n} হিসেবে খেলছে। কিছু না হলে এর একটি বোতাম চাপুন।",
+    "agent_pads_unavailable": "এই কম্পিউটারে কন্ট্রোলার নেই: {error}"
   },
   "pt": {
     "scan_qr": "📱 Escanear QR",
@@ -1765,7 +1786,10 @@
     "title_revoke_control": "Tirar o controle desta pessoa",
     "control_mode_desktop": "🖱️ Modo área de trabalho",
     "control_mode_game": "🎮 Modo jogo",
-    "control_mode_title": "Modo área de trabalho: você clica onde aponta. Modo jogo: o mouse fica capturado e move a visão, para jogos. Clique para trocar."
+    "control_mode_title": "Modo área de trabalho: você clica onde aponta. Modo jogo: o mouse fica capturado e move a visão, para jogos. Clique para trocar.",
+    "btn_request_pad": "🎮 Pedir controle",
+    "control_pad_hint": "Seu controle joga como P{n} neste computador. Se nada acontecer, aperte um botão nele.",
+    "agent_pads_unavailable": "Sem controles neste computador: {error}"
   },
   "ru": {
     "scan_qr": "📱 Сканировать QR",
@@ -1986,7 +2010,10 @@
     "title_revoke_control": "Прекратить управление этого человека",
     "control_mode_desktop": "🖱️ Режим рабочего стола",
     "control_mode_game": "🎮 Игровой режим",
-    "control_mode_title": "Режим рабочего стола: нажатие там, куда указываете. Игровой режим: мышь захватывается и поворачивает обзор, для игр. Нажмите, чтобы переключить."
+    "control_mode_title": "Режим рабочего стола: нажатие там, куда указываете. Игровой режим: мышь захватывается и поворачивает обзор, для игр. Нажмите, чтобы переключить.",
+    "btn_request_pad": "🎮 Запросить геймпад",
+    "control_pad_hint": "Ваш геймпад работает на этом компьютере как P{n}. Если ничего не происходит, нажмите на нём любую кнопку.",
+    "agent_pads_unavailable": "Геймпады на этом компьютере недоступны: {error}"
   },
   "de": {
     "scan_qr": "📱 QR scannen",
@@ -2207,6 +2234,9 @@
     "title_revoke_control": "Steuerung dieser Person beenden",
     "control_mode_desktop": "🖱️ Desktop-Modus",
     "control_mode_game": "🎮 Spielmodus",
-    "control_mode_title": "Desktop-Modus: Du klickst, wohin du zeigst. Spielmodus: Die Maus wird gefangen und bewegt die Ansicht, für Spiele. Klicke zum Wechseln."
+    "control_mode_title": "Desktop-Modus: Du klickst, wohin du zeigst. Spielmodus: Die Maus wird gefangen und bewegt die Ansicht, für Spiele. Klicke zum Wechseln.",
+    "btn_request_pad": "🎮 Controller anfragen",
+    "control_pad_hint": "Dein Controller spielt an diesem Computer als P{n}. Wenn nichts passiert, drücke eine Taste darauf.",
+    "agent_pads_unavailable": "Keine Controller an diesem Computer: {error}"
   }
 }

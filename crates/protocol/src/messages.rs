@@ -226,9 +226,10 @@ pub enum RoomBody {
     /// over that link itself once it is open, so Nostr relays only carry the first handshake.
     LinkSignal { to: String, signal: SignalPayload },
     /// The author's remote-control state while they share their screen: whether they accept
-    /// requests (host app paired, whole screen shared) and who holds what. Gossiped, so
-    /// everyone sees who controls the shared computer; `seq` increases with each update.
-    ControlStatus { seq: u64, available: bool, mouse_keyboard: Option<String>, pads: Vec<Option<String>> },
+    /// requests (host app paired, whole screen shared), how many controllers its computer
+    /// can take, and who holds what. Gossiped, so everyone sees who controls the shared
+    /// computer; `seq` increases with each update.
+    ControlStatus { seq: u64, available: bool, controllers: u8, mouse_keyboard: Option<String>, pads: Vec<Option<String>> },
     /// Ask the sharer `to` for mouse and keyboard and/or a controller.
     ControlRequest { to: String, mouse_keyboard: bool, controller: bool },
     /// From the sharer: everything `to` may control now (all false = denied or ended, with why).
@@ -393,7 +394,7 @@ mod tests {
         assert_eq!(RoomBody::HistoryRequest { to: "c".into() }.recipient(), Some("c"));
         assert_eq!(RoomBody::ControlRequest { to: "s".into(), mouse_keyboard: true, controller: false }.recipient(), Some("s"));
         assert_eq!(RoomBody::ControlRelease { to: "s".into() }.recipient(), Some("s"));
-        let status = RoomBody::ControlStatus { seq: 1, available: true, mouse_keyboard: None, pads: vec![] };
+        let status = RoomBody::ControlStatus { seq: 1, available: true, controllers: 4, mouse_keyboard: None, pads: vec![] };
         assert_eq!(status.recipient(), None, "everyone sees who controls what");
         let rekey = RoomBody::AdminRekey { kicked: Some("x".into()), grants: vec![] };
         assert_eq!(rekey.recipient(), None, "rekeys are gossiped so relayed members get theirs");

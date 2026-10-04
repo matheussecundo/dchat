@@ -83,6 +83,7 @@ pub struct AgentLink {
     /// Our nonce and the app's, for checking the app's proof.
     nonces: RefCell<Option<(String, String)>>,
     os: Cell<AgentOs>,
+    caps: RefCell<Option<AgentCaps>>,
     paired: Cell<bool>,
     ever_paired: Cell<bool>,
     lost_at: Cell<f64>,
@@ -101,6 +102,7 @@ impl AgentLink {
             token: RefCell::new(None),
             nonces: RefCell::new(None),
             os: Cell::new(AgentOs::Other),
+            caps: RefCell::new(None),
             paired: Cell::new(false),
             ever_paired: Cell::new(false),
             lost_at: Cell::new(0.0),
@@ -114,6 +116,11 @@ impl AgentLink {
 
     pub fn is_paired(&self) -> bool {
         self.paired.get()
+    }
+
+    /// What the app can do on this computer (once paired).
+    pub fn caps(&self) -> Option<AgentCaps> {
+        self.caps.borrow().clone().filter(|_| self.paired.get())
     }
 
     pub fn set_listener(&self, listener: Option<Rc<dyn Fn(AgentEvent)>>) {
@@ -251,6 +258,7 @@ impl AgentLink {
     }
 
     fn paired_with(&self, caps: AgentCaps) {
+        *self.caps.borrow_mut() = Some(caps.clone());
         self.paired.set(true);
         self.ever_paired.set(true);
         self.backoff.set(RECONNECT_FIRST_MS);

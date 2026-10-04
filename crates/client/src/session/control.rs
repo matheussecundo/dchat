@@ -99,6 +99,13 @@ impl RoomSession {
     pub(super) fn refresh_control_availability(&self) {
         let control = &self.inner.control;
         let agent_ready = self.agent().is_some();
+        let pad_slots = self.agent().and_then(|a| a.caps()).map_or(0, |caps| caps.pads);
+        if control.state.borrow().pad_slots() != pad_slots.min(protocol::MAX_PADS as u8) {
+            control.state.borrow_mut().set_pad_slots(pad_slots);
+            if control.state.borrow().available() {
+                self.publish_control_status();
+            }
+        }
         let available =
             !self.inner.closed.get() && agent_ready && !control.paused.get() && self.shares_whole_screen() == Some(true);
         let was = control.state.borrow().available();
@@ -212,9 +219,9 @@ impl RoomSession {
 
     fn publish_control_status(&self) {
         let control = &self.inner.control;
-        let (available, mouse_keyboard, pads) = {
+        let (available, controllers, mouse_keyboard, pads) = {
             let state = control.state.borrow();
-            (state.available(), state.mouse_keyboard_holder().map(str::to_string), state.pad_holders())
+            (state.available(), state.pad_slots(), state.mouse_keyboard_holder().map(str::to_string), state.pad_holders())
         };
         // Nothing to announce for a tab that never offered control.
         if !available && control.status_seq.get() == 0 {
@@ -222,7 +229,7 @@ impl RoomSession {
         }
         let seq = control.status_seq.get() + 1;
         control.status_seq.set(seq);
-        self.publish(RoomBody::ControlStatus { seq, available, mouse_keyboard, pads });
+        self.publish(RoomBody::ControlStatus { seq, available, controllers, mouse_keyboard, pads });
     }
 
     pub(super) fn on_control_request(&self, author: &str, wants: ControlWants) {
@@ -398,6 +405,15 @@ impl RoomSession {
         self.refresh_control_ui();
     }
 
+    /// Our controller's state, to every sharer who gave us a controller slot.
+    pub fn send_pad_input(&self, events: Vec<InputEvent>) {
+        let sharers: Vec<String> =
+            self.inner.control.mine.borrow().iter().filter(|(_, m)| m.pad.is_some()).map(|(k, _)| k.clone()).collect();
+        for sharer in sharers {
+            self.send_input(&sharer, events.clone());
+        }
+    }
+
     /// Seal and send input for `sharer`, keeping only what we hold there.
     pub fn send_input(&self, sharer: &str, events: Vec<InputEvent>) {
         let Some(mine) = self.inner.control.mine.borrow().get(sharer).copied().filter(MyControlUi::granted) else {
@@ -438,7 +454,7 @@ impl RoomSession {
     }
 
     pub(super) fn on_control_status(&self, envelope: &RoomEnvelope) {
-        let RoomBody::ControlStatus { seq, available, mouse_keyboard, pads } = &envelope.body else {
+        let RoomBody::ControlStatus { seq, available, controllers, mouse_keyboard, pads } = &envelope.body else {
             return;
         };
         let author = envelope.author.as_str();
@@ -454,7 +470,10 @@ impl RoomSession {
             control
                 .offers
                 .borrow_mut()
-                .insert(author.to_string(), (*seq, ControlOfferUi { mouse_keyboard: mouse_keyboard.clone(), pads: pads.clone() }));
+                .insert(
+                    author.to_string(),
+                    (*seq, ControlOfferUi { controllers: (*controllers).min(MAX_PADS as u8), mouse_keyboard: mouse_keyboard.clone(), pads: pads.clone() }),
+                );
         } else {
             control.offers.borrow_mut().remove(author);
             if control.mine.borrow_mut().remove(author).is_some() {

@@ -68,7 +68,7 @@ Every agent modifying this codebase must enforce these non-negotiable security a
    - The README section "When Members Can't Connect Directly (NAT)" is the user-facing version; keep both in sync. `docs/PRIVACY.md` lists who sees what: update it whenever data flows change.
 
 9. **Remote Control (dchat-host)**:
-   - **Only by the sharer's click**: `ControlRequest` waits in `ControlState` until the sharer allows it; nothing is ever granted automatically. One member holds mouse and keyboard at a time (granting moves it, `TakenOver`); controllers take slots P1–P4. Grants end with the share (or a share that isn't a whole monitor), the app pairing, the viewer's voice seat, the link, and the session (`set_available(false)`, `on_control_peer_lost`, `on_control_voice_state`).
+   - **Only by the sharer's click**: `ControlRequest` waits in `ControlState` until the sharer allows it; nothing is ever granted automatically. One member holds mouse and keyboard at a time (granting moves it, `TakenOver`); controllers take slots P1–P4, limited to what the app reports it can create, and a pad with no update for 0.5 s goes back to neutral. Grants end with the share (or a share that isn't a whole monitor), the app pairing, the viewer's voice seat, the link, and the session (`set_available(false)`, `on_control_peer_lost`, `on_control_voice_state`).
    - **Input path**: viewer → sharer only over their direct link's `input-events` (reliable) and `input-state` (unordered, no retransmits) channels, sealed with the room key and an AAD binding lane, seq, sender and recipient (`seal_input`). Never relayed. The sharer's tab opens, budgets (`InputBudget`) and filters (`InputGate`: only what that member holds, pads mapped to their slot) before forwarding to the app, which checks roles again.
    - **dchat-host**: listens on 127.0.0.1 only; Host header must be its own loopback port (DNS rebinding); Origin must be in a never-empty allow-list; pairing needs the one-time code printed in its terminal, proven by HMAC both ways (the tab sends nothing to an app that can't prove it), with lockout after 5 wrong codes; one connected session at a time (a disconnected one is replaced by a new pairing). It releases everything held on every exit path (revoke, `ReleaseAll`, socket loss, `Bye`, stop, watchdog after 1.5 s without input, Drop), never logs input, and writes no files.
    - **Tab side**: the app link opens only when the user clicks Connect; the code and session token live in RAM. Mouse and keyboard can do anything the sharer can (including clicking Allow for others): the prompt says so.
@@ -115,6 +115,7 @@ dchat/
 │   │   │   ├── inject/         # Injector trait; linux.rs (uinput keyboard, absolute pointer, relative mouse); windows.rs (SendInput); win_input.rs (SendInput records, unit-tested everywhere); mock.rs (recording)
 │   │   │   ├── geometry.rs     # Shared-monitor choice, desktop-wide absolute coordinates (unit-tested)
 │   │   │   ├── keymap.rs       # DomCode → evdev and Windows scan codes (exhaustive, unit-tested)
+│   │   │   ├── pad_map.rs      # Standard pad state → XInput report (ViGEm) and xpad evdev events (uinput), unit-tested
 │   │   │   ├── monitors/       # Monitor layout: X11 RandR (also through XWayland), Windows EnumDisplayMonitors (physical pixels)
 │   │   │   └── config.rs, status.rs, lib.rs, main.rs
 │   │   └── tests/              # agent.rs (WebSockets + recording injector), uinput.rs (real devices where /dev/uinput is writable)
@@ -166,7 +167,7 @@ dchat/
 │       ├── link_renegotiation.spec.js # With every relay cut after linking, voice and video still negotiate over the link
 │       ├── protocol_version.spec.js # Different protocol versions never link; the older member gets a reload banner
 │       ├── room_password.spec.js # Password rooms: link + password, wrong password finds nobody, rekey keeps the password
-│       ├── remote_control.spec.js # dchat-host pairing, request/allow, clicks through letterboxing, one holder, others' raw input dropped, release on shortcut/revoke/link loss, prompts in fullscreen, window shares not offered, game mode (pointer lock, relative moves, motion hint)
+│       ├── remote_control.spec.js # dchat-host pairing, request/allow, clicks through letterboxing, one holder, others' raw input dropped, release on shortcut/revoke/link loss, prompts in fullscreen, window shares not offered, game mode (pointer lock, relative moves, motion hint), controllers (P1/P2 per member, neutral + unplug on revoke, kept alongside mouse/keyboard)
 │       ├── privacy.spec.js     # Sealed handshakes vs the room key, STUN fallback, hideip through a real TURN (node-turn)
 │       ├── audio_call.spec.js  # 2-member lounge audio, mic/speaker mute, leave (replaceTrack null) and rejoin
 │       ├── video_call.spec.js  # Camera tiles, camera flip keeps the mic, camera off, grid teardown
@@ -256,7 +257,8 @@ dchat/
 - **Phase 9: Remote Control (in progress)**
   - **9a Desktop control on Linux (Completed)**: protocol v4 (`ControlStatus`/`ControlRequest`/`ControlGrant`/`ControlRelease`, sealed input packets, `DomCode`); `dchat-host` (loopback WebSocket, mutual pairing, engine with release-on-exit and watchdog, uinput backend, X11/XWayland monitor layout); tab ↔ app link; permission prompts that follow fullscreen; desktop-mode mouse and keyboard with letterbox-aware positions; E2E against a recording dchat-host.
   - **9b Windows and game mode (Completed)**: `SendInput` backend (scan codes, `VIRTUALDESK` absolute positions, per-monitor DPI awareness, administrator note), Windows monitor layout, `win_input` records unit-tested on every platform, CI on Windows; viewer game mode (pointer lock with `unadjustedMovement`, relative moves, keyboard lock in fullscreen, losing the lock ends control), `Mode` switches the sharer's stream to `contentHint: motion` at 60 fps.
-  - **9c controllers**, **9d releases and polish**: planned.
+  - **9c Controllers (Completed)**: viewers send their first "standard" gamepad (`PadPoller`, `pad_state_from`, `PadSampler` heartbeat) while they hold a slot; `ControlStatus.controllers` advertises how many virtual pads the app can create (`ControlState::set_pad_slots`); dchat-host plugs a virtual Xbox 360 pad per slot (uinput copy of xpad `045e:028e` on Linux, ViGEm on Windows with an install hint when the driver is missing), neutralizes a pad after 0.5 s without updates, and unplugs it on revoke.
+  - **9d releases and polish**: planned.
 
 ---
 

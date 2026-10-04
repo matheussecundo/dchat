@@ -6,12 +6,14 @@
 
 use super::{Caps, Injector};
 use crate::keymap;
+use crate::pad_map;
 use evdev::uinput::VirtualDevice;
 use evdev::{
     AbsInfo, AbsoluteAxisCode, AttributeSet, BusType, EventType, InputEvent as EvEvent, InputId, KeyCode,
     RelativeAxisCode, UinputAbsSetup,
 };
-use protocol::{DomCode, MouseButton, PadState, PointerMode};
+use protocol::{DomCode, MouseButton, PadState, PointerMode, MAX_PADS};
+use std::collections::HashMap;
 use std::io;
 
 const VENDOR: u16 = 0x1209;
@@ -27,11 +29,13 @@ pub struct UinputInjector {
     devices: Result<Devices, String>,
     /// Low-resolution wheel remainders (high-resolution units not yet a whole notch).
     wheel_rest: (i32, i32),
+    /// Virtual Xbox 360 pads by slot, created when granted and removed when revoked.
+    pads: HashMap<u8, VirtualDevice>,
 }
 
 impl UinputInjector {
     pub fn new() -> Self {
-        Self { devices: create_devices().map_err(|err| explain(&err)), wheel_rest: (0, 0) }
+        Self { devices: create_devices().map_err(|err| explain(&err)), wheel_rest: (0, 0), pads: HashMap::new() }
     }
 
     fn devices(&mut self) -> io::Result<&mut Devices> {
@@ -122,6 +126,31 @@ fn create_devices() -> io::Result<Devices> {
     Ok(Devices { keyboard, pointer, mouse })
 }
 
+/// A copy of what the kernel's xpad driver creates for a wired Xbox 360 pad, so SDL,
+/// Steam and games treat it as one.
+fn create_pad() -> io::Result<VirtualDevice> {
+    let mut keys = AttributeSet::<KeyCode>::new();
+    for (_, code) in pad_map::XPAD_KEYS {
+        keys.insert(KeyCode(code));
+    }
+    let stick = |code| UinputAbsSetup::new(code, AbsInfo::new(0, -32768, 32767, 16, 128, 0));
+    let trigger = |code| UinputAbsSetup::new(code, AbsInfo::new(0, 0, 255, 0, 0, 0));
+    let hat = |code| UinputAbsSetup::new(code, AbsInfo::new(0, -1, 1, 0, 0, 0));
+    VirtualDevice::builder()?
+        .name("Microsoft X-Box 360 pad")
+        .input_id(InputId::new(BusType::BUS_USB, 0x045e, 0x028e, 0x0114))
+        .with_keys(&keys)?
+        .with_absolute_axis(&stick(AbsoluteAxisCode::ABS_X))?
+        .with_absolute_axis(&stick(AbsoluteAxisCode::ABS_Y))?
+        .with_absolute_axis(&stick(AbsoluteAxisCode::ABS_RX))?
+        .with_absolute_axis(&stick(AbsoluteAxisCode::ABS_RY))?
+        .with_absolute_axis(&trigger(AbsoluteAxisCode::ABS_Z))?
+        .with_absolute_axis(&trigger(AbsoluteAxisCode::ABS_RZ))?
+        .with_absolute_axis(&hat(AbsoluteAxisCode::ABS_HAT0X))?
+        .with_absolute_axis(&hat(AbsoluteAxisCode::ABS_HAT0Y))?
+        .build()
+}
+
 fn ev(kind: EventType, code: u16, value: i32) -> EvEvent {
     EvEvent::new(kind.0, code, value)
 }
@@ -130,7 +159,8 @@ impl Injector for UinputInjector {
     fn caps(&self) -> Caps {
         Caps {
             mouse_keyboard: self.devices.as_ref().map(|_| ()).map_err(Clone::clone),
-            pads: Err("controllers are not supported by this version of dchat-host yet".into()),
+            // Pads are uinput devices too: available exactly when uinput is.
+            pads: self.devices.as_ref().map(|_| MAX_PADS as u8).map_err(Clone::clone),
             software_repeat: false,
         }
     }
@@ -188,15 +218,26 @@ impl Injector for UinputInjector {
         keyboard.emit(&[ev(EventType::KEY, keymap::evdev(code), down as i32)])
     }
 
-    fn pad_plug(&mut self, _slot: u8) -> io::Result<()> {
-        Err(io::Error::other("controllers are not supported by this version of dchat-host yet"))
-    }
-
-    fn pad_update(&mut self, _slot: u8, _state: &PadState) -> io::Result<()> {
+    fn pad_plug(&mut self, slot: u8) -> io::Result<()> {
+        self.devices()?;
+        if !self.pads.contains_key(&slot) {
+            self.pads.insert(slot, create_pad()?);
+        }
         Ok(())
     }
 
-    fn pad_unplug(&mut self, _slot: u8) {}
+    fn pad_update(&mut self, slot: u8, state: &PadState) -> io::Result<()> {
+        let Some(pad) = self.pads.get_mut(&slot) else {
+            return Ok(());
+        };
+        let events: Vec<EvEvent> = pad_map::xpad_events(state).into_iter().map(|(t, c, v)| EvEvent::new(t, c, v)).collect();
+        pad.emit(&events)
+    }
+
+    /// Removing the device also releases whatever it had pressed.
+    fn pad_unplug(&mut self, slot: u8) {
+        self.pads.remove(&slot);
+    }
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())

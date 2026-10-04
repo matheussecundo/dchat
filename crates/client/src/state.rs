@@ -125,6 +125,8 @@ pub struct ControlUi {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ControlOfferUi {
+    /// Virtual controllers the sharer's computer can take (0 = none).
+    pub controllers: u8,
     pub mouse_keyboard: Option<String>,
     pub pads: Vec<Option<String>>,
 }

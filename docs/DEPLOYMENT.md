@@ -238,7 +238,7 @@ It only accepts your dchat site, so tell it the site's address:
 
 On a GitHub Pages site the origin is `https://<user>.github.io` for all of your repositories; the pairing code still protects the app, but a custom domain keeps it to dchat.
 
-On Linux, install `crates/host-agent/dist/60-dchat-host.rules` (see the README) so it can use `/dev/uinput` without root. On Windows it needs nothing extra; to control windows of apps running as administrator, run dchat-host as administrator too. It listens on `127.0.0.1:7448` (`--port` to change; the same port goes in dchat's dialog), never on the network.
+On Linux, install `crates/host-agent/dist/60-dchat-host.rules` (see the README) so it can use `/dev/uinput` without root. On Windows, mouse and keyboard need nothing extra; game controllers need the [ViGEmBus driver](https://github.com/nefarius/ViGEmBus/releases) (dchat-host says so at start when it's missing). To control windows of apps running as administrator, run dchat-host as administrator too. It listens on `127.0.0.1:7448` (`--port` to change; the same port goes in dchat's dialog), never on the network.
 
 ---
 

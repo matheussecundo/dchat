@@ -55,6 +55,8 @@ struct Pending {
 #[derive(Debug, Default)]
 pub struct ControlState {
     available: bool,
+    /// Controller slots the host computer can create (0 until the app says).
+    pad_slots: usize,
     pending: Vec<Pending>,
     mouse_keyboard: Option<String>,
     pads: [Option<String>; MAX_PADS],
@@ -64,6 +66,15 @@ pub struct ControlState {
 impl ControlState {
     pub fn available(&self) -> bool {
         self.available
+    }
+
+    /// How many virtual controllers the host app can create (at most `MAX_PADS`).
+    pub fn set_pad_slots(&mut self, slots: u8) {
+        self.pad_slots = (slots as usize).min(MAX_PADS);
+    }
+
+    pub fn pad_slots(&self) -> u8 {
+        self.pad_slots as u8
     }
 
     /// Control is offered only while the sharer allows it (host app paired, a whole screen
@@ -128,7 +139,7 @@ impl ControlState {
             }
         }
         if wants.controller && self.slot_of(member).is_none() {
-            if let Some(slot) = self.pads.iter().position(Option::is_none) {
+            if let Some(slot) = self.pads[..self.pad_slots].iter().position(Option::is_none) {
                 self.pads[slot] = Some(member.to_string());
             }
         }
@@ -275,6 +286,7 @@ mod tests {
     fn open() -> ControlState {
         let mut state = ControlState::default();
         state.set_available(true, ControlEnd::ShareEnded);
+        state.set_pad_slots(4);
         state
     }
 
@@ -329,6 +341,21 @@ mod tests {
         state.request("a", KBM, 2);
         state.grant("a");
         assert_eq!(state.rights_of("a"), ControlRights { mouse_keyboard: true, pad: Some(0) });
+    }
+
+    #[test]
+    fn test_controller_slots_follow_what_the_host_can_create() {
+        let mut state = open();
+        state.set_pad_slots(1);
+        state.request("a", PAD, 0);
+        state.grant("a");
+        state.request("b", PAD, 0);
+        assert_eq!(state.grant("b")[0].reason, Some(ControlEnd::NoSlot), "only one virtual controller here");
+        state.set_pad_slots(0);
+        state.request("c", PAD, 0);
+        assert_eq!(state.grant("c")[0].reason, Some(ControlEnd::NoSlot), "no controllers at all");
+        state.set_pad_slots(9);
+        assert_eq!(state.pad_slots(), MAX_PADS as u8);
     }
 
     #[test]
