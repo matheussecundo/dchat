@@ -20,7 +20,7 @@ use lounge::{Lounge, VoiceInfo};
 use leptos::*;
 use protocol::crypto::{decrypt_json, encrypt_json};
 use protocol::{
-    admin_proof_message, plan_ice, verify_message, EncryptedPayload, GossipDedup, HistoryBuffer, IcePlan,
+    admin_proof_message, hash_room_topic, password_room_topic, plan_ice, verify_message, EncryptedPayload, GossipDedup, HistoryBuffer, IcePlan,
     Member, NostrBurnerKey, Reactions, RoomBody, RoomEnvelope, RoomParams, Roster, SignalPayload,
     FALLBACK_STUN_URL, HISTORY_LIMIT, KEY_LENGTH,
 };
@@ -159,6 +159,10 @@ impl RoomSession {
             .and_then(|admin| admin.sign_message(&admin_proof_message(&room_id, &me)).ok());
 
         let (rtc_config, ice_plan) = build_rtc_config(&params, host_ice.as_ref());
+        let topic = match params.password_salt {
+            Some(_) => password_room_topic(&room_id, &key),
+            None => hash_room_topic(&room_id),
+        };
         signals.no_turn.set(ice_plan.relay_only && !ice_plan.has_turn);
         let session = Self {
             inner: Rc::new(Inner {
@@ -233,7 +237,7 @@ impl RoomSession {
                 })
             },
         };
-        let pool = NostrRelayPool::new(room_id, key, identity, get_default_relays(), events);
+        let pool = NostrRelayPool::new(topic, key, identity, get_default_relays(), events);
         *session.inner.pool.borrow_mut() = Some(pool);
 
         session.start_ticker();
@@ -524,12 +528,13 @@ impl RoomSession {
             }
             return;
         }
-        // A DM for us is opened here and goes no further; others relay it unread.
-        if matches!(&envelope.body, RoomBody::Dm { to, .. } if *to == self.inner.me) {
-            self.apply(&envelope);
-            return;
-        }
-        if !matches!(envelope.body, RoomBody::Dm { .. }) {
+        // A DM names no recipient: if it opens for us it is ours and goes no further;
+        // otherwise we relay it unread.
+        if matches!(envelope.body, RoomBody::Dm { .. }) {
+            if self.receive_dm(&envelope) {
+                return;
+            }
+        } else {
             self.apply(&envelope);
         }
 

@@ -16,13 +16,13 @@ use i18n::{
 use leptos::*;
 use names::{pubkey_tag, random_name, sanitize_name, MAX_NAME_CHARS};
 use protocol::{
-    format_relay_list, parse_cap, split_relay_input, VideoKind, DEFAULT_MEMBER_CAP, DEFAULT_VIDEO_CAP,
-    DEFAULT_VOICE_CAP, REACTIONS,
+    format_relay_list, parse_cap, password_room_key, split_relay_input, stretch_password, RoomParams, VideoKind,
+    DEFAULT_MEMBER_CAP, DEFAULT_VIDEO_CAP, DEFAULT_VOICE_CAP, KEY_LENGTH, REACTIONS,
 };
 use qr::generate_qr_svg;
 use session::{RoomSession, SessionSignals};
 use state::{
-    admin_url, create_room, format_file_size, fragment_relay_choice, invite_url, read_credentials,
+    admin_url, create_room, current_fragment, format_file_size, fragment_relay_choice, invite_url, read_credentials,
     AudioSettings, RelayMode,
     ChatMessageUi, ConnectionStatus, DmUi, FileOfferInfo, FileTransferStatus, LinkUi,
     LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RekeyTarget, RoomCaps,
@@ -65,6 +65,10 @@ fn App() -> impl IntoView {
     let (video_cap_input, set_video_cap_input) = create_signal(DEFAULT_VIDEO_CAP.to_string());
     let (history_input, set_history_input) = create_signal(false);
     let (hide_ip_input, set_hide_ip_input) = create_signal(false);
+    // Typed at creation or on the join screen; cleared once stretched.
+    let (password_input, set_password_input) = create_signal(String::new());
+    // Spell checking the message boxes (some browsers' enhanced spell check sends text away).
+    let (spellcheck_on, set_spellcheck_on) = create_signal(true);
     // Relay choice: what the link already says, else public; a deployment can pre-fill its
     // own relay address at build time (DCHAT_RELAY_URL).
     let initial_relays = fragment_relay_choice();
@@ -129,8 +133,15 @@ fn App() -> impl IntoView {
     let my_name = store_value(String::new());
     // TURN servers the host offered (fetched once, reused if the room moves).
     let host_ice = store_value(None::<js_sys::Array>);
+    // A password room's stretched password, RAM only: it also opens the room after a rekey.
+    let stretched_password = store_value(None::<[u8; KEY_LENGTH]>);
 
-    let start_session = move |room_id: String, key: [u8; protocol::KEY_LENGTH], migrated: bool| -> Option<RoomSession> {
+    let start_session = move |room_id: String, link_key: [u8; KEY_LENGTH], migrated: bool| -> Option<RoomSession> {
+        // In a password room the link's key alone opens nothing.
+        let key = match (RoomParams::from_fragment(&current_fragment()).password_salt, stretched_password.get_value()) {
+            (Some(_), Some(stretched)) => password_room_key(&link_key, &stretched),
+            _ => link_key,
+        };
         let signals = SessionSignals {
             status: set_status,
             messages: set_messages,
@@ -174,9 +185,24 @@ fn App() -> impl IntoView {
         if entering.get_untracked() {
             return;
         }
+        let salt = RoomParams::from_fragment(&current_fragment()).password_salt;
+        let password = password_input.get_untracked();
+        if salt.is_some() && password.trim().is_empty() {
+            return;
+        }
         set_entering.set(true);
         my_name.set_value(sanitize_name(&name_input.get_untracked()));
         wasm_bindgen_futures::spawn_local(async move {
+            if let Some(salt) = salt {
+                // Let "Unlocking…" render before the deliberately slow hash blocks the page.
+                media::sleep_ms(50).await;
+                let Ok(stretched) = stretch_password(&password, &salt) else {
+                    set_entering.set(false);
+                    return;
+                };
+                stretched_password.set_value(Some(stretched));
+                set_password_input.set(String::new());
+            }
             // Optional host TURN servers (Cloudflare Worker); quick 404 on static hosts.
             host_ice.set_value(ice::fetch_ice_servers().await);
             start_session(room_id, key, false);
@@ -208,6 +234,7 @@ fn App() -> impl IntoView {
             video: parse_cap(Some(&video_cap_input.get_untracked()), DEFAULT_VIDEO_CAP),
             history: history_input.get_untracked(),
             hide_ip: hide_ip_input.get_untracked(),
+            password: !password_input.get_untracked().trim().is_empty(),
             relays: match (relay_mode.get_untracked(), custom_relays.get_untracked()) {
                 (RelayMode::Public, _) => None,
                 (mode, Some(urls)) => Some(format_relay_list(&urls, mode == RelayMode::CustomWithPublic)),
@@ -548,6 +575,7 @@ fn App() -> impl IntoView {
     };
     let history_on = move || session_ref.with_value(|s| s.as_ref().is_some_and(|s| s.history_enabled()));
     let hides_ip = move || session_ref.with_value(|s| s.as_ref().is_some_and(|s| s.hides_ip()));
+    let has_password = move || session_ref.with_value(|s| s.as_ref().is_some_and(|s| s.has_password()));
 
     let is_connected = move || status.get() == ConnectionStatus::Connected;
     let display_name = move |pubkey: &str| {
@@ -561,10 +589,20 @@ fn App() -> impl IntoView {
                 id="name-input"
                 class="lobby-input"
                 type="text"
+                autocomplete="off"
                 maxlength=MAX_NAME_CHARS
                 prop:value=move || name_input.get()
                 on:input=move |ev| set_name_input.set(event_target_value(&ev))
             />
+        }
+    };
+
+    // Shown while a password is being stretched (it takes a moment on purpose).
+    let enter_label = move |idle_key: &'static str| {
+        if entering.get() && !password_input.get().trim().is_empty() {
+            t(lang.get(), "unlocking")
+        } else {
+            t(lang.get(), idle_key)
         }
     };
 
@@ -580,7 +618,7 @@ fn App() -> impl IntoView {
         };
         view! {
             <div class="lobby">
-                <form class="lobby-card" on:submit=move |ev| { ev.prevent_default(); create_and_enter(); }>
+                <form class="lobby-card" autocomplete="off" on:submit=move |ev| { ev.prevent_default(); create_and_enter(); }>
                     <h2>{move || t(lang.get(), "create_title")}</h2>
                     <p class="lobby-desc">{move || t(lang.get(), "create_desc")}</p>
                     {name_field}
@@ -589,6 +627,7 @@ fn App() -> impl IntoView {
                         id="cap-input"
                         class="lobby-input"
                         type="number"
+                        autocomplete="off"
                         min="0"
                         prop:value=move || cap_input.get()
                         on:input=move |ev| set_cap_input.set(event_target_value(&ev))
@@ -600,6 +639,7 @@ fn App() -> impl IntoView {
                                 id="voice-cap-input"
                                 class="lobby-input"
                                 type="number"
+                                autocomplete="off"
                                 min="0"
                                 prop:value=move || voice_cap_input.get()
                                 on:input=move |ev| set_voice_cap_input.set(event_target_value(&ev))
@@ -611,6 +651,7 @@ fn App() -> impl IntoView {
                                 id="video-cap-input"
                                 class="lobby-input"
                                 type="number"
+                                autocomplete="off"
                                 min="0"
                                 prop:value=move || video_cap_input.get()
                                 on:input=move |ev| set_video_cap_input.set(event_target_value(&ev))
@@ -645,6 +686,7 @@ fn App() -> impl IntoView {
                             id="relay-url"
                             class="lobby-input"
                             type="text"
+                            autocomplete="off"
                             inputmode="url"
                             autocapitalize="off"
                             spellcheck="false"
@@ -678,11 +720,23 @@ fn App() -> impl IntoView {
                     {move || hide_ip_input.get().then(|| view! {
                         <p class="lobby-hint">{move || t(lang.get(), "hide_ip_hint")}</p>
                     })}
+                    <label class="lobby-label" for="password-input">{move || t(lang.get(), "password_label")}</label>
+                    <input
+                        id="password-input"
+                        class="lobby-input"
+                        type="password"
+                        autocomplete="off"
+                        prop:value=move || password_input.get()
+                        on:input=move |ev| set_password_input.set(event_target_value(&ev))
+                    />
+                    {move || (!password_input.get().trim().is_empty()).then(|| view! {
+                        <p class="lobby-hint">{move || t(lang.get(), "password_hint")}</p>
+                    })}
                     {move || cap_is_large().then(|| view! {
                         <p class="lobby-warning">{move || t(lang.get(), "cap_warning")}</p>
                     })}
                     <button id="create-room-btn" type="submit" class="btn btn-primary lobby-submit" disabled=move || entering.get() || !relay_choice_valid()>
-                        {move || t(lang.get(), "btn_create_room")}
+                        {move || enter_label("btn_create_room")}
                     </button>
                 </form>
             </div>
@@ -691,14 +745,28 @@ fn App() -> impl IntoView {
 
     let join_view = move || {
         let room = read_credentials().map(|(room, _)| room).unwrap_or_default();
+        let password_room = RoomParams::from_fragment(&current_fragment()).password_salt.is_some();
         view! {
             <div class="lobby">
-                <form class="lobby-card" on:submit=move |ev| { ev.prevent_default(); enter_room(); }>
+                <form class="lobby-card" autocomplete="off" on:submit=move |ev| { ev.prevent_default(); enter_room(); }>
                     <h2>{move || t_replace_1(lang.get(), "join_title", "{room}", &room)}</h2>
                     <p class="lobby-desc">{move || t(lang.get(), "join_desc")}</p>
                     {name_field}
+                    {password_room.then(|| view! {
+                        <label class="lobby-label" for="password-input">{move || t(lang.get(), "join_password_label")}</label>
+                        <input
+                            id="password-input"
+                            class="lobby-input"
+                            type="password"
+                            autocomplete="off"
+                            required
+                            prop:value=move || password_input.get()
+                            on:input=move |ev| set_password_input.set(event_target_value(&ev))
+                        />
+                        <p class="lobby-hint">{move || t(lang.get(), "join_password_hint")}</p>
+                    })}
                     <button id="enter-room-btn" type="submit" class="btn btn-primary lobby-submit" disabled=move || entering.get()>
-                        {move || t(lang.get(), "btn_enter_room")}
+                        {move || enter_label("btn_enter_room")}
                     </button>
                 </form>
             </div>
@@ -876,6 +944,11 @@ fn App() -> impl IntoView {
                             {move || t(lang.get(), "history_badge")}
                         </span>
                     })}
+                    {move || has_password().then(|| view! {
+                        <span class="history-badge password-badge" title=move || t(lang.get(), "password_badge_title")>
+                            {move || t(lang.get(), "password_badge")}
+                        </span>
+                    })}
                     {move || hides_ip().then(|| view! {
                         <span class="history-badge hide-ip-badge" title=move || t(lang.get(), "hide_ip_badge_title")>
                             {move || t(lang.get(), "hide_ip_badge")}
@@ -1007,7 +1080,7 @@ fn App() -> impl IntoView {
                         id="audio-settings-btn"
                         class="btn btn-secondary"
                         on:click=open_audio_settings
-                        title=move || t(lang.get(), "btn_audio_settings_title")
+                        title=move || t(lang.get(), "btn_settings_title")
                     >
                         "⚙️"
                     </button>
@@ -1184,6 +1257,8 @@ fn App() -> impl IntoView {
                 </button>
                 <input
                     type="text"
+                    autocomplete="off"
+                    spellcheck=move || if spellcheck_on.get() { "true" } else { "false" }
                     placeholder=move || {
                         if !is_connected() {
                             t(lang.get(), "placeholder_waiting")
@@ -1348,6 +1423,8 @@ fn App() -> impl IntoView {
                             <input
                                 id="dm-input"
                                 type="text"
+                                autocomplete="off"
+                                spellcheck=move || if spellcheck_on.get() { "true" } else { "false" }
                                 placeholder=move || t_replace_1(lang.get(), "dm_placeholder", "{name}", &name.get())
                                 prop:value=move || dm_input.get()
                                 on:input=move |ev| set_dm_input.set(event_target_value(&ev))
@@ -1370,9 +1447,10 @@ fn App() -> impl IntoView {
                     <div class="modal-backdrop" on:click=move |_| set_show_audio_settings.set(false)>
                         <div class="modal-content audio-settings-modal" on:click=|ev| ev.stop_propagation()>
                             <div class="modal-title-row">
-                                <h3>{move || t(lang.get(), "audio_settings_title")}</h3>
+                                <h3>{move || t(lang.get(), "settings_title")}</h3>
                                 <button class="btn btn-secondary" on:click=move |_| set_show_audio_settings.set(false)>"✕"</button>
                             </div>
+                            <h4 class="settings-section">{move || t(lang.get(), "settings_audio")}</h4>
                             <div class="audio-options">
                                 {audio_option_row(
                                     lang,
@@ -1398,6 +1476,18 @@ fn App() -> impl IntoView {
                                     Signal::derive(move || audio_settings.get().auto_gain_control),
                                     move |on| apply_audio_settings(AudioSettings { auto_gain_control: on, ..audio_settings.get_untracked() }),
                                 )}
+                            </div>
+                            <h4 class="settings-section">{move || t(lang.get(), "settings_typing")}</h4>
+                            <div class="audio-options">
+                                {audio_option_row(
+                                    lang,
+                                    "spellcheck-toggle",
+                                    "spellcheck_label",
+                                    true,
+                                    spellcheck_on.into(),
+                                    move |on| set_spellcheck_on.set(on),
+                                )}
+                                <p class="settings-hint">{move || t(lang.get(), "spellcheck_hint")}</p>
                             </div>
                             <button class="btn btn-primary" style="width: 100%;" on:click=move |_| set_show_audio_settings.set(false)>
                                 {move || t(lang.get(), "qr_close")}

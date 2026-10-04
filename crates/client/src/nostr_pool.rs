@@ -4,7 +4,7 @@ use gloo_net::websocket::futures::WebSocket;
 use gloo_net::websocket::Message;
 use protocol::crypto::{decrypt_bytes, encrypt_bytes, EncryptedPayload};
 use protocol::{
-    decode_signal, encode_signal, hash_room_topic, verify_event, ClientRelayMessage, DecodedSignal, GossipDedup,
+    decode_signal, encode_signal, verify_event, ClientRelayMessage, DecodedSignal, GossipDedup,
     NostrBurnerKey, NostrFilter, RelayClientMessage, RelaySignal, SignalPayload, KIND_EPHEMERAL_SIGNAL,
     KEY_LENGTH, PROTOCOL_VERSION,
 };
@@ -61,8 +61,9 @@ pub struct NostrRelayPool {
 impl NostrRelayPool {
     /// `burner_key` is the session identity: it signs relay events here and room
     /// envelopes in the session, so peers can tie both to the same member.
+    /// `topic` is the room's relay topic (`hash_room_topic`, or `password_room_topic`).
     pub fn new(
-        room_id: String,
+        topic: String,
         key: [u8; KEY_LENGTH],
         burner_key: Rc<NostrBurnerKey>,
         relays: Vec<String>,
@@ -72,7 +73,7 @@ impl NostrRelayPool {
         let pool = Rc::new(Self {
             burner_key,
             key,
-            topic: hash_room_topic(&room_id),
+            topic,
             version: protocol_version(),
             senders: RefCell::new(HashMap::new()),
             seen_event_ids: RefCell::new(GossipDedup::new(SEEN_EVENTS_CAPACITY)),

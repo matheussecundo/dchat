@@ -1,5 +1,5 @@
 use protocol::{
-    format_cap, generate_key, generate_room_id, invite_fragment, is_relay_url, key_from_base64,
+    format_cap, generate_key, generate_password_salt, generate_room_id, invite_fragment, is_relay_url, key_from_base64,
     key_to_base64, parse_relay_list, FragmentParams, NostrBurnerKey, VideoKind, DEFAULT_MEMBER_CAP,
     DEFAULT_VIDEO_CAP, DEFAULT_VOICE_CAP, KEY_LENGTH, PUBLIC_RELAYS, PUBLIC_RELAYS_KEYWORD,
 };
@@ -118,6 +118,8 @@ pub struct RoomCaps {
     pub history: bool,
     /// Connect only through TURN, hiding members' IP addresses from each other.
     pub hide_ip: bool,
+    /// The room key also needs a password: the link gets a fresh salt (`pw`).
+    pub password: bool,
     pub relays: Option<String>,
 }
 
@@ -264,6 +266,11 @@ pub fn create_room(caps: RoomCaps) -> Result<(), String> {
         } else {
             params.set(key, &format_cap(cap));
         }
+    }
+    if caps.password {
+        params.set("pw", &generate_password_salt());
+    } else {
+        params.remove("pw");
     }
     for (key, on) in [("hist", caps.history), ("hideip", caps.hide_ip)] {
         if on {

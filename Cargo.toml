@@ -6,3 +6,9 @@ members = [
     "crates/client",
 ]
 resolver = "2"
+
+# Room passwords are stretched with Argon2id; unoptimized it makes `cargo test` crawl.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
