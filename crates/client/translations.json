@@ -146,7 +146,14 @@
     "dm_empty": "Only you and {name} can read these messages. They vanish when either of you leaves.",
     "dm_peer_left": "{name} left: this conversation has ended.",
     "title_close": "Close",
-    "title_exit_fullscreen": "Exit fullscreen"
+    "title_exit_fullscreen": "Exit fullscreen",
+    "relay_mode_label": "Signaling relays",
+    "relay_mode_public": "Public Nostr relays (default)",
+    "relay_mode_custom": "My relay",
+    "relay_mode_both": "My relay + public Nostr relays (backup)",
+    "relay_url_label": "Relay address",
+    "relay_url_invalid": "Enter wss:// addresses, separated by commas.",
+    "relay_hint": "Everyone in the room uses these relays to find each other. Relays only see encrypted, short-lived handshake messages."
   },
   "zh": {
     "scan_qr": "📱 扫描二维码",
@@ -295,7 +302,14 @@
     "dm_empty": "只有您和 {name} 能看到这些消息。任何一方离开后，这些消息即会消失。",
     "dm_peer_left": "{name} 已离开：此对话已结束。",
     "title_close": "关闭",
-    "title_exit_fullscreen": "退出全屏"
+    "title_exit_fullscreen": "退出全屏",
+    "relay_mode_label": "信令中继",
+    "relay_mode_public": "公共 Nostr 中继（默认）",
+    "relay_mode_custom": "我的中继",
+    "relay_mode_both": "我的中继 + 公共 Nostr 中继（备用）",
+    "relay_url_label": "中继地址",
+    "relay_url_invalid": "请输入 wss:// 地址，多个地址用逗号分隔。",
+    "relay_hint": "房间内的所有人都通过这些中继找到彼此。中继只能看到经过加密、短暂存在的握手消息。"
   },
   "hi": {
     "scan_qr": "📱 क्यूआर स्कैन करें",
@@ -444,7 +458,14 @@
     "dm_empty": "ये संदेश सिर्फ़ आप और {name} पढ़ सकते हैं। आप दोनों में से किसी के भी जाते ही ये मिट जाएंगे।",
     "dm_peer_left": "{name} चले गए: यह बातचीत समाप्त हो गई है।",
     "title_close": "बंद करें",
-    "title_exit_fullscreen": "फ़ुलस्क्रीन से बाहर निकलें"
+    "title_exit_fullscreen": "फ़ुलस्क्रीन से बाहर निकलें",
+    "relay_mode_label": "सिग्नलिंग रिले",
+    "relay_mode_public": "सार्वजनिक Nostr रिले (डिफ़ॉल्ट)",
+    "relay_mode_custom": "मेरा रिले",
+    "relay_mode_both": "मेरा रिले + सार्वजनिक Nostr रिले (बैकअप)",
+    "relay_url_label": "रिले का पता",
+    "relay_url_invalid": "कॉमा से अलग करके wss:// पते दर्ज करें।",
+    "relay_hint": "कमरे के सभी लोग एक-दूसरे को ढूंढने के लिए इन्हीं रिले का उपयोग करते हैं। रिले को केवल एन्क्रिप्टेड, अल्पकालिक हैंडशेक संदेश दिखते हैं।"
   },
   "es": {
     "scan_qr": "📱 Escanear QR",
@@ -593,7 +614,14 @@
     "dm_empty": "Solo tú y {name} pueden leer estos mensajes. Desaparecen en cuanto uno de los dos sale.",
     "dm_peer_left": "{name} salió: esta conversación terminó.",
     "title_close": "Cerrar",
-    "title_exit_fullscreen": "Salir de pantalla completa"
+    "title_exit_fullscreen": "Salir de pantalla completa",
+    "relay_mode_label": "Relés de señalización",
+    "relay_mode_public": "Relés Nostr públicos (predeterminado)",
+    "relay_mode_custom": "Mi relé",
+    "relay_mode_both": "Mi relé + relés Nostr públicos (respaldo)",
+    "relay_url_label": "Dirección del relé",
+    "relay_url_invalid": "Introduce direcciones wss:// separadas por comas.",
+    "relay_hint": "Todos en la sala usan estos relés para encontrarse. Los relés solo ven mensajes de conexión cifrados y efímeros."
   },
   "fr": {
     "scan_qr": "📱 Scanner QR",
@@ -742,7 +770,14 @@
     "dm_empty": "Ces messages ne sont lisibles que par vous et {name}. Ils disparaissent dès que l'un de vous deux quitte le salon.",
     "dm_peer_left": "{name} a quitté le salon : cette conversation est terminée.",
     "title_close": "Fermer",
-    "title_exit_fullscreen": "Quitter le plein écran"
+    "title_exit_fullscreen": "Quitter le plein écran",
+    "relay_mode_label": "Relais de signalisation",
+    "relay_mode_public": "Relais Nostr publics (par défaut)",
+    "relay_mode_custom": "Mon relais",
+    "relay_mode_both": "Mon relais + relais Nostr publics (secours)",
+    "relay_url_label": "Adresse du relais",
+    "relay_url_invalid": "Saisissez des adresses wss:// séparées par des virgules.",
+    "relay_hint": "Tous les membres du salon utilisent ces relais pour se retrouver. Les relais ne voient que des messages de connexion chiffrés et éphémères."
   },
   "ar": {
     "scan_qr": "📱 مسح رمز QR",
@@ -891,7 +926,14 @@
     "dm_empty": "لا يمكن لأحد قراءة هذه الرسائل سواك أنت و{name}. وتختفي بمجرد مغادرة أي منكما.",
     "dm_peer_left": "غادر {name}: انتهت هذه المحادثة.",
     "title_close": "إغلاق",
-    "title_exit_fullscreen": "الخروج من ملء الشاشة"
+    "title_exit_fullscreen": "الخروج من ملء الشاشة",
+    "relay_mode_label": "مرحلات الإشارات",
+    "relay_mode_public": "مرحلات Nostr العامة (افتراضي)",
+    "relay_mode_custom": "المرحل الخاص بي",
+    "relay_mode_both": "المرحل الخاص بي + مرحلات Nostr العامة (احتياطي)",
+    "relay_url_label": "عنوان المرحل",
+    "relay_url_invalid": "أدخل عناوين wss:// مفصولة بفواصل.",
+    "relay_hint": "يستخدم كل من في الغرفة هذه المرحلات للعثور على بعضهم البعض. لا ترى المرحلات سوى رسائل مصافحة مشفرة وقصيرة العمر."
   },
   "bn": {
     "scan_qr": "📱 কিউআর স্ক্যান",
@@ -1040,7 +1082,14 @@
     "dm_empty": "শুধু আপনি এবং {name} এই বার্তাগুলো পড়তে পারবেন। আপনাদের যেকোনো একজন চলে গেলেই এগুলো মুছে যাবে।",
     "dm_peer_left": "{name} চলে গেছেন: এই কথোপকথন শেষ হয়েছে।",
     "title_close": "বন্ধ করুন",
-    "title_exit_fullscreen": "ফুলস্ক্রিন থেকে বের হন"
+    "title_exit_fullscreen": "ফুলস্ক্রিন থেকে বের হন",
+    "relay_mode_label": "সিগন্যালিং রিলে",
+    "relay_mode_public": "পাবলিক Nostr রিলে (ডিফল্ট)",
+    "relay_mode_custom": "আমার রিলে",
+    "relay_mode_both": "আমার রিলে + পাবলিক Nostr রিলে (ব্যাকআপ)",
+    "relay_url_label": "রিলের ঠিকানা",
+    "relay_url_invalid": "কমা দিয়ে আলাদা করে wss:// ঠিকানা লিখুন।",
+    "relay_hint": "রুমের সবাই একে অপরকে খুঁজে পেতে এই রিলেগুলো ব্যবহার করে। রিলে শুধু এনক্রিপ্ট করা, স্বল্পস্থায়ী হ্যান্ডশেক বার্তা দেখতে পায়।"
   },
   "pt": {
     "scan_qr": "📱 Escanear QR",
@@ -1189,7 +1238,14 @@
     "dm_empty": "Só você e {name} podem ler estas mensagens. Elas somem quando qualquer um de vocês sair.",
     "dm_peer_left": "{name} saiu: esta conversa foi encerrada.",
     "title_close": "Fechar",
-    "title_exit_fullscreen": "Sair da tela cheia"
+    "title_exit_fullscreen": "Sair da tela cheia",
+    "relay_mode_label": "Relays de sinalização",
+    "relay_mode_public": "Relays Nostr públicos (padrão)",
+    "relay_mode_custom": "Meu relay",
+    "relay_mode_both": "Meu relay + relays Nostr públicos (reserva)",
+    "relay_url_label": "Endereço do relay",
+    "relay_url_invalid": "Digite endereços wss:// separados por vírgulas.",
+    "relay_hint": "Todos na sala usam esses relays para se encontrar. Os relays só veem mensagens de conexão criptografadas e efêmeras."
   },
   "ru": {
     "scan_qr": "📱 Сканировать QR",
@@ -1338,7 +1394,14 @@
     "dm_empty": "Эти сообщения можете читать только вы и {name}. Они исчезнут, как только кто-то из вас выйдет.",
     "dm_peer_left": "{name} больше не в комнате: разговор завершен.",
     "title_close": "Закрыть",
-    "title_exit_fullscreen": "Выйти из полноэкранного режима"
+    "title_exit_fullscreen": "Выйти из полноэкранного режима",
+    "relay_mode_label": "Сигнальные реле",
+    "relay_mode_public": "Публичные реле Nostr (по умолчанию)",
+    "relay_mode_custom": "Мое реле",
+    "relay_mode_both": "Мое реле + публичные реле Nostr (резерв)",
+    "relay_url_label": "Адрес реле",
+    "relay_url_invalid": "Введите адреса wss:// через запятую.",
+    "relay_hint": "Все участники комнаты находят друг друга через эти реле. Реле видят только зашифрованные кратковременные сообщения для установления соединения."
   },
   "de": {
     "scan_qr": "📱 QR scannen",
@@ -1487,6 +1550,13 @@
     "dm_empty": "Nur Sie und {name} können diese Nachrichten lesen. Die Nachrichten verschwinden, sobald einer von Ihnen beiden geht.",
     "dm_peer_left": "{name} hat den Raum verlassen: Diese Unterhaltung ist beendet.",
     "title_close": "Schließen",
-    "title_exit_fullscreen": "Vollbild beenden"
+    "title_exit_fullscreen": "Vollbild beenden",
+    "relay_mode_label": "Signalisierungs-Relays",
+    "relay_mode_public": "Öffentliche Nostr-Relays (Standard)",
+    "relay_mode_custom": "Mein Relay",
+    "relay_mode_both": "Mein Relay + öffentliche Nostr-Relays (Reserve)",
+    "relay_url_label": "Relay-Adresse",
+    "relay_url_invalid": "Geben Sie wss://-Adressen durch Kommas getrennt ein.",
+    "relay_hint": "Alle im Raum finden sich über diese Relays. Relays sehen nur verschlüsselte, kurzlebige Verbindungsnachrichten."
   }
 }

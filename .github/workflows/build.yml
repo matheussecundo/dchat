@@ -42,6 +42,9 @@ jobs:
 
       - name: Build client (release, relative asset paths from Trunk.toml)
         working-directory: crates/client
+        env:
+          # Optional repository variable: pre-fills "My relay" in the create-room form.
+          DCHAT_RELAY_URL: ${{ vars.DCHAT_RELAY_URL }}
         run: trunk build --release --locked
 
       - name: Check no test hooks shipped

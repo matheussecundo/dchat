@@ -1,0 +1,8 @@
+target/
+.git/
+e2e/node_modules/
+e2e/test-results/
+crates/client/dist/
+crates/client/dist-e2e/
+.wrangler/
+.dev.vars

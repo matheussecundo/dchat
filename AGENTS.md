@@ -50,7 +50,12 @@ Every agent modifying this codebase must enforce these non-negotiable security a
    - **Host TURN (Cloudflare)**: the client fetches `./ice-servers` once when entering a room and adds any servers returned to `RtcConfiguration`; 404, HTML or a timeout falls back silently (STUN plus `&turn=`). The Worker keeps `TURN_KEY_API_TOKEN` secret, returns only short-lived credentials (`Cache-Control: no-store`), filters port-53 URLs, rejects cross-site requests and rate-limits per IP. The request never includes room data, and the Service Worker never caches it.
    - The Worker entry module (`worker/index.js`) may only export its default handler: the Workers runtime rejects other named exports (put helpers in `ice.js`).
 
-7. **NAT Traversal (known limitation, must stay documented)**:
+7. **Relays (signaling only)**:
+   - The room's relays are part of the room and travel in the link: `&relays=` lists them exactly (`nostr` = the public relays, `protocol::PUBLIC_RELAYS`); absent means public (or the dev server's own relay on localhost/LAN). The creator chooses at creation; joiners never change it, so every member can find the others.
+   - `NostrRelayPool` reconnects each relay with backoff (1 s doubling to 30 s, jitter, reset after a stable minute), resubscribes and re-announces presence; it is closed when the session leaves (including rekey migration).
+   - `dchat-relay` must stay RAM-only and dchat-only: ephemeral kinds only, signature and freshness checks, per-connection rate limits, per-IP connection caps, optional origin allow-list, no IPs/topics/content in logs. The dev server mounts the same code at `/nostr`, so E2E runs exercise it.
+
+8. **NAT Traversal (known limitation, must stay documented)**:
    - ICE uses STUN only by default (`stun:stun.l.google.com:19302`). Pairs behind carrier-grade NAT (mobile data) or symmetric NAT often cannot link directly: roughly 10–20% of pairs, and more pairs fail as a room grows.
    - Such pairs show `via <name>` in the member list: **text** still flows, gossip-relayed through a mutual member (signed, room-key encrypted). **Audio, video and files** need a direct link and are unavailable for that pair. With no mutual member the person stays `connecting…`.
    - The fix is an optional TURN server supplied in the URL fragment (`&turn=…&turnuser=…&turnpass=…`, see `build_rtc_config` in `session.rs`). TURN relays encrypted packets only; it sees IPs and timing, never content.
@@ -70,12 +75,21 @@ dchat/
 │   │       ├── fragment.rs     # Order-preserving URL fragment parser (keeps unknown params)
 │   │       ├── messages.rs     # Addressed SignalPayload, signed RoomEnvelope/RoomBody, ICE types
 │   │       ├── nostr.rs        # NIP-01/16 types, BIP-340 Schnorr keys (k256), message signing, topic hashing
+│   │       ├── relays.rs       # Room relay list: &relays= parsing (exact, `nostr` = public), validation
 │   │       ├── room.rs         # Roster, link graph, gossip routing, member/voice/video cap eviction, RoomParams (pure, unit-tested)
 │   │       └── lib.rs
-│   ├── server/                 # Axum backend: Static file server + dev TLS + local mock Nostr relay
+│   ├── relay/                  # dchat-relay: RAM-only Nostr relay for dchat signaling (lib + binary)
+│   │   ├── Dockerfile          # Container image (build from the repo root)
+│   │   ├── src/
+│   │   │   ├── limits.rs       # Policy: kind 20001 only, d tag, freshness, signature, token bucket (unit-tested)
+│   │   │   ├── hub.rs          # Subscriptions and fan-out, per-IP connection counts (RAM only)
+│   │   │   ├── connection.rs   # NIP-01 REQ/EVENT/CLOSE per WebSocket, pings, limits
+│   │   │   ├── lib.rs          # axum router: WebSocket at /, NIP-11 information document
+│   │   │   └── main.rs         # CLI / env config, graceful shutdown, IP-free logs
+│   │   └── tests/relay.rs      # Integration tests over real WebSockets
+│   ├── server/                 # Axum dev server: static files + dev TLS + dchat-relay at /nostr
 │   │   └── src/
-│   │       ├── main.rs         # CLI args, LAN IP detection, QR code banner, /nostr & /ws routing
-│   │       ├── nostr_relay.rs  # In-memory mock Nostr relay for local dev & offline E2E tests
+│   │       ├── main.rs         # CLI args, LAN IP detection, QR code banner, /nostr (crates/relay) & /ws routing
 │   │       ├── signaling.rs    # Legacy room manager
 │   │       └── tls.rs          # rcgen self-signed dev certificate generator
 │   └── client/                 # Leptos CSR frontend targeting wasm32-unknown-unknown
@@ -113,6 +127,8 @@ dchat/
 │       ├── group_extras.spec.js  # Typing, reactions, edit/delete, direct + relayed DMs (relay can't read), @mention highlight
 │       ├── p2p_chat.spec.js    # 2-member room, E2EE message exchange, reload wipe, fragment params
 │       ├── host_turn.spec.js   # Host-offered TURN (./ice-servers) used; 404 falls back to STUN; no room data sent
+│       ├── relay_choice.spec.js# Relay choice at room creation: public default, my relay only, my relay + public
+│       ├── relay_reconnect.spec.js # Dropped relay connection reconnects; newcomers still reach the member
 │       ├── audio_call.spec.js  # 2-member lounge audio, mic/speaker mute, leave (replaceTrack null) and rejoin
 │       ├── video_call.spec.js  # Camera tiles, camera flip keeps the mic, camera off, grid teardown
 │       ├── screen_share.spec.js# Screen share, switch to camera on the same sender, stop
@@ -122,7 +138,9 @@ dchat/
 ├── .github/workflows/
 │   ├── build.yml               # Reusable: Rust + Worker tests, release build, no-hooks check, "site" artifact
 │   ├── pages.yml               # Deploy the site to GitHub Pages on push to main
-│   └── cloudflare.yml          # Deploy to Cloudflare Workers (skips until CLOUDFLARE_* secrets exist)
+│   ├── cloudflare.yml          # Deploy to Cloudflare Workers (skips until CLOUDFLARE_* secrets exist)
+│   └── relay-image.yml         # Publish ghcr.io/<owner>/dchat-relay when the relay changes
+├── deploy/relay/               # docker-compose.yml + Caddyfile (automatic wss://), dchat-relay.service (systemd)
 ├── wrangler.jsonc              # Cloudflare Worker: static assets + worker/, ICE_LIMITER rate limit
 ├── worker/
 │   ├── index.js                # Entry: GET */ice-servers → ice.js, everything else → static assets
@@ -252,6 +270,8 @@ When writing or reviewing code, check off every item:
 - [ ] Room messages are `RoomEnvelope`s: signature verified before dedup/apply, attribution taken from the verified author only.
 - [ ] The admin secret (`admsk`) never appears in the invite link, the QR code, logs, or any message.
 - [ ] Untrusted input (names, signatures, SDP, envelopes from peers) is length-checked and never panics the client (k256 signature parsing panics on short input: use `parse_signature`).
+- [ ] `dchat-relay` stores nothing and logs no IP addresses, room topics or content; it only accepts signed, fresh, ephemeral dchat events.
+- [ ] Relay URLs from links or the create form pass `is_relay_url` (no `&`, `#`, `,` or whitespace), and HTTPS pages only use `wss://`.
 - [ ] The Cloudflare TURN API token exists only as a Worker secret; `/ice-servers` responses are short-lived, `no-store` and never cached by the Service Worker; the client request carries no room data.
 - [ ] `e2e-hooks` code (`window.__dchat.selfPubkey/blockPeer/throttleUploads`) stays behind `#[cfg(feature = "e2e-hooks")]` and out of `make build-client` output.
 - [ ] Direct-only room messages (`RoomBody::recipient()` is `Some`) are applied only when `to` is us and the envelope came straight from its author; they are never relayed.

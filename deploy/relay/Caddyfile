@@ -1,0 +1,5 @@
+# Caddy terminates TLS (automatic Let's Encrypt certificate) and forwards WebSockets to
+# dchat-relay. RELAY_DOMAIN comes from the environment (see docker-compose.yml).
+{$RELAY_DOMAIN} {
+	reverse_proxy {$RELAY_UPSTREAM:relay:7447}
+}

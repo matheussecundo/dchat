@@ -1,0 +1,36 @@
+# dchat-relay behind Caddy (automatic HTTPS). On a server whose DNS name points at it:
+#   RELAY_DOMAIN=relay.example.com docker compose up -d
+# Optional: ALLOWED_ORIGINS=https://chat.example.com to accept only your dchat site.
+services:
+  relay:
+    image: ${RELAY_IMAGE:-dchat-relay:latest}
+    build:
+      context: ../..
+      dockerfile: crates/relay/Dockerfile
+    environment:
+      DCHAT_RELAY_LISTEN: 0.0.0.0:7447
+      # Caddy sets X-Forwarded-For; per-IP limits use it.
+      DCHAT_RELAY_TRUST_PROXY: "true"
+      DCHAT_RELAY_ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  caddy:
+    image: caddy:2
+    depends_on: [relay]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN:?Set RELAY_DOMAIN to the relay's DNS name, e.g. relay.example.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

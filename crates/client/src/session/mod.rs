@@ -264,6 +264,10 @@ impl RoomSession {
         for (_, link) in self.inner.links.borrow_mut().drain() {
             link.close();
         }
+        // Queued messages (the PeerLeft above) are still sent before the sockets close.
+        if let Some(pool) = self.pool() {
+            pool.close();
+        }
         self.refresh_status();
     }
 
