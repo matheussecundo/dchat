@@ -1,8 +1,9 @@
-const CACHE_NAME = "dchat-static-v2";
+const CACHE_NAME = "dchat-static-v3";
+// Only files with fixed names: the CSS/JS/WASM have content hashes in their names and are
+// cached when first fetched. Precaching a missing file would make the install fail.
 const STATIC_ASSETS = [
   "./",
   "./index.html",
-  "./style.css",
 ];
 
 // Invariant: This Service Worker ONLY caches immutable application shell assets.

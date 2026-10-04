@@ -270,7 +270,10 @@ pub fn create_room(caps: RoomCaps) -> Result<(), String> {
     Ok(())
 }
 
-fn page_base_url() -> String {
+/// The app's own address without the fragment, e.g. `https://user.github.io/dchat/`.
+/// Use this instead of `/`, which is the root of the whole site when the app is hosted
+/// under a path.
+pub fn page_base_url() -> String {
     window()
         .and_then(|w| {
             let loc = w.location();

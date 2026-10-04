@@ -183,15 +183,23 @@ Run your own with [coturn](https://github.com/coturn/coturn) or use a hosted pro
 `dchat` needs **no backend server** in production. Signaling occurs over decentralized Nostr relays, and WebAssembly executes directly in the browser:
 ```bash
 cd crates/client
-trunk build --release index.html
+trunk build --release
 cd ../..
 ```
-Deploy the resulting `crates/client/dist/` directory directly to any static host:
+Deploy the resulting `crates/client/dist/` directory to any static host. Asset paths are relative (`public_url = "./"` in `crates/client/Trunk.toml`), so the same build works at a domain root, under a path such as `https://<user>.github.io/<repo>/`, or on IPFS:
 - **GitHub Pages / Cloudflare Pages / Vercel / Netlify**
 - **IPFS / Arweave**
 - Any static file server (`caddy`, `nginx`, `python3 -m http.server`)
 
 *(Note: WebRTC requires HTTPS when not served from `localhost`.)*
+
+#### GitHub Pages (automated)
+`.github/workflows/pages.yml` runs the unit tests, builds the client, checks that no test hooks are in the bundle and publishes `dist/` on every push to `main`:
+1. Push the repository to GitHub.
+2. In the repository, open **Settings → Pages** and set **Source** to **GitHub Actions** (one time).
+3. Push to `main` (or run the workflow by hand from the **Actions** tab). The site appears at `https://<user>.github.io/<repo>/`.
+
+Once hosted, rooms use the public Nostr relays below instead of the local mock relay. For dependable voice and video across mobile networks, also run a TURN server and add it to room links (see "When Members Can't Connect Directly (NAT)").
 
 ### 2. Custom Nostr Relays
 By default, `dchat` connects to a resilient pool of public Nostr relays:

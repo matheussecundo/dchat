@@ -43,7 +43,12 @@ Every agent modifying this codebase must enforce these non-negotiable security a
    - **History**: off unless `&hist=1`; only messages whose author's link had `hist=1` (`shareable`) are ever served, as signed originals verified by the receiver. RAM only; enforced by honest clients.
    - **Lounge media**: media flows only between members who both hold a voice seat over an open direct link (`sync_media_for`). Each link has at most one audio and one video `RtcRtpSender`; toggles use `replaceTrack`, never add/remove, so SDP does not grow.
 
-6. **NAT Traversal (known limitation, must stay documented)**:
+6. **Hosting Anywhere (static, any path)**:
+   - The production build must work at a domain root, under a path (`https://<user>.github.io/<repo>/`) and on IPFS: asset URLs are relative (`crates/client/Trunk.toml`), and code never navigates to `/`; use `state::page_base_url()` for "home".
+   - The Service Worker only precaches files with fixed names (`./`, `./index.html`); hashed assets are cached on first fetch. Precaching a missing file makes its install fail on real hosts (the local dev server masks this by answering unknown paths with `index.html`).
+   - `Cargo.lock` is committed so CI deploys the dependency versions that were tested (`--locked`).
+
+7. **NAT Traversal (known limitation, must stay documented)**:
    - ICE uses STUN only by default (`stun:stun.l.google.com:19302`). Pairs behind carrier-grade NAT (mobile data) or symmetric NAT often cannot link directly: roughly 10–20% of pairs, and more pairs fail as a room grows.
    - Such pairs show `via <name>` in the member list: **text** still flows, gossip-relayed through a mutual member (signed, room-key encrypted). **Audio, video and files** need a direct link and are unavailable for that pair. With no mutual member the person stays `connecting…`.
    - The fix is an optional TURN server supplied in the URL fragment (`&turn=…&turnuser=…&turnpass=…`, see `build_rtc_config` in `session.rs`). TURN relays encrypted packets only; it sees IPs and timing, never content.
@@ -72,6 +77,7 @@ dchat/
 │   │       ├── signaling.rs    # Legacy room manager
 │   │       └── tls.rs          # rcgen self-signed dev certificate generator
 │   └── client/                 # Leptos CSR frontend targeting wasm32-unknown-unknown
+│       ├── Trunk.toml          # public_url = "./": relative asset paths (works under any path)
 │       ├── index.html          # Trunk entry point & Service Worker registration
 │       ├── style.css           # Responsive mobile-friendly dark theme
 │       ├── service-worker.js   # Caches immutable static assets ONLY (never state)
@@ -108,6 +114,7 @@ dchat/
 │       ├── file_sharing.spec.js# Room-wide file cards: parallel pulls, decline/withdraw, upload queue, unreachable sender, sender leaving
 │       ├── audio_settings.spec.js # Mic processing checkboxes, live track swap in voice, carry-over, reload reset
 │       └── i18n.spec.js        # UI localization, dynamic switching, Arabic RTL, zero persistence
+├── .github/workflows/pages.yml # GitHub Pages: unit tests, release build, no-hooks check, deploy
 ├── README.md                   # User guide, building, running locally, mobile test
 └── AGENTS.md                   # This document
 ```

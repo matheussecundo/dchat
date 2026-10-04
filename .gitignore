@@ -1,6 +1,5 @@
 target/
 **/*.rs.bk
-Cargo.lock
 crates/client/dist/
 crates/client/dist-e2e/
 e2e/node_modules/

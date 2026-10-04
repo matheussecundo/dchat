@@ -240,7 +240,7 @@ fn App() -> impl IntoView {
             }
         });
         if let Some(win) = window() {
-            let _ = win.location().set_href("/");
+            let _ = win.location().set_href(&state::page_base_url());
         }
     };
 
@@ -639,7 +639,7 @@ fn App() -> impl IntoView {
                         class="btn btn-primary lobby-submit"
                         on:click=move |_| {
                             if let Some(win) = window() {
-                                let _ = win.location().set_href("/");
+                                let _ = win.location().set_href(&state::page_base_url());
                             }
                         }
                     >
