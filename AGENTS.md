@@ -128,6 +128,7 @@ dchat/
 │   ├── index.js                # Entry: GET */ice-servers → ice.js, everything else → static assets
 │   ├── ice.js                  # Fresh Cloudflare TURN credentials (token stays server-side), port-53 filter
 │   └── index.test.mjs          # node --test worker/ (stubbed TURN API)
+├── docs/DEPLOYMENT.md          # Step-by-step hosting: GitHub Pages, Cloudflare Workers + TURN, troubleshooting
 ├── README.md                   # User guide, building, running locally, mobile test
 └── AGENTS.md                   # This document
 ```

@@ -183,6 +183,8 @@ What you will see:
 ## Building & Deploying
 
 ### 1. Serverless Static Deployment (Production)
+> Step-by-step guide for GitHub Pages and Cloudflare (Workers + TURN), including custom domains, verification and troubleshooting: [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md).
+
 `dchat` needs **no backend server** in production. Signaling occurs over decentralized Nostr relays, and WebAssembly executes directly in the browser:
 ```bash
 cd crates/client
