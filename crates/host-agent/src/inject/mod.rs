@@ -2,8 +2,11 @@
 //! tests (`--mock-injector`).
 
 pub mod mock;
+pub mod win_input;
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(windows)]
+pub mod windows;
 
 use protocol::{AgentCaps, DomCode, MouseButton, PadState, PointerMode};
 use std::io;
@@ -84,7 +87,11 @@ pub fn platform_injector() -> Box<dyn Injector> {
     {
         Box::new(linux::UinputInjector::new())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    {
+        Box::new(windows::SendInputInjector::new())
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
     {
         Box::new(Unavailable("dchat-host can't inject input on this operating system yet".into()))
     }

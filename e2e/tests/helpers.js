@@ -212,3 +212,20 @@ export async function pairAgent(page, code = AGENT.code) {
   await page.locator('#agent-code-input').fill(code);
   await page.locator('#agent-connect-btn').click();
 }
+
+/** Init script: pointer lock that always succeeds (headless browsers can't really lock). */
+export const STUB_POINTER_LOCK = () => {
+  let locked = null;
+  window.__pointerLockRequests = 0;
+  Object.defineProperty(Document.prototype, 'pointerLockElement', { get() { return locked; }, configurable: true });
+  Element.prototype.requestPointerLock = function requestPointerLock() {
+    window.__pointerLockRequests += 1;
+    locked = this;
+    setTimeout(() => document.dispatchEvent(new Event('pointerlockchange')), 0);
+    return Promise.resolve();
+  };
+  Document.prototype.exitPointerLock = function exitPointerLock() {
+    locked = null;
+    setTimeout(() => document.dispatchEvent(new Event('pointerlockchange')), 0);
+  };
+};

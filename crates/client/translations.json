@@ -215,7 +215,10 @@
     "control_prompt_takes_over": "This takes the mouse and keyboard away from {name}.",
     "control_prompt_warning": "With your mouse and keyboard they can do anything you can on this computer, including allowing others.",
     "control_waiting": "Waiting for an answer…",
-    "title_revoke_control": "Stop this person's control"
+    "title_revoke_control": "Stop this person's control",
+    "control_mode_desktop": "🖱️ Desktop mode",
+    "control_mode_game": "🎮 Game mode",
+    "control_mode_title": "Desktop mode: click where you point. Game mode: the mouse is captured and moves the view, for games. Click to switch."
   },
   "zh": {
     "scan_qr": "📱 扫描二维码",
@@ -433,7 +436,10 @@
     "control_prompt_takes_over": "这会把鼠标和键盘从 {name} 那里收回。",
     "control_prompt_warning": "拿到你的鼠标和键盘后，对方可以在这台电脑上做你能做的任何事，包括允许其他人。",
     "control_waiting": "正在等待回应…",
-    "title_revoke_control": "停止此人的控制"
+    "title_revoke_control": "停止此人的控制",
+    "control_mode_desktop": "🖱️ 桌面模式",
+    "control_mode_game": "🎮 游戏模式",
+    "control_mode_title": "桌面模式：指向哪里就点击哪里。游戏模式：鼠标被锁定并用于转动视角，适合游戏。点击切换。"
   },
   "hi": {
     "scan_qr": "📱 क्यूआर स्कैन करें",
@@ -651,7 +657,10 @@
     "control_prompt_takes_over": "इससे माउस और कीबोर्ड {name} से वापस ले लिए जाएँगे।",
     "control_prompt_warning": "आपके माउस और कीबोर्ड से वे इस कंप्यूटर पर वह सब कर सकते हैं जो आप कर सकते हैं, दूसरों को अनुमति देना भी।",
     "control_waiting": "जवाब का इंतज़ार…",
-    "title_revoke_control": "इस व्यक्ति का नियंत्रण रोकें"
+    "title_revoke_control": "इस व्यक्ति का नियंत्रण रोकें",
+    "control_mode_desktop": "🖱️ डेस्कटॉप मोड",
+    "control_mode_game": "🎮 गेम मोड",
+    "control_mode_title": "डेस्कटॉप मोड: जहाँ इशारा करें वहीं क्लिक होता है। गेम मोड: माउस लॉक होकर दृश्य घुमाता है, गेम के लिए। बदलने के लिए क्लिक करें।"
   },
   "es": {
     "scan_qr": "📱 Escanear QR",
@@ -869,7 +878,10 @@
     "control_prompt_takes_over": "Esto le quita el ratón y el teclado a {name}.",
     "control_prompt_warning": "Con tu ratón y tu teclado pueden hacer en este equipo todo lo que tú puedes, incluso dar permiso a otros.",
     "control_waiting": "Esperando respuesta…",
-    "title_revoke_control": "Quitarle el control a esta persona"
+    "title_revoke_control": "Quitarle el control a esta persona",
+    "control_mode_desktop": "🖱️ Modo escritorio",
+    "control_mode_game": "🎮 Modo juego",
+    "control_mode_title": "Modo escritorio: haces clic donde apuntas. Modo juego: el ratón queda capturado y mueve la vista, para juegos. Haz clic para cambiar."
   },
   "fr": {
     "scan_qr": "📱 Scanner QR",
@@ -1087,7 +1099,10 @@
     "control_prompt_takes_over": "Cela retire la souris et le clavier à {name}.",
     "control_prompt_warning": "Avec votre souris et votre clavier, cette personne peut faire tout ce que vous pouvez faire sur cet ordinateur, y compris autoriser d'autres personnes.",
     "control_waiting": "En attente de réponse…",
-    "title_revoke_control": "Retirer le contrôle à cette personne"
+    "title_revoke_control": "Retirer le contrôle à cette personne",
+    "control_mode_desktop": "🖱️ Mode bureau",
+    "control_mode_game": "🎮 Mode jeu",
+    "control_mode_title": "Mode bureau : vous cliquez là où vous pointez. Mode jeu : la souris est capturée et déplace la vue, pour les jeux. Cliquez pour changer."
   },
   "ar": {
     "scan_qr": "📱 مسح رمز QR",
@@ -1305,7 +1320,10 @@
     "control_prompt_takes_over": "سيؤدي هذا إلى سحب الفأرة ولوحة المفاتيح من {name}.",
     "control_prompt_warning": "بالفأرة ولوحة المفاتيح يستطيع فعل أي شيء تستطيعه على هذا الحاسوب، بما في ذلك السماح للآخرين.",
     "control_waiting": "بانتظار الرد…",
-    "title_revoke_control": "إيقاف تحكم هذا الشخص"
+    "title_revoke_control": "إيقاف تحكم هذا الشخص",
+    "control_mode_desktop": "🖱️ وضع سطح المكتب",
+    "control_mode_game": "🎮 وضع الألعاب",
+    "control_mode_title": "وضع سطح المكتب: تنقر حيث تشير. وضع الألعاب: تُحتجز الفأرة وتحرّك المشهد، للألعاب. انقر للتبديل."
   },
   "bn": {
     "scan_qr": "📱 কিউআর স্ক্যান",
@@ -1523,7 +1541,10 @@
     "control_prompt_takes_over": "এতে {name}-এর কাছ থেকে মাউস ও কীবোর্ড সরিয়ে নেওয়া হবে।",
     "control_prompt_warning": "আপনার মাউস ও কীবোর্ড দিয়ে তাঁরা এই কম্পিউটারে আপনার মতোই সবকিছু করতে পারবেন, অন্যদের অনুমতি দেওয়াও।",
     "control_waiting": "উত্তরের অপেক্ষায়…",
-    "title_revoke_control": "এই ব্যক্তির নিয়ন্ত্রণ থামান"
+    "title_revoke_control": "এই ব্যক্তির নিয়ন্ত্রণ থামান",
+    "control_mode_desktop": "🖱️ ডেস্কটপ মোড",
+    "control_mode_game": "🎮 গেম মোড",
+    "control_mode_title": "ডেস্কটপ মোড: যেখানে নির্দেশ করেন সেখানে ক্লিক হয়। গেম মোড: মাউস আটকে থেকে দৃশ্য ঘোরায়, গেমের জন্য। বদলাতে ক্লিক করুন।"
   },
   "pt": {
     "scan_qr": "📱 Escanear QR",
@@ -1741,7 +1762,10 @@
     "control_prompt_takes_over": "Isso tira o mouse e o teclado de {name}.",
     "control_prompt_warning": "Com seu mouse e teclado, a pessoa pode fazer neste computador tudo o que você pode, inclusive dar permissão a outras pessoas.",
     "control_waiting": "Aguardando resposta…",
-    "title_revoke_control": "Tirar o controle desta pessoa"
+    "title_revoke_control": "Tirar o controle desta pessoa",
+    "control_mode_desktop": "🖱️ Modo área de trabalho",
+    "control_mode_game": "🎮 Modo jogo",
+    "control_mode_title": "Modo área de trabalho: você clica onde aponta. Modo jogo: o mouse fica capturado e move a visão, para jogos. Clique para trocar."
   },
   "ru": {
     "scan_qr": "📱 Сканировать QR",
@@ -1959,7 +1983,10 @@
     "control_prompt_takes_over": "Мышь и клавиатура перейдут от {name}.",
     "control_prompt_warning": "С вашей мышью и клавиатурой можно делать на этом компьютере всё то же, что и вы, в том числе давать разрешение другим.",
     "control_waiting": "Ожидание ответа…",
-    "title_revoke_control": "Прекратить управление этого человека"
+    "title_revoke_control": "Прекратить управление этого человека",
+    "control_mode_desktop": "🖱️ Режим рабочего стола",
+    "control_mode_game": "🎮 Игровой режим",
+    "control_mode_title": "Режим рабочего стола: нажатие там, куда указываете. Игровой режим: мышь захватывается и поворачивает обзор, для игр. Нажмите, чтобы переключить."
   },
   "de": {
     "scan_qr": "📱 QR scannen",
@@ -2177,6 +2204,9 @@
     "control_prompt_takes_over": "Damit verliert {name} Maus und Tastatur.",
     "control_prompt_warning": "Mit deiner Maus und Tastatur kann diese Person an diesem Computer alles tun, was du kannst, auch anderen die Steuerung erlauben.",
     "control_waiting": "Warte auf Antwort…",
-    "title_revoke_control": "Steuerung dieser Person beenden"
+    "title_revoke_control": "Steuerung dieser Person beenden",
+    "control_mode_desktop": "🖱️ Desktop-Modus",
+    "control_mode_game": "🎮 Spielmodus",
+    "control_mode_title": "Desktop-Modus: Du klickst, wohin du zeigst. Spielmodus: Die Maus wird gefangen und bewegt die Ansicht, für Spiele. Klicke zum Wechseln."
   }
 }

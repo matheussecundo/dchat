@@ -4,7 +4,9 @@
 //! to this page. Dropping the capture removes everything and releases all held input.
 
 use crate::layout::{contain_rect, picture_fraction};
-use protocol::{is_release_chord, normalize_position, DomCode, InputEvent, MouseButton, WheelAccumulator};
+use protocol::{
+    is_release_chord, normalize_position, DomCode, InputEvent, MouseButton, PointerMode, RelAccumulator, WheelAccumulator,
+};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
@@ -32,20 +34,26 @@ pub struct InputCapture {
     listeners: Vec<Listener>,
     intervals: Vec<(i32, Closure<dyn FnMut()>)>,
     sink: InputSink,
+    mode: PointerMode,
 }
 
 impl InputCapture {
     /// Start forwarding input over `surface` (the overlay above `video`). `on_release` is
-    /// called (asynchronously) when the viewer stops: the release shortcut, leaving the tab.
+    /// called (asynchronously) when the viewer stops: the release shortcut, leaving the tab,
+    /// losing pointer lock. Desktop mode sends absolute positions over the picture; game
+    /// mode locks the pointer and sends relative movement. Call from a click (pointer lock
+    /// needs a user gesture).
     pub fn engage(
         surface: &HtmlElement,
         video: &HtmlVideoElement,
+        mode: PointerMode,
         sink: InputSink,
         on_release: Rc<dyn Fn()>,
     ) -> Result<Self, JsValue> {
         let win = window().ok_or("no window")?;
         let doc = win.document().ok_or("no document")?;
-        let mut capture = Self { listeners: Vec::new(), intervals: Vec::new(), sink: sink.clone() };
+        let game = mode == PointerMode::Game;
+        let mut capture = Self { listeners: Vec::new(), intervals: Vec::new(), sink: sink.clone(), mode };
 
         let position: Rc<dyn Fn(&MouseEvent) -> (u16, u16)> = {
             let (surface, video) = (surface.clone(), video.clone());
@@ -66,12 +74,18 @@ impl InputCapture {
             })
         };
 
+        // Game mode: movement while the pointer is locked, summed between sends.
+        let pending_rel = Rc::new(RefCell::new(RelAccumulator::default()));
         let target: EventTarget = surface.clone().into();
         {
-            let (position, pending) = (position.clone(), pending_move.clone());
+            let (position, pending, rel) = (position.clone(), pending_move.clone(), pending_rel.clone());
             capture.listen(&target, "pointermove", false, move |ev| {
                 if let Some(ev) = ev.dyn_ref::<MouseEvent>() {
-                    pending.set(Some(position(ev)));
+                    if game {
+                        rel.borrow_mut().add(ev.movement_x() as f64, ev.movement_y() as f64);
+                    } else {
+                        pending.set(Some(position(ev)));
+                    }
                 }
             })?;
         }
@@ -89,7 +103,8 @@ impl InputCapture {
                     return;
                 };
                 pending.set(None);
-                sink(vec![InputEvent::Button { button, down, at: Some(position(mouse)) }]);
+                let at = (!game).then(|| position(mouse));
+                sink(vec![InputEvent::Button { button, down, at }]);
             })?;
         }
         {
@@ -103,7 +118,8 @@ impl InputCapture {
                 let mut acc = wheel.borrow_mut();
                 acc.push(wheel_ev.delta_x(), wheel_ev.delta_y(), wheel_ev.delta_mode());
                 if let Some((dx, dy)) = acc.take() {
-                    sink(vec![InputEvent::Wheel { dx, dy, at: Some(position(wheel_ev)) }]);
+                    let at = (!game).then(|| position(wheel_ev));
+                    sink(vec![InputEvent::Wheel { dx, dy, at }]);
                 }
             })?;
         }
@@ -152,12 +168,37 @@ impl InputCapture {
         capture.listen(&win_target, "beforeunload", false, |ev| ev.prevent_default())?;
 
         {
-            let (pending, sink) = (pending_move.clone(), sink.clone());
+            let (pending, rel, sink) = (pending_move.clone(), pending_rel.clone(), sink.clone());
             capture.every(MOVE_FLUSH_MS, move || {
                 if let Some((x, y)) = pending.take() {
                     sink(vec![InputEvent::PointerAbs { x, y }]);
                 }
+                let mut moves = Vec::new();
+                while let Some((dx, dy)) = rel.borrow_mut().take() {
+                    moves.push(InputEvent::PointerRel { dx, dy });
+                }
+                if !moves.is_empty() {
+                    sink(moves);
+                }
             })?;
+        }
+        if game {
+            // Losing the lock (Esc, switching windows) ends control, like in a game.
+            let surface_el: web_sys::Element = surface.clone().into();
+            let (on_lost, doc_c) = (release.clone(), doc.clone());
+            capture.listen(&doc.clone().into(), "pointerlockchange", false, move |_| {
+                let locked = doc_c.pointer_lock_element().is_some_and(|el| el == surface_el);
+                if !locked {
+                    on_lost();
+                }
+            })?;
+            let on_error = release.clone();
+            capture.listen(&doc.clone().into(), "pointerlockerror", false, move |_| on_error())?;
+            request_pointer_lock(surface);
+            // In fullscreen, Chromium can also hand us Esc, Alt+Tab and the system keys.
+            if doc.fullscreen_element().is_some() {
+                keyboard_lock(true);
+            }
         }
         {
             let sink = sink.clone();
@@ -203,6 +244,52 @@ impl Drop for InputCapture {
                 win.clear_interval_with_handle(id);
             }
         }
+        if self.mode == PointerMode::Game {
+            if let Some(doc) = window().and_then(|w| w.document()) {
+                if doc.pointer_lock_element().is_some() {
+                    doc.exit_pointer_lock();
+                }
+            }
+            keyboard_lock(false);
+        }
         (self.sink)(vec![InputEvent::ReleaseAll]);
+    }
+}
+
+/// Raw mouse movement where supported (`unadjustedMovement`), plain pointer lock otherwise.
+fn request_pointer_lock(surface: &HtmlElement) {
+    let Ok(request) = js_sys::Reflect::get(surface, &"requestPointerLock".into()).and_then(|f| f.dyn_into::<js_sys::Function>()) else {
+        return;
+    };
+    let options = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&options, &"unadjustedMovement".into(), &JsValue::TRUE);
+    let result = request.call1(surface, &options);
+    if let Ok(promise) = result.and_then(|r| r.dyn_into::<js_sys::Promise>()) {
+        let (surface, request) = (surface.clone(), request.clone());
+        let retry = Closure::once(move |_: JsValue| {
+            let _ = request.call0(&surface);
+        });
+        let _ = promise.catch(&retry);
+        retry.forget();
+    }
+}
+
+/// `navigator.keyboard.lock()` / `unlock()` (Chromium only; ignored elsewhere).
+fn keyboard_lock(on: bool) {
+    let Some(win) = window() else {
+        return;
+    };
+    let Ok(keyboard) = js_sys::Reflect::get(&win.navigator(), &"keyboard".into()) else {
+        return;
+    };
+    let method = if on { "lock" } else { "unlock" };
+    if let Ok(f) = js_sys::Reflect::get(&keyboard, &method.into()).and_then(|f| f.dyn_into::<js_sys::Function>()) {
+        if let Ok(result) = f.call0(&keyboard) {
+            if let Ok(promise) = result.dyn_into::<js_sys::Promise>() {
+                let ignore = Closure::once(|_: JsValue| {});
+                let _ = promise.catch(&ignore);
+                ignore.forget();
+            }
+        }
     }
 }

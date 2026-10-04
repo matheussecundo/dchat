@@ -62,6 +62,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")))
         .init();
     let args = Args::parse();
+    #[cfg(windows)]
+    host_agent::inject::windows::use_physical_pixels();
 
     if args.list_monitors {
         let found = monitors::detect();
@@ -114,6 +116,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match &caps.mouse_keyboard_error {
         None => println!("Mouse and keyboard: ready"),
         Some(err) => println!("Mouse and keyboard: unavailable: {err}"),
+    }
+    #[cfg(windows)]
+    if !args.mock_injector && !host_agent::inject::windows::is_elevated() {
+        println!("Note: windows of apps running as administrator can't be controlled unless dchat-host runs as administrator too.");
     }
     match &caps.pads_error {
         None => println!("Controllers: up to {}", caps.pads),

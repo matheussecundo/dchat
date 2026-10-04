@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import {
-  AGENT, CANVAS_SCREEN, agentEvents, createRoom, expectDirectMesh, expectNoStorage, inviteFrom, joinRoom, joinVoice,
-  memberRow, newMember, pairAgent, resetAgent, voiceChip,
+  AGENT, CANVAS_SCREEN, STUB_POINTER_LOCK, agentEvents, createRoom, expectDirectMesh, expectNoStorage, inviteFrom,
+  joinRoom, joinVoice, memberRow, newMember, pairAgent, resetAgent, voiceChip,
 } from './helpers.js';
 
 test.describe.configure({ timeout: 120000 });
@@ -16,6 +16,7 @@ async function sharingRoom(browser, others, surface = 'monitor') {
   const invite = inviteFrom(await createRoom(ana.page, { name: 'Ana' }));
   for (const name of others) {
     const m = await newMember(browser, name);
+    await m.context.addInitScript(STUB_POINTER_LOCK);
     await joinRoom(m.page, invite, name);
     members.push(m);
   }
@@ -172,4 +173,43 @@ test('prompts show in fullscreen; losing the link releases held keys; window sha
   await bo2.page.waitForTimeout(1500);
   await expect(tile(bo2.page, second.anaKey).locator('.control-request-btn')).toHaveCount(0);
   for (const m of [ana2, bo2]) await m.context.close();
+});
+
+test('game mode: pointer lock, relative movement, smooth video, and losing the lock ends control', async ({ browser }) => {
+  const { members: [ana, bo], anaKey } = await sharingRoom(browser, ['Bo']);
+  await pairAgent(ana.page);
+  await expect(ana.page.locator('#agent-status')).toHaveAttribute('data-status', 'paired', { timeout: 10000 });
+  await ana.page.locator('#control-host-modal .modal-title-row button').click();
+  await tile(bo.page, anaKey).locator('.control-request-btn').click();
+  await ana.page.locator('.control-allow-btn').click({ timeout: 10000 });
+  await expect(tile(bo.page, anaKey)).toHaveAttribute('data-control', 'granted', { timeout: 10000 });
+
+  // Switch to game mode, then engage: the pointer is locked and moves are relative.
+  const modeButton = tile(bo.page, anaKey).locator('.control-mode-btn');
+  await expect(modeButton).toHaveAttribute('data-mode', 'desktop');
+  await modeButton.click();
+  await expect(modeButton).toHaveAttribute('data-mode', 'game');
+  const box = await bo.page.locator(`#control-surface-${anaKey}`).boundingBox();
+  await bo.page.mouse.move(box.x + 100, box.y + 100);
+  await bo.page.locator(`#control-surface-${anaKey}`).click({ position: { x: 100, y: 100 } });
+  await expect(tile(bo.page, anaKey)).toHaveAttribute('data-control', 'engaged');
+  expect(await bo.page.evaluate(() => window.__pointerLockRequests)).toBe(1);
+
+  await bo.page.mouse.move(box.x + 150, box.y + 120, { steps: 5 });
+  const events = await waitForEvents((ev) => {
+    const rel = ev.filter((e) => e.k === 'MoveRel');
+    return rel.reduce((sum, e) => sum + e.dx, 0) >= 50;
+  });
+  const rel = events.filter((e) => e.k === 'MoveRel');
+  expect(rel.reduce((sum, e) => sum + e.dx, 0)).toBe(50);
+  expect(rel.reduce((sum, e) => sum + e.dy, 0)).toBe(20);
+  expect(events.some((e) => e.k === 'MoveAbs')).toBe(false);
+  // The sharer's stream switches to smooth motion for games.
+  await expect.poll(() => ana.page.evaluate(() => window.__pcs
+    .flatMap((pc) => pc.getSenders()).map((s) => s.track).find((t) => t && t.kind === 'video')?.contentHint)).toBe('motion');
+
+  // Losing the pointer lock (Esc in a real browser) ends control.
+  await bo.page.evaluate(() => document.exitPointerLock());
+  await expect(tile(bo.page, anaKey)).toHaveAttribute('data-control', 'granted', { timeout: 5000 });
+  for (const m of [ana, bo]) await m.context.close();
 });

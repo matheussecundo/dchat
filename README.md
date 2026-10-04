@@ -137,13 +137,16 @@ Tap **📎**, pick a file, optionally add a caption and send. Everyone in the ro
 
 ### Remote Control
 
-While you share your **entire screen** in the lounge, you can let someone else use your mouse and keyboard. Browsers can't move the mouse or press keys on a computer, so the shared computer runs a small companion app, **`dchat-host`**. For now it supports Linux; Windows and game controllers are coming.
+While you share your **entire screen** in the lounge, you can let someone else use your mouse and keyboard. Browsers can't move the mouse or press keys on a computer, so the shared computer runs a small companion app, **`dchat-host`**. It runs on Linux and Windows; game controllers are coming.
 
 1. **Start dchat-host** on the computer you share: `cargo build -p host-agent --release`, then `target/release/dchat-host --allow-origin https://your-dchat-site`. It prints a one-time code such as `K7QM-4XPA`.
    - Linux: it needs `/dev/uinput`. Install the udev rule once: `sudo cp crates/host-agent/dist/60-dchat-host.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger`, then log out and back in.
+   - Windows: nothing to install. Windows of apps running as administrator (and UAC prompts or the lock screen) can't be controlled unless dchat-host also runs as administrator.
 2. **Connect it**: in voice, tap **🖱️**, type the code and **Connect**. Chrome may ask to allow access to apps on this device: allow it.
 3. **Others ask, you decide**: members watching your screen see **🖱️ Request control** on your tile. You get a prompt with **Allow** / **Deny**. One person at a time has mouse and keyboard; allowing someone new takes it from the previous one.
 4. **Controlling**: click the shared screen to start. Your pointer, clicks, wheel and keys go to the shared computer (keys by position, so the shared computer's keyboard layout applies). **Ctrl+Alt+Shift+Q**, leaving the tab or **Stop controlling** gives control back.
+   - **Desktop mode** (default): you click where you point.
+   - **Game mode** (the 🎮 button on the tile): your mouse is captured and moves the view, as games expect, and the shared video favours smooth motion. Press Esc (or Ctrl+Alt+Shift+Q) to get your mouse back. In fullscreen, Chrome also passes keys like Esc and Alt+Tab to the shared computer; hold Esc to leave.
 5. **Stopping**: **⛔ Stop control** in the lounge bar, the **✕** next to a member, or Enter / Ctrl+C in dchat-host's terminal. Control also ends when you stop sharing, leave voice, or the app disconnects, and everything held down is released.
 
 Security: dchat-host only listens on `127.0.0.1`, only accepts your dchat site, and pairs only with someone who types its code (both sides prove they know it). Your tab forwards input only from the person you allowed, and the app checks that again. Mouse and keyboard give full use of your computer, including allowing others: only allow people you trust.

@@ -278,7 +278,9 @@ impl RoomSession {
                 let rights = control.state.borrow().rights_of(from);
                 self.send_agent_control(from, rights);
                 if let Some(track) = self.local_track("video") {
-                    media::set_content_hint(&track, if *mode == PointerMode::Game { "motion" } else { "detail" });
+                    let game = *mode == PointerMode::Game;
+                    media::set_content_hint(&track, if game { "motion" } else { "detail" });
+                    media::set_frame_rate(&track, if game { 60 } else { 30 });
                 }
             }
         }
@@ -384,6 +386,15 @@ impl RoomSession {
                 self.toast(key);
             }
         }
+        self.refresh_control_ui();
+    }
+
+    /// Desktop (absolute) or game (relative, pointer lock) mouse on `sharer`'s computer.
+    pub fn set_control_mode(&self, sharer: &str, mode: PointerMode) {
+        if let Some(mine) = self.inner.control.mine.borrow_mut().get_mut(sharer) {
+            mine.mode = mode;
+        }
+        self.send_input(sharer, vec![InputEvent::Mode { mode }]);
         self.refresh_control_ui();
     }
 

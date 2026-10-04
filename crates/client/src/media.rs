@@ -124,6 +124,21 @@ pub fn screen_info(track: &MediaStreamTrack) -> ScreenInfo {
     }
 }
 
+/// Ask the capture for a frame rate (best effort: browsers may cap screen capture).
+pub fn set_frame_rate(track: &MediaStreamTrack, fps: u32) {
+    let constraints = js_sys::Object::new();
+    let rate = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&rate, &"ideal".into(), &fps.into());
+    let _ = js_sys::Reflect::set(&constraints, &"frameRate".into(), &rate);
+    if let Ok(apply) = js_sys::Reflect::get(track, &"applyConstraints".into()).and_then(|f| f.dyn_into::<js_sys::Function>()) {
+        if let Ok(promise) = apply.call1(track, &constraints).and_then(|p| p.dyn_into::<js_sys::Promise>()) {
+            let ignore = wasm_bindgen::closure::Closure::once(|_: JsValue| {});
+            let _ = promise.catch(&ignore);
+            ignore.forget();
+        }
+    }
+}
+
 /// `contentHint`: "detail" keeps desktop text sharp, "motion" keeps games smooth.
 pub fn set_content_hint(track: &MediaStreamTrack, hint: &str) {
     let _ = js_sys::Reflect::set(track, &"contentHint".into(), &hint.into());

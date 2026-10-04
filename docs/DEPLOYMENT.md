@@ -230,7 +230,7 @@ Any Nostr relay that forwards ephemeral events (kinds 20000–29999) works, for 
 
 ## 5. Remote control app (dchat-host)
 
-Remote control needs `dchat-host` on the computer being controlled (Linux for now; Windows comes next). Build it with `cargo build -p host-agent --release`; the binary is `target/release/dchat-host`.
+Remote control needs `dchat-host` on the computer being controlled (Linux or Windows). Build it with `cargo build -p host-agent --release` on that system; the binary is `target/release/dchat-host` (`dchat-host.exe` on Windows). Ready-made downloads come with a later release workflow.
 
 It only accepts your dchat site, so tell it the site's address:
 - at run time: `dchat-host --allow-origin https://chat.example.com` (repeatable, or `DCHAT_HOST_ALLOWED_ORIGINS=https://a,https://b`);
@@ -238,7 +238,7 @@ It only accepts your dchat site, so tell it the site's address:
 
 On a GitHub Pages site the origin is `https://<user>.github.io` for all of your repositories; the pairing code still protects the app, but a custom domain keeps it to dchat.
 
-On Linux, install `crates/host-agent/dist/60-dchat-host.rules` (see the README) so it can use `/dev/uinput` without root. It listens on `127.0.0.1:7448` (`--port` to change; the same port goes in dchat's dialog), never on the network.
+On Linux, install `crates/host-agent/dist/60-dchat-host.rules` (see the README) so it can use `/dev/uinput` without root. On Windows it needs nothing extra; to control windows of apps running as administrator, run dchat-host as administrator too. It listens on `127.0.0.1:7448` (`--port` to change; the same port goes in dchat's dialog), never on the network.
 
 ---
 

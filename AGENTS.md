@@ -112,10 +112,10 @@ dchat/
 │   │   │   ├── server.rs       # ws://127.0.0.1 only: Host + Origin checks, mutual pairing, one session, resume, limits
 │   │   │   ├── pairing.rs      # One-time codes, lockout, session token (pure, unit-tested)
 │   │   │   ├── engine.rs       # One thread owns the injector and everything held; releases on every exit path; watchdog
-│   │   │   ├── inject/         # Injector trait; linux.rs (uinput keyboard, absolute pointer, relative mouse); mock.rs (recording)
+│   │   │   ├── inject/         # Injector trait; linux.rs (uinput keyboard, absolute pointer, relative mouse); windows.rs (SendInput); win_input.rs (SendInput records, unit-tested everywhere); mock.rs (recording)
 │   │   │   ├── geometry.rs     # Shared-monitor choice, desktop-wide absolute coordinates (unit-tested)
 │   │   │   ├── keymap.rs       # DomCode → evdev and Windows scan codes (exhaustive, unit-tested)
-│   │   │   ├── monitors/       # Monitor layout (X11 RandR, also through XWayland)
+│   │   │   ├── monitors/       # Monitor layout: X11 RandR (also through XWayland), Windows EnumDisplayMonitors (physical pixels)
 │   │   │   └── config.rs, status.rs, lib.rs, main.rs
 │   │   └── tests/              # agent.rs (WebSockets + recording injector), uinput.rs (real devices where /dev/uinput is writable)
 │   ├── server/                 # Axum dev server: static files + dev TLS + dchat-relay at /nostr
@@ -166,7 +166,7 @@ dchat/
 │       ├── link_renegotiation.spec.js # With every relay cut after linking, voice and video still negotiate over the link
 │       ├── protocol_version.spec.js # Different protocol versions never link; the older member gets a reload banner
 │       ├── room_password.spec.js # Password rooms: link + password, wrong password finds nobody, rekey keeps the password
-│       ├── remote_control.spec.js # dchat-host pairing, request/allow, clicks through letterboxing, one holder, others' raw input dropped, release on shortcut/revoke/link loss, prompts in fullscreen, window shares not offered
+│       ├── remote_control.spec.js # dchat-host pairing, request/allow, clicks through letterboxing, one holder, others' raw input dropped, release on shortcut/revoke/link loss, prompts in fullscreen, window shares not offered, game mode (pointer lock, relative moves, motion hint)
 │       ├── privacy.spec.js     # Sealed handshakes vs the room key, STUN fallback, hideip through a real TURN (node-turn)
 │       ├── audio_call.spec.js  # 2-member lounge audio, mic/speaker mute, leave (replaceTrack null) and rejoin
 │       ├── video_call.spec.js  # Camera tiles, camera flip keeps the mic, camera off, grid teardown
@@ -178,7 +178,8 @@ dchat/
 │   ├── build.yml               # Reusable: Rust + Worker tests, release build, no-hooks check, "site" artifact
 │   ├── pages.yml               # Deploy the site to GitHub Pages on push to main
 │   ├── cloudflare.yml          # Deploy to Cloudflare Workers (skips until CLOUDFLARE_* secrets exist)
-│   └── relay-image.yml         # Publish ghcr.io/<owner>/dchat-relay when the relay changes
+│   ├── relay-image.yml         # Publish ghcr.io/<owner>/dchat-relay when the relay changes
+│   └── host-agent.yml          # dchat-host tests and release build on Linux and Windows
 ├── deploy/relay/               # docker-compose.yml + Caddyfile (automatic wss://), dchat-relay.service (systemd)
 ├── wrangler.jsonc              # Cloudflare Worker: static assets + worker/, ICE_LIMITER rate limit
 ├── worker/
@@ -254,7 +255,8 @@ dchat/
 
 - **Phase 9: Remote Control (in progress)**
   - **9a Desktop control on Linux (Completed)**: protocol v4 (`ControlStatus`/`ControlRequest`/`ControlGrant`/`ControlRelease`, sealed input packets, `DomCode`); `dchat-host` (loopback WebSocket, mutual pairing, engine with release-on-exit and watchdog, uinput backend, X11/XWayland monitor layout); tab ↔ app link; permission prompts that follow fullscreen; desktop-mode mouse and keyboard with letterbox-aware positions; E2E against a recording dchat-host.
-  - **9b Windows and game mode**, **9c controllers**, **9d releases and polish**: planned.
+  - **9b Windows and game mode (Completed)**: `SendInput` backend (scan codes, `VIRTUALDESK` absolute positions, per-monitor DPI awareness, administrator note), Windows monitor layout, `win_input` records unit-tested on every platform, CI on Windows; viewer game mode (pointer lock with `unadjustedMovement`, relative moves, keyboard lock in fullscreen, losing the lock ends control), `Mode` switches the sharer's stream to `contentHint: motion` at 60 fps.
+  - **9c controllers**, **9d releases and polish**: planned.
 
 ---
 
@@ -279,6 +281,11 @@ cargo check -p client --target wasm32-unknown-unknown
 Also check the test-hook build compiles cleanly:
 ```bash
 cargo check -p client --target wasm32-unknown-unknown --features e2e-hooks
+```
+
+And that dchat-host still compiles for Windows (`rustup target add x86_64-pc-windows-gnu` once; CI runs its tests on Windows):
+```bash
+cargo check -p host-agent --target x86_64-pc-windows-gnu --all-targets
 ```
 
 ### Step 3: Trunk Frontend Build

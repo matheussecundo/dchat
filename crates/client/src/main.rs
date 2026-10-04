@@ -20,7 +20,7 @@ use names::{pubkey_tag, random_name, sanitize_name, MAX_NAME_CHARS};
 use protocol::{
     format_relay_list, parse_cap, password_room_key, split_relay_input, stretch_password, RoomParams, VideoKind,
     DEFAULT_MEMBER_CAP, DEFAULT_VIDEO_CAP, DEFAULT_VOICE_CAP, KEY_LENGTH, REACTIONS, ControlWants, MonitorInfo,
-    DEFAULT_AGENT_PORT,
+    DEFAULT_AGENT_PORT, PointerMode,
 };
 use agent::{AgentLink, AgentSignals, AgentStatus};
 use qr::generate_qr_svg;
@@ -398,12 +398,13 @@ fn App() -> impl IntoView {
             return;
         };
         capture.set_value(None);
+        let mode = control.with_untracked(|c| c.mine.get(&sharer).map(|m| m.mode).unwrap_or_default());
         let sink: InputSink = {
             let sharer = sharer.clone();
             Rc::new(move |events| with_session(&|s| s.send_input(&sharer, events.clone())))
         };
         let on_release: Rc<dyn Fn()> = Rc::new(move || disengage());
-        if let Ok(engaged) = InputCapture::engage(&surface, &video, sink, on_release) {
+        if let Ok(engaged) = InputCapture::engage(&surface, &video, mode, sink, on_release) {
             capture.set_value(Some(engaged));
             set_controlling.set(Some(sharer));
         }
@@ -419,6 +420,11 @@ fn App() -> impl IntoView {
             with_session(&|s| s.release_control(&sharer));
         }
         TileControlAction::Engage => engage(sharer),
+        TileControlAction::ToggleMode => {
+            let mode = control.with_untracked(|c| c.mine.get(&sharer).map(|m| m.mode).unwrap_or_default());
+            let next = if mode == PointerMode::Game { PointerMode::Desktop } else { PointerMode::Game };
+            with_session(&|s| s.set_control_mode(&sharer, next));
+        }
     };
     // Rights gone (revoked, taken over, share ended): stop capturing right away.
     create_effect(move |_| {
@@ -1937,6 +1943,7 @@ enum TileControlAction {
     Request,
     Release,
     Engage,
+    ToggleMode,
 }
 
 /// What a viewer can do with a shared screen's tile.
@@ -1998,6 +2005,10 @@ fn video_tile(
         })
     };
     let has_surface = create_memo(move |_| matches!(tile_control.get(), TileControl::Granted | TileControl::Engaged));
+    let my_mode = {
+        let pk = pk.clone();
+        create_memo(move |_| control.with(|c| c.mine.get(&pk).map(|m| m.mode).unwrap_or_default()))
+    };
     let holder = {
         let pk = pk.clone();
         move || {
@@ -2047,6 +2058,7 @@ fn video_tile(
             </button>
             {move || {
                 let pk = pk_bar.clone();
+                my_mode.track();
                 match tile_control.get() {
                     TileControl::Offer => view! {
                         <div class="control-bar">
@@ -2063,13 +2075,26 @@ fn video_tile(
                             </button>
                         </div>
                     }.into_view(),
-                    TileControl::Granted => view! {
-                        <div class="control-bar">
-                            <button class="btn btn-sm btn-secondary control-release-btn" on:click=move |_| on_control(pk.clone(), TileControlAction::Release)>
-                                {move || t(lang.get(), "btn_release_control")}
-                            </button>
-                        </div>
-                    }.into_view(),
+                    TileControl::Granted => {
+                        let pk_mode = pk.clone();
+                        let mode = control.with_untracked(|c| c.mine.get(&pk).map(|m| m.mode).unwrap_or_default());
+                        let game = mode == PointerMode::Game;
+                        view! {
+                            <div class="control-bar">
+                                <button class="btn btn-sm btn-secondary control-release-btn" on:click=move |_| on_control(pk.clone(), TileControlAction::Release)>
+                                    {move || t(lang.get(), "btn_release_control")}
+                                </button>
+                                <button
+                                    class="btn btn-sm btn-secondary control-mode-btn"
+                                    data-mode=if game { "game" } else { "desktop" }
+                                    title=move || t(lang.get(), "control_mode_title")
+                                    on:click=move |_| on_control(pk_mode.clone(), TileControlAction::ToggleMode)
+                                >
+                                    {move || if game { t(lang.get(), "control_mode_game") } else { t(lang.get(), "control_mode_desktop") }}
+                                </button>
+                            </div>
+                        }.into_view()
+                    }
                     TileControl::Engaged | TileControl::Hidden => ().into_view(),
                 }
             }}
