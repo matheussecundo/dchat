@@ -20,6 +20,7 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 * **Dual-Layer E2EE**: In addition to standard WebRTC DTLS, messages and signaling envelopes are encrypted with **ChaCha20-Poly1305** using the URL fragment key. Relays are completely blind to message contents.
 * **Instant Destruction**: Reloading the page or closing the tab wipes linear memory, destroys the WebRTC connection, and permanently erases all history.
 * **Service Worker Caching**: Caches immutable application shell assets (`.wasm`, `.js`, `.css`) for instant loading, while never storing session or user data.
+* **Remote Control**: While you share your screen, the members you allow can control your mouse and keyboard, TeamViewer-style. A small companion app, `dchat-host`, does the input on your computer; nobody gets control without your click.
 * **Instant Mobile Testing**: Built-in dev HTTPS server auto-generates TLS certificates, includes an in-memory mock Nostr relay, and displays an ASCII QR code in the terminal for instant phone pairing on local Wi-Fi.
 
 ---
@@ -83,6 +84,9 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
    - **8d Moderation & history (Completed)**: admins can kick a member or move everyone to a new link (the room ID and key change, sealed to each remaining member); opt-in history so late joiners see the last 200 messages.
    - **8e Chat extras (Completed)**: typing indicator, emoji reactions, editing and deleting your own messages, private DMs sealed end-to-end between two members, and @mentions with a highlight, a title badge and a chime.
 
+9. **Phase 9: Remote Control (in progress)**
+   - **9a Desktop control on Linux (Completed)**: let members you allow control your mouse and keyboard while you share your screen, through the `dchat-host` companion app. Windows, game mode and controllers come next.
+
 ---
 
 ## Group Rooms
@@ -130,6 +134,19 @@ Tap **📎**, pick a file, optionally add a caption and send. Everyone in the ro
 - **Decline** just hides the buttons for you. The sender can **Withdraw** the offer for everyone, which also stops transfers in progress.
 - Downloads stream to disk when the browser supports the File System Access API; otherwise they are assembled in memory (with a warning above 250 MB).
 - If you have no direct link to the sender (`via` in the member list), the card says *Sender not directly reachable*. If the sender leaves, pending offers are marked unavailable and running transfers stop.
+
+### Remote Control
+
+While you share your **entire screen** in the lounge, you can let someone else use your mouse and keyboard. Browsers can't move the mouse or press keys on a computer, so the shared computer runs a small companion app, **`dchat-host`**. For now it supports Linux; Windows and game controllers are coming.
+
+1. **Start dchat-host** on the computer you share: `cargo build -p host-agent --release`, then `target/release/dchat-host --allow-origin https://your-dchat-site`. It prints a one-time code such as `K7QM-4XPA`.
+   - Linux: it needs `/dev/uinput`. Install the udev rule once: `sudo cp crates/host-agent/dist/60-dchat-host.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger`, then log out and back in.
+2. **Connect it**: in voice, tap **🖱️**, type the code and **Connect**. Chrome may ask to allow access to apps on this device: allow it.
+3. **Others ask, you decide**: members watching your screen see **🖱️ Request control** on your tile. You get a prompt with **Allow** / **Deny**. One person at a time has mouse and keyboard; allowing someone new takes it from the previous one.
+4. **Controlling**: click the shared screen to start. Your pointer, clicks, wheel and keys go to the shared computer (keys by position, so the shared computer's keyboard layout applies). **Ctrl+Alt+Shift+Q**, leaving the tab or **Stop controlling** gives control back.
+5. **Stopping**: **⛔ Stop control** in the lounge bar, the **✕** next to a member, or Enter / Ctrl+C in dchat-host's terminal. Control also ends when you stop sharing, leave voice, or the app disconnects, and everything held down is released.
+
+Security: dchat-host only listens on `127.0.0.1`, only accepts your dchat site, and pairs only with someone who types its code (both sides prove they know it). Your tab forwards input only from the person you allowed, and the app checks that again. Mouse and keyboard give full use of your computer, including allowing others: only allow people you trust.
 
 ### URL Fragment Parameters
 

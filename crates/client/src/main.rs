@@ -1,3 +1,4 @@
+mod agent;
 mod i18n;
 mod ice;
 mod layout;
@@ -6,6 +7,7 @@ mod mesh;
 mod names;
 mod nostr_pool;
 mod qr;
+mod remote_input;
 mod session;
 mod state;
 
@@ -17,15 +19,19 @@ use leptos::*;
 use names::{pubkey_tag, random_name, sanitize_name, MAX_NAME_CHARS};
 use protocol::{
     format_relay_list, parse_cap, password_room_key, split_relay_input, stretch_password, RoomParams, VideoKind,
-    DEFAULT_MEMBER_CAP, DEFAULT_VIDEO_CAP, DEFAULT_VOICE_CAP, KEY_LENGTH, REACTIONS,
+    DEFAULT_MEMBER_CAP, DEFAULT_VIDEO_CAP, DEFAULT_VOICE_CAP, KEY_LENGTH, REACTIONS, ControlWants, MonitorInfo,
+    DEFAULT_AGENT_PORT,
 };
+use agent::{AgentLink, AgentSignals, AgentStatus};
 use qr::generate_qr_svg;
+use remote_input::{InputCapture, InputSink};
+use std::rc::Rc;
 use session::{RoomSession, SessionSignals};
 use state::{
     admin_url, create_room, current_fragment, format_file_size, fragment_relay_choice, invite_url, read_credentials,
     AudioSettings, RelayMode,
     ChatMessageUi, ConnectionStatus, DmUi, FileOfferInfo, FileTransferStatus, LinkUi,
-    LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RekeyTarget, RoomCaps,
+    LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RekeyTarget, RoomCaps, ControlUi, ControlPromptUi,
 };
 use std::collections::{HashMap, HashSet};
 use wasm_bindgen::JsCast;
@@ -104,6 +110,24 @@ fn App() -> impl IntoView {
     let (room_id_sig, set_room_id_sig) = create_signal(String::new());
     let (toast, set_toast) = create_signal(Option::<&'static str>::None);
     let (update_required, set_update_required) = create_signal(false);
+
+    // Remote control: the paired dchat-host app (app level: it survives a room rekey) and
+    // which shared screen this tab is controlling right now.
+    let (control, set_control) = create_signal(ControlUi::default());
+    let (agent_status, set_agent_status) = create_signal(AgentStatus::Off);
+    let (agent_monitors, set_agent_monitors) = create_signal(None::<(Vec<MonitorInfo>, Option<u32>)>);
+    let (agent_warning, set_agent_warning) = create_signal(None::<String>);
+    let agent_link = store_value(None::<Rc<AgentLink>>);
+    let (show_control_host, set_show_control_host) = create_signal(false);
+    let (agent_port_input, set_agent_port_input) = create_signal(DEFAULT_AGENT_PORT.to_string());
+    let (agent_code_input, set_agent_code_input) = create_signal(String::new());
+    let (allow_control, set_allow_control) = create_signal(true);
+    let (controlling, set_controlling) = create_signal(None::<String>);
+    let capture = store_value(None::<InputCapture>);
+    // Toasts and control prompts live in one layer that moves into whatever element is in
+    // fullscreen, so they stay visible there.
+    let overlay_ref = create_node_ref::<leptos::html::Div>();
+    let overlay_home = store_value(None::<web_sys::Node>);
     let (no_turn, set_no_turn) = create_signal(false);
 
     // Voice lounge
@@ -162,11 +186,14 @@ fn App() -> impl IntoView {
             dm_unread: set_dm_unread,
             update_required: set_update_required,
             no_turn: set_no_turn,
+            control: set_control,
         };
         set_room_id_sig.set(room_id.clone());
         match RoomSession::start(room_id, key, my_name.get_value(), signals, migrated, host_ice.get_value()) {
             Ok(session) => {
                 session_ref.set_value(Some(session.clone()));
+                session.set_allow_control(allow_control.get_untracked());
+                session.attach_agent(agent_link.get_value());
                 set_screen.set(Screen::Room);
                 Some(session)
             }
@@ -324,6 +351,84 @@ fn App() -> impl IntoView {
             }
         });
     };
+
+    // ---- Remote control ------------------------------------------------------------------
+    let connect_agent = move || {
+        let code = agent_code_input.get_untracked();
+        if code.trim().is_empty() {
+            return;
+        }
+        let port = agent_port_input.get_untracked().trim().parse::<u16>().unwrap_or(DEFAULT_AGENT_PORT);
+        if let Some(old) = agent_link.get_value() {
+            old.disconnect();
+        }
+        let signals = AgentSignals { status: set_agent_status, monitors: set_agent_monitors, warning: set_agent_warning };
+        let link = AgentLink::connect(port, &code, signals);
+        agent_link.set_value(Some(link.clone()));
+        set_agent_code_input.set(String::new());
+        with_session(&|s| s.attach_agent(Some(link.clone())));
+    };
+    let disconnect_agent = move || {
+        if let Some(link) = agent_link.get_value() {
+            link.disconnect();
+        }
+        agent_link.set_value(None);
+        set_agent_monitors.set(None);
+        with_session(&|s| s.attach_agent(None));
+    };
+    let open_control_host = move |_| {
+        if let Some(doc) = window().and_then(|w| w.document()) {
+            if doc.fullscreen_element().is_some() {
+                doc.exit_fullscreen();
+            }
+        }
+        set_show_control_host.set(true);
+    };
+    let disengage = move || {
+        capture.set_value(None);
+        set_controlling.set(None);
+    };
+    let engage = move |sharer: String| {
+        let Some(doc) = window().and_then(|w| w.document()) else {
+            return;
+        };
+        let surface = doc.get_element_by_id(&format!("control-surface-{sharer}")).and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok());
+        let video = doc.get_element_by_id(&format!("tile-video-{sharer}")).and_then(|e| e.dyn_into::<web_sys::HtmlVideoElement>().ok());
+        let (Some(surface), Some(video)) = (surface, video) else {
+            return;
+        };
+        capture.set_value(None);
+        let sink: InputSink = {
+            let sharer = sharer.clone();
+            Rc::new(move |events| with_session(&|s| s.send_input(&sharer, events.clone())))
+        };
+        let on_release: Rc<dyn Fn()> = Rc::new(move || disengage());
+        if let Ok(engaged) = InputCapture::engage(&surface, &video, sink, on_release) {
+            capture.set_value(Some(engaged));
+            set_controlling.set(Some(sharer));
+        }
+    };
+    let on_tile_control = move |sharer: String, action: TileControlAction| match action {
+        TileControlAction::Request => {
+            with_session(&|s| s.request_control(&sharer, ControlWants { mouse_keyboard: true, controller: false }));
+        }
+        TileControlAction::Release => {
+            if controlling.get_untracked().as_deref() == Some(sharer.as_str()) {
+                disengage();
+            }
+            with_session(&|s| s.release_control(&sharer));
+        }
+        TileControlAction::Engage => engage(sharer),
+    };
+    // Rights gone (revoked, taken over, share ended): stop capturing right away.
+    create_effect(move |_| {
+        let Some(sharer) = controlling.get() else {
+            return;
+        };
+        if !control.with(|c| c.mine.get(&sharer).is_some_and(|m| m.mouse_keyboard)) {
+            disengage();
+        }
+    });
     let join_voice = move |_| {
         set_voice_prompt.set(None);
         with_session(&|s| s.join_voice());
@@ -371,6 +476,23 @@ fn App() -> impl IntoView {
         let on_change = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
             let active = window().and_then(|w| w.document()).is_some_and(|d| d.fullscreen_element().is_some());
             set_fullscreen_on.set(active);
+            if let (Some(overlay), Some(doc)) = (overlay_ref.get_untracked(), window().and_then(|w| w.document())) {
+                let overlay: &web_sys::HtmlDivElement = &overlay;
+                let node: web_sys::Node = overlay.clone().into();
+                match doc.fullscreen_element() {
+                    Some(fullscreen) => {
+                        if overlay_home.get_value().is_none() {
+                            overlay_home.set_value(node.parent_node());
+                        }
+                        let _ = fullscreen.append_child(&node);
+                    }
+                    None => {
+                        if let Some(home) = overlay_home.get_value() {
+                            let _ = home.append_child(&node);
+                        }
+                    }
+                }
+            }
         }) as Box<dyn FnMut()>);
         let on_key = wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::KeyboardEvent| {
             if ev.key() == "Escape" && grid_expanded.get_untracked() {
@@ -1084,6 +1206,22 @@ fn App() -> impl IntoView {
                     >
                         "⚙️"
                     </button>
+                    {move || my_voice.get().in_voice.then(|| view! {
+                        <button
+                            id="control-host-btn"
+                            class="btn btn-secondary"
+                            class:active=move || control.with(|c| c.hosting)
+                            title=move || t(lang.get(), "btn_control_host_title")
+                            on:click=open_control_host
+                        >
+                            "🖱️"
+                        </button>
+                    })}
+                    {move || control.with(|c| c.hosting && (c.host_mouse_keyboard.is_some() || c.host_pads.iter().any(Option::is_some))).then(|| view! {
+                        <button id="stop-control-btn" class="btn btn-danger btn-sm" on:click=move |_| with_session(&|s| s.stop_all_control())>
+                            {move || t(lang.get(), "btn_stop_control")}
+                        </button>
+                    })}
                 </div>
             </div>
 
@@ -1108,6 +1246,22 @@ fn App() -> impl IntoView {
                         {move || t(lang.get(), "btn_reload")}
                     </button>
                 </div>
+            })}
+
+            {move || controlling.get().map(|sharer| {
+                let name = names.with(|n| n.get(&sharer).cloned()).unwrap_or_else(|| pubkey_tag(&sharer));
+                view! {
+                    <div id="controlling-bar" class="voice-prompt controlling-bar">
+                        <span>{move || format!("🖱️ {} · {}", t_replace_1(lang.get(), "control_controlling", "{name}", &name), t(lang.get(), "control_engaged_hint"))}</span>
+                        <button
+                            id="controlling-release-btn"
+                            class="btn btn-secondary btn-sm"
+                            on:click=move |_| on_tile_control(sharer.clone(), TileControlAction::Release)
+                        >
+                            {move || t(lang.get(), "btn_release_control")}
+                        </button>
+                    </div>
+                }
             })}
 
             {move || voice_prompt.get().filter(|_| !my_voice.get().in_voice).map(|name| view! {
@@ -1135,7 +1289,7 @@ fn App() -> impl IntoView {
                     <For
                         each=video_members
                         key=|m| (m.pubkey.clone(), m.video)
-                        children=move |m| video_tile(lang, m, lounge, speaking, toggle_fullscreen)
+                        children=move |m| video_tile(lang, m, lounge, speaking, toggle_fullscreen, control, controlling, names, on_tile_control)
                     />
                     <button
                         class="btn btn-secondary grid-fullscreen"
@@ -1189,7 +1343,7 @@ fn App() -> impl IntoView {
                         <For
                             each=move || members.get()
                             key=|m| (m.pubkey.clone(), m.name.clone(), m.is_admin, m.link.clone())
-                            children=move |m| member_row(lang, m, am_admin, kick_member, dm_unread, open_dm)
+                            children=move |m| member_row(lang, m, am_admin, kick_member, dm_unread, open_dm, control, move |pk: String| with_session(&|s| s.revoke_control(&pk)))
                         />
                     </ul>
                 </aside>
@@ -1497,6 +1651,107 @@ fn App() -> impl IntoView {
                 }
             })}
 
+            // Remote control of this computer (the sharer's side)
+            {move || show_control_host.get().then(|| view! {
+                <div class="modal-backdrop" on:click=move |_| set_show_control_host.set(false)>
+                    <div id="control-host-modal" class="modal-content control-host-modal" on:click=|ev| ev.stop_propagation()>
+                        <div class="modal-title-row">
+                            <h3>{move || t(lang.get(), "control_host_title")}</h3>
+                            <button class="btn btn-secondary" on:click=move |_| set_show_control_host.set(false)>"✕"</button>
+                        </div>
+                        <p class="modal-subtext">{move || t(lang.get(), "control_host_desc")}</p>
+                        <p id="agent-status" class="agent-status" data-status=move || agent_status.with(|s| s.key())>
+                            {move || t(lang.get(), agent_status_key(&agent_status.get()))}
+                        </p>
+                        {move || (!agent_status.with(AgentStatus::is_paired)).then(|| view! {
+                            <div class="agent-connect">
+                                <label class="lobby-label" for="agent-code-input">{move || t(lang.get(), "agent_code_label")}</label>
+                                <input
+                                    id="agent-code-input"
+                                    class="lobby-input"
+                                    type="text"
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                    autocapitalize="characters"
+                                    placeholder="K7QM-4XPA"
+                                    prop:value=move || agent_code_input.get()
+                                    on:input=move |ev| set_agent_code_input.set(event_target_value(&ev))
+                                    on:keydown=move |ev| if ev.key() == "Enter" { connect_agent() }
+                                />
+                                <label class="lobby-label" for="agent-port-input">{move || t(lang.get(), "agent_port_label")}</label>
+                                <input
+                                    id="agent-port-input"
+                                    class="lobby-input"
+                                    type="number"
+                                    min="1"
+                                    max="65535"
+                                    autocomplete="off"
+                                    prop:value=move || agent_port_input.get()
+                                    on:input=move |ev| set_agent_port_input.set(event_target_value(&ev))
+                                />
+                                <button
+                                    id="agent-connect-btn"
+                                    class="btn btn-primary"
+                                    disabled=move || agent_code_input.get().trim().is_empty()
+                                    on:click=move |_| connect_agent()
+                                >
+                                    {move || t(lang.get(), "btn_agent_connect")}
+                                </button>
+                            </div>
+                        })}
+                        {move || agent_status.with(AgentStatus::is_paired).then(|| view! {
+                            <div class="agent-paired">
+                                {move || agent_status.with(|s| match s {
+                                    AgentStatus::Paired { caps, .. } => caps.mouse_keyboard_error.clone(),
+                                    _ => None,
+                                }).map(|err| view! {
+                                    <p class="lobby-warning">{move || t_replace_1(lang.get(), "agent_kbm_unavailable", "{error}", &err)}</p>
+                                })}
+                                <label class="lobby-check" for="allow-control-toggle">
+                                    <input
+                                        type="checkbox"
+                                        id="allow-control-toggle"
+                                        prop:checked=move || allow_control.get()
+                                        on:change=move |ev| {
+                                            let on = event_target_checked(&ev);
+                                            set_allow_control.set(on);
+                                            with_session(&|s| s.set_allow_control(on));
+                                        }
+                                    />
+                                    <span>{move || t(lang.get(), "allow_control_label")}</span>
+                                </label>
+                                <p id="control-host-state" class="lobby-hint" data-hosting=move || control.with(|c| c.hosting).to_string()>
+                                    {move || if control.with(|c| c.hosting) { t(lang.get(), "control_hosting") } else { t(lang.get(), "control_needs_screen") }}
+                                </p>
+                                {move || agent_monitors.get().filter(|(list, _)| list.len() > 1).map(|(list, chosen)| view! {
+                                    <label class="lobby-label" for="agent-monitor">{move || t(lang.get(), "control_monitor_label")}</label>
+                                    <select
+                                        id="agent-monitor"
+                                        class="lobby-input"
+                                        on:change=move |ev| {
+                                            if let Ok(id) = event_target_value(&ev).parse::<u32>() {
+                                                with_session(&|s| s.use_monitor(id));
+                                            }
+                                        }
+                                    >
+                                        {chosen.is_none().then(|| view! { <option value="" selected=true>"—"</option> })}
+                                        {list.into_iter().map(|m| view! {
+                                            <option value=m.id.to_string() selected=chosen == Some(m.id)>
+                                                {format!("{} ({}×{})", m.name, m.width, m.height)}
+                                            </option>
+                                        }).collect_view()}
+                                    </select>
+                                })}
+                                <button id="agent-disconnect-btn" class="btn btn-secondary" on:click=move |_| disconnect_agent()>
+                                    {move || t(lang.get(), "btn_agent_disconnect")}
+                                </button>
+                            </div>
+                        })}
+                        {move || agent_warning.get().map(|warning| view! { <p class="lobby-warning agent-warning">{warning}</p> })}
+                    </div>
+                </div>
+            })}
+
             // Large file notice (no direct-to-disk streaming in this browser)
             {move || large_file_warning.get().map(|(file_id, name)| view! {
                 <div class="modal-backdrop">
@@ -1522,10 +1777,21 @@ fn App() -> impl IntoView {
                 </div>
             })}
 
-            {move || toast.get().map(|key| {
-                set_timeout(move || set_toast.set(None), std::time::Duration::from_secs(3));
-                view! { <div class="toast">{move || t(lang.get(), key)}</div> }
-            })}
+            <div id="overlay-layer" class="overlay-layer" node_ref=overlay_ref>
+                <div id="control-prompts" class="control-prompts">
+                    <For
+                        each=move || control.get().prompts
+                        key=|p| p.clone()
+                        children=move |p| control_prompt(lang, p, names, move |member: String, allow: bool| {
+                            with_session(&|s| if allow { s.grant_control(&member) } else { s.deny_control(&member) });
+                        })
+                    />
+                </div>
+                {move || toast.get().map(|key| {
+                    set_timeout(move || set_toast.set(None), std::time::Duration::from_secs(3));
+                    view! { <div class="toast">{move || t(lang.get(), key)}</div> }
+                })}
+            </div>
         </div>
     }
 }
@@ -1666,27 +1932,112 @@ fn voice_chip(lang: ReadSignal<Language>, member: LoungeMemberUi, speaking: Read
 }
 
 /// A video tile in the lounge grid; the session attaches the stream by element id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TileControlAction {
+    Request,
+    Release,
+    Engage,
+}
+
+/// What a viewer can do with a shared screen's tile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TileControl {
+    Hidden,
+    Offer,
+    Requested,
+    Granted,
+    Engaged,
+}
+
+impl TileControl {
+    fn key(self) -> &'static str {
+        match self {
+            TileControl::Hidden => "none",
+            TileControl::Offer => "offer",
+            TileControl::Requested => "requested",
+            TileControl::Granted => "granted",
+            TileControl::Engaged => "engaged",
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn video_tile(
     lang: ReadSignal<Language>,
     member: LoungeMemberUi,
     lounge: ReadSignal<Vec<LoungeMemberUi>>,
     speaking: ReadSignal<HashSet<String>>,
     on_fullscreen: impl Fn(Option<String>) + Copy + 'static,
+    control: ReadSignal<ControlUi>,
+    controlling: ReadSignal<Option<String>>,
+    names: ReadSignal<HashMap<String, String>>,
+    on_control: impl Fn(String, TileControlAction) + Copy + 'static,
 ) -> impl IntoView {
     let pk_speaking = member.pubkey.clone();
     let pk_mic = member.pubkey.clone();
     let pk_dbl = member.pubkey.clone();
     let pk_btn = member.pubkey.clone();
     let is_self = member.is_self;
+    let pk = member.pubkey.clone();
+    let controllable = !is_self && member.video == VideoKind::Screen;
+    // Memos, so the capture surface is only rebuilt when control really starts or stops.
+    let tile_control = {
+        let pk = pk.clone();
+        create_memo(move |_| {
+            if !controllable {
+                return TileControl::Hidden;
+            }
+            let (offered, mine) = control.with(|c| (c.offers.contains_key(&pk), c.mine.get(&pk).copied()));
+            match mine {
+                Some(m) if m.mouse_keyboard && controlling.with(|c| c.as_deref() == Some(pk.as_str())) => TileControl::Engaged,
+                Some(m) if m.mouse_keyboard => TileControl::Granted,
+                Some(m) if m.requested => TileControl::Requested,
+                _ if offered => TileControl::Offer,
+                _ => TileControl::Hidden,
+            }
+        })
+    };
+    let has_surface = create_memo(move |_| matches!(tile_control.get(), TileControl::Granted | TileControl::Engaged));
+    let holder = {
+        let pk = pk.clone();
+        move || {
+            control
+                .with(|c| c.offers.get(&pk).and_then(|o| o.mouse_keyboard.clone()))
+                .map(|h| names.with(|n| n.get(&h).cloned()).unwrap_or_else(|| pubkey_tag(&h)))
+        }
+    };
+    let pk_surface = pk.clone();
+    let pk_bar = pk.clone();
     view! {
         <div
             id=format!("tile-{}", member.pubkey)
             class="tile"
             class:speaking=move || speaking.with(|s| s.contains(&pk_speaking))
             data-pubkey=member.pubkey.clone()
+            data-control=move || tile_control.get().key()
             on:dblclick=move |_| on_fullscreen(Some(pk_dbl.clone()))
         >
             <video id=format!("tile-video-{}", member.pubkey) autoplay playsinline muted></video>
+            {move || has_surface.get().then(|| {
+                let pk = pk_surface.clone();
+                view! {
+                    <div
+                        id=format!("control-surface-{pk}")
+                        class="control-surface"
+                        tabindex="0"
+                        data-engaged=move || (tile_control.get() == TileControl::Engaged).to_string()
+                        on:click=move |_| {
+                            if tile_control.get_untracked() == TileControl::Granted {
+                                on_control(pk.clone(), TileControlAction::Engage);
+                            }
+                        }
+                    >
+                        {move || (tile_control.get() == TileControl::Granted).then(|| view! {
+                            <span class="control-hint">{move || t(lang.get(), "control_click_to_start")}</span>
+                        })}
+                    </div>
+                }
+            })}
             <button
                 class="tile-fullscreen"
                 title=move || t(lang.get(), "title_fullscreen")
@@ -1694,11 +2045,96 @@ fn video_tile(
             >
                 "⛶"
             </button>
+            {move || {
+                let pk = pk_bar.clone();
+                match tile_control.get() {
+                    TileControl::Offer => view! {
+                        <div class="control-bar">
+                            <button class="btn btn-sm btn-call control-request-btn" on:click=move |_| on_control(pk.clone(), TileControlAction::Request)>
+                                {move || t(lang.get(), "btn_request_control")}
+                            </button>
+                        </div>
+                    }.into_view(),
+                    TileControl::Requested => view! {
+                        <div class="control-bar">
+                            <span class="control-waiting">{move || t(lang.get(), "control_waiting")}</span>
+                            <button class="btn btn-sm btn-secondary control-cancel-btn" on:click=move |_| on_control(pk.clone(), TileControlAction::Release)>
+                                {move || t(lang.get(), "btn_cancel")}
+                            </button>
+                        </div>
+                    }.into_view(),
+                    TileControl::Granted => view! {
+                        <div class="control-bar">
+                            <button class="btn btn-sm btn-secondary control-release-btn" on:click=move |_| on_control(pk.clone(), TileControlAction::Release)>
+                                {move || t(lang.get(), "btn_release_control")}
+                            </button>
+                        </div>
+                    }.into_view(),
+                    TileControl::Engaged | TileControl::Hidden => ().into_view(),
+                }
+            }}
             <span class="tile-label">
                 <span dir="auto">{member.name}</span>
                 {move || is_self.then(|| format!(" {}", t(lang.get(), "you_suffix")))}
                 {move || lounge.with(|l| l.iter().any(|m| m.pubkey == pk_mic && m.mic_muted)).then(|| " 🔇")}
+                {move || holder().map(|name| view! { <span class="control-holder">{format!(" · 🖱️ {name}")}</span> })}
             </span>
+        </div>
+    }
+}
+
+fn agent_status_key(status: &AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Off => "agent_status_off",
+        AgentStatus::Connecting => "agent_status_connecting",
+        AgentStatus::Paired { .. } => "agent_status_paired",
+        AgentStatus::WrongCode => "agent_status_wrong_code",
+        AgentStatus::Locked { .. } => "agent_status_locked",
+        AgentStatus::Busy => "agent_status_busy",
+        AgentStatus::Unreachable => "agent_status_unreachable",
+        AgentStatus::VersionMismatch => "agent_status_version",
+        AgentStatus::NotTheApp => "agent_status_not_the_app",
+        AgentStatus::Stopped => "agent_status_stopped",
+    }
+}
+
+/// A member asks to control this computer: Allow or Deny.
+fn control_prompt(
+    lang: ReadSignal<Language>,
+    prompt: ControlPromptUi,
+    names: ReadSignal<HashMap<String, String>>,
+    on_answer: impl Fn(String, bool) + Copy + 'static,
+) -> impl IntoView {
+    let label = move |pk: &str| {
+        let name = names.with_untracked(|n| n.get(pk).cloned()).unwrap_or_default();
+        format!("{name} · {}", pubkey_tag(pk))
+    };
+    let who = label(&prompt.member);
+    let who_pad = who.clone();
+    let takes_over = prompt.takes_over.as_deref().map(label);
+    let (allow_pk, deny_pk) = (prompt.member.clone(), prompt.member.clone());
+    view! {
+        <div class="control-prompt" role="alertdialog" data-pubkey=prompt.member.clone()>
+            {prompt.mouse_keyboard.then(|| view! {
+                <p class="control-prompt-text">{move || t_replace_1(lang.get(), "control_prompt_kbm", "{name}", &who)}</p>
+            })}
+            {(prompt.controller && !prompt.mouse_keyboard).then(|| view! {
+                <p class="control-prompt-text">{move || t_replace_1(lang.get(), "control_prompt_pad", "{name}", &who_pad)}</p>
+            })}
+            {takes_over.map(|name| view! {
+                <p class="control-prompt-note">{move || t_replace_1(lang.get(), "control_prompt_takes_over", "{name}", &name)}</p>
+            })}
+            {prompt.mouse_keyboard.then(|| view! {
+                <p class="control-prompt-warning">{move || t(lang.get(), "control_prompt_warning")}</p>
+            })}
+            <div class="control-prompt-actions">
+                <button class="btn btn-call btn-sm control-allow-btn" on:click=move |_| on_answer(allow_pk.clone(), true)>
+                    {move || t(lang.get(), "btn_allow")}
+                </button>
+                <button class="btn btn-secondary btn-sm control-deny-btn" on:click=move |_| on_answer(deny_pk.clone(), false)>
+                    {move || t(lang.get(), "btn_deny")}
+                </button>
+            </div>
         </div>
     }
 }
@@ -1731,6 +2167,7 @@ fn audio_option_row(
 
 /// One member in the side panel: name, key tag, admin badge, how we reach them, and a
 /// Kick button for admins.
+#[allow(clippy::too_many_arguments)]
 fn member_row(
     lang: ReadSignal<Language>,
     member: MemberUi,
@@ -1738,7 +2175,19 @@ fn member_row(
     on_kick: impl Fn(String, String) + Copy + 'static,
     dm_unread: ReadSignal<HashMap<String, usize>>,
     on_dm: impl Fn(String) + Copy + 'static,
+    control: ReadSignal<ControlUi>,
+    on_revoke: impl Fn(String) + Copy + 'static,
 ) -> impl IntoView {
+    let control_pk = member.pubkey.clone();
+    // What this member controls on this computer (shown to the sharer, with a revoke button).
+    let controls_here = move || {
+        control.with(|c| {
+            let kbm = c.host_mouse_keyboard.as_deref() == Some(control_pk.as_str());
+            let pad = c.host_pads.iter().position(|p| p.as_deref() == Some(control_pk.as_str()));
+            (kbm || pad.is_some()).then_some((kbm, pad))
+        })
+    };
+    let revoke_pk = member.pubkey.clone();
     let kickable = member.link != LinkUi::Me && !member.is_admin;
     let dm_target = (member.link != LinkUi::Me).then(|| member.pubkey.clone());
     let kick_target = (member.pubkey.clone(), member.name.clone());
@@ -1782,6 +2231,26 @@ fn member_row(
                             let n = dm_unread.with(|u| u.get(&unread_key).copied().unwrap_or(0));
                             (n > 0).then(|| view! { <span class="dm-unread">{n}</span> })
                         }}
+                    </button>
+                }
+            })}
+            {move || controls_here().map(|(kbm, pad)| {
+                let pk = revoke_pk.clone();
+                let mut badge = String::new();
+                if kbm {
+                    badge.push_str("🖱️");
+                }
+                if let Some(slot) = pad {
+                    badge.push_str(&format!("🎮P{}", slot + 1));
+                }
+                view! {
+                    <span class="control-badge" data-kind=if kbm { "kbm" } else { "pad" }>{badge}</span>
+                    <button
+                        class="btn btn-sm btn-secondary control-revoke-btn"
+                        title=move || t(lang.get(), "title_revoke_control")
+                        on:click=move |_| on_revoke(pk.clone())
+                    >
+                        "✕"
                     </button>
                 }
             })}

@@ -1,0 +1,5 @@
+# dchat-host: let the logged-in user create virtual input devices (keyboard, mouse,
+# controllers) through /dev/uinput, without running anything as root.
+# Install:  sudo cp 60-dchat-host.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
+# "uaccess" grants access to whoever is logged in at the seat, and only while they are.
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"

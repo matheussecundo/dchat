@@ -31,9 +31,46 @@ pub fn fit_grid(count: usize, width: f64, height: f64, gap: f64) -> GridFit {
     best
 }
 
+/// Where a video's picture sits inside a `box_w` × `box_h` element with
+/// `object-fit: contain`: (left, top, width, height), letterbox bands excluded.
+pub fn contain_rect(box_w: f64, box_h: f64, video_w: f64, video_h: f64) -> (f64, f64, f64, f64) {
+    if box_w <= 0.0 || box_h <= 0.0 || video_w <= 0.0 || video_h <= 0.0 {
+        return (0.0, 0.0, box_w.max(0.0), box_h.max(0.0));
+    }
+    let scale = (box_w / video_w).min(box_h / video_h);
+    let (w, h) = (video_w * scale, video_h * scale);
+    ((box_w - w) / 2.0, (box_h - h) / 2.0, w, h)
+}
+
+/// A point in the element (from its top-left corner) as fractions of the picture; outside
+/// 0..=1 in the letterbox bands (the caller clamps, so the bands reach the screen's edges).
+pub fn picture_fraction(x: f64, y: f64, picture: (f64, f64, f64, f64)) -> (f64, f64) {
+    let (left, top, w, h) = picture;
+    if w <= 0.0 || h <= 0.0 {
+        return (0.0, 0.0);
+    }
+    ((x - left) / w, (y - top) / h)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_letterboxed_picture_positions() {
+        // A 16:9 screen in a square tile: bands above and below.
+        let picture = contain_rect(800.0, 800.0, 1920.0, 1080.0);
+        assert_eq!(picture, (0.0, 175.0, 800.0, 450.0));
+        assert_eq!(picture_fraction(400.0, 400.0, picture), (0.5, 0.5));
+        assert_eq!(picture_fraction(0.0, 175.0, picture), (0.0, 0.0));
+        assert!(picture_fraction(10.0, 50.0, picture).1 < 0.0, "in the top band");
+        // A portrait phone screen in a wide tile: bands left and right.
+        let tall = contain_rect(1000.0, 500.0, 500.0, 1000.0);
+        assert_eq!(tall, (375.0, 0.0, 250.0, 500.0));
+        // Nothing known yet: the whole element.
+        assert_eq!(contain_rect(300.0, 200.0, 0.0, 0.0), (0.0, 0.0, 300.0, 200.0));
+        assert_eq!(picture_fraction(5.0, 5.0, (0.0, 0.0, 0.0, 0.0)), (0.0, 0.0));
+    }
 
     fn fits(fit: GridFit, count: usize, width: f64, height: f64, gap: f64) -> bool {
         let rows = count.div_ceil(fit.cols);

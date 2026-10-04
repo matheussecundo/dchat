@@ -108,6 +108,50 @@ pub struct MyVoiceUi {
     pub video: VideoKind,
 }
 
+/// Remote control as the UI shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ControlUi {
+    /// Members whose shared screen accepts control requests, and who holds what there.
+    pub offers: std::collections::HashMap<String, ControlOfferUi>,
+    /// What this tab may do (or asked for) on each sharer's computer.
+    pub mine: std::collections::HashMap<String, MyControlUi>,
+    /// As the sharer: requests waiting for an answer, oldest first.
+    pub prompts: Vec<ControlPromptUi>,
+    /// As the sharer: others can ask to control this computer right now.
+    pub hosting: bool,
+    pub host_mouse_keyboard: Option<String>,
+    pub host_pads: Vec<Option<String>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ControlOfferUi {
+    pub mouse_keyboard: Option<String>,
+    pub pads: Vec<Option<String>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MyControlUi {
+    pub requested: bool,
+    pub mouse_keyboard: bool,
+    pub pad: Option<u8>,
+    pub mode: protocol::PointerMode,
+}
+
+impl MyControlUi {
+    pub fn granted(&self) -> bool {
+        self.mouse_keyboard || self.pad.is_some()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ControlPromptUi {
+    pub member: String,
+    pub mouse_keyboard: bool,
+    pub controller: bool,
+    /// Who currently holds mouse and keyboard, if granting moves it.
+    pub takes_over: Option<String>,
+}
+
 /// Room settings chosen at creation: caps (`None` = unlimited), history for late joiners and
 /// the `&relays=` value (`None` = the public relays).
 #[derive(Clone, Debug, PartialEq, Eq)]

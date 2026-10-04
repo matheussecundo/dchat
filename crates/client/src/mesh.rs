@@ -1,7 +1,7 @@
 //! One WebRTC link per remote room member, using the "perfect negotiation" pattern
 //! so either side can (re)negotiate at any time without signaling glare.
 
-use protocol::{IceCandidateData, SignalPayload};
+use protocol::{IceCandidateData, InputLane, SignalPayload, INPUT_EVENTS_LABEL, INPUT_STATE_LABEL};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
@@ -17,6 +17,8 @@ use web_sys::{
 const CHAT_LABEL: &str = "chat";
 const FILE_LABEL: &str = "file-transfer";
 const ICE_BATCH_DELAY_MS: i32 = 100;
+/// Pointer and controller states are dropped rather than queued behind this much data.
+const INPUT_STATE_MAX_BUFFERED: u32 = 8 * 1024;
 const ICE_BATCH_MAX: usize = 10;
 /// A link stuck in "disconnected" this long counts as lost (a killed tab only reaches
 /// "failed" after the ~30 s ICE consent timeout); a real member reconnects via presence.
@@ -33,6 +35,8 @@ pub enum LinkEvent {
     Track(MediaStreamTrack, Option<MediaStream>),
     /// A binary packet arrived on the file-transfer channel.
     Chunk(Vec<u8>),
+    /// A remote-control input packet arrived on one of the input channels.
+    Input { lane: InputLane, packet: Vec<u8> },
 }
 
 /// Receives `(remote pubkey, link id, event)`. The id tells a replaced link's late
@@ -55,6 +59,10 @@ pub struct PeerLink {
     chat: Rc<RefCell<Option<RtcDataChannel>>>,
     /// Binary channel for encrypted file chunks, separate so transfers never delay chat.
     files: Rc<RefCell<Option<RtcDataChannel>>>,
+    /// Remote-control input: keys and clicks (reliable) and pointer/controller states
+    /// (unordered, never retransmitted), so neither waits behind chat or files.
+    input_events: Rc<RefCell<Option<RtcDataChannel>>>,
+    input_state: Rc<RefCell<Option<RtcDataChannel>>>,
     /// Candidates that arrived before the remote description (relays can reorder).
     pending_ice: RefCell<Vec<IceCandidateData>>,
     closed: Rc<Cell<bool>>,
@@ -92,6 +100,8 @@ impl PeerLink {
             ignore_offer: Cell::new(false),
             chat: Rc::new(RefCell::new(None)),
             files: Rc::new(RefCell::new(None)),
+            input_events: Rc::new(RefCell::new(None)),
+            input_state: Rc::new(RefCell::new(None)),
             pending_ice: RefCell::new(Vec::new()),
             closed: Rc::new(Cell::new(false)),
             signal_out,
@@ -110,11 +120,22 @@ impl PeerLink {
             attach_chat_callbacks(&dc, &link.remote, id, on_event.clone(), notify_closed);
             *link.chat.borrow_mut() = Some(dc);
             let file_dc = link.pc.create_data_channel_with_data_channel_dict(FILE_LABEL, &init);
-            attach_file_callbacks(&file_dc, &link.remote, id, on_event);
+            attach_file_callbacks(&file_dc, &link.remote, id, on_event.clone());
             *link.files.borrow_mut() = Some(file_dc);
+            let events_dc = link.pc.create_data_channel_with_data_channel_dict(INPUT_EVENTS_LABEL, &init);
+            attach_input_callbacks(&events_dc, &link.remote, id, InputLane::Events, on_event.clone());
+            *link.input_events.borrow_mut() = Some(events_dc);
+            let lossy = RtcDataChannelInit::new();
+            lossy.set_ordered(false);
+            lossy.set_max_retransmits(0);
+            let state_dc = link.pc.create_data_channel_with_data_channel_dict(INPUT_STATE_LABEL, &lossy);
+            attach_input_callbacks(&state_dc, &link.remote, id, InputLane::State, on_event);
+            *link.input_state.borrow_mut() = Some(state_dc);
         } else {
             let chat = link.chat.clone();
             let files = link.files.clone();
+            let input_events = link.input_events.clone();
+            let input_state = link.input_state.clone();
             let remote = link.remote.clone();
             let on_dc = Closure::wrap(Box::new(move |ev: RtcDataChannelEvent| {
                 let dc = ev.channel();
@@ -126,6 +147,14 @@ impl PeerLink {
                     FILE_LABEL => {
                         attach_file_callbacks(&dc, &remote, id, on_event.clone());
                         *files.borrow_mut() = Some(dc);
+                    }
+                    INPUT_EVENTS_LABEL => {
+                        attach_input_callbacks(&dc, &remote, id, InputLane::Events, on_event.clone());
+                        *input_events.borrow_mut() = Some(dc);
+                    }
+                    INPUT_STATE_LABEL => {
+                        attach_input_callbacks(&dc, &remote, id, InputLane::State, on_event.clone());
+                        *input_state.borrow_mut() = Some(dc);
                     }
                     _ => {}
                 }
@@ -169,6 +198,24 @@ impl PeerLink {
             .map(|dc| dc.buffered_amount())
     }
 
+    /// Send a sealed remote-control packet. State packets are dropped instead of queued
+    /// when the channel is backed up: a newer state will follow.
+    pub fn send_input(&self, lane: InputLane, packet: &[u8]) -> bool {
+        let channel = match lane {
+            InputLane::Events => &self.input_events,
+            InputLane::State => &self.input_state,
+        };
+        match channel.borrow().as_ref() {
+            Some(dc) if dc.ready_state() == RtcDataChannelState::Open => {
+                if lane == InputLane::State && dc.buffered_amount() > INPUT_STATE_MAX_BUFFERED {
+                    return false;
+                }
+                dc.send_with_u8_array(packet).is_ok()
+            }
+            _ => false,
+        }
+    }
+
     /// Start sending `track` (as part of `stream`) to this member; triggers renegotiation.
     pub fn add_track(&self, track: &MediaStreamTrack, stream: &MediaStream) -> RtcRtpSender {
         self.pc.add_track_0(track, stream)
@@ -176,7 +223,7 @@ impl PeerLink {
 
     pub fn close(&self) {
         self.closed.set(true);
-        for channel in [&self.chat, &self.files] {
+        for channel in [&self.chat, &self.files, &self.input_events, &self.input_state] {
             if let Some(dc) = channel.borrow().as_ref() {
                 dc.close();
             }
@@ -449,6 +496,18 @@ fn attach_file_callbacks(dc: &RtcDataChannel, remote: &str, id: u64, on_event: L
     let on_message = Closure::wrap(Box::new(move |ev: MessageEvent| {
         if let Ok(buffer) = ev.data().dyn_into::<js_sys::ArrayBuffer>() {
             on_event(&remote, id, LinkEvent::Chunk(js_sys::Uint8Array::new(&buffer).to_vec()));
+        }
+    }) as Box<dyn FnMut(MessageEvent)>);
+    dc.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+    on_message.forget();
+}
+
+fn attach_input_callbacks(dc: &RtcDataChannel, remote: &str, id: u64, lane: InputLane, on_event: LinkEventHandler) {
+    dc.set_binary_type(RtcDataChannelType::Arraybuffer);
+    let remote = remote.to_string();
+    let on_message = Closure::wrap(Box::new(move |ev: MessageEvent| {
+        if let Ok(buffer) = ev.data().dyn_into::<js_sys::ArrayBuffer>() {
+            on_event(&remote, id, LinkEvent::Input { lane, packet: js_sys::Uint8Array::new(&buffer).to_vec() });
         }
     }) as Box<dyn FnMut(MessageEvent)>);
     dc.set_onmessage(Some(on_message.as_ref().unchecked_ref()));

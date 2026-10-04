@@ -1,4 +1,4 @@
-.PHONY: all build build-client build-client-e2e build-server build-relay relay-image test test-rust test-worker test-e2e serve serve-http deploy-cloudflare clean
+.PHONY: all build build-client build-client-e2e build-server build-relay build-host-agent relay-image test test-rust test-worker test-e2e serve serve-http deploy-cloudflare clean
 
 all: build test
 
@@ -7,6 +7,10 @@ build: build-client build-server
 build-client:
 	@echo "==> Building WebAssembly client with Trunk..."
 	cd crates/client && trunk build index.html --release
+
+build-host-agent:
+	@echo "==> Building dchat-host (remote-control companion app)..."
+	cargo build -p host-agent --release
 
 build-client-e2e:
 	@echo "==> Building WebAssembly client with E2E test hooks (dist-e2e, never deployed)..."

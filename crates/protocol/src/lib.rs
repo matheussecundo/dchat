@@ -1,5 +1,9 @@
+pub mod agent;
+pub mod control;
 pub mod crypto;
 pub mod fragment;
+pub mod input;
+pub mod keycodes;
 pub mod messages;
 pub mod nostr;
 pub mod password;
@@ -7,8 +11,12 @@ pub mod relays;
 pub mod room;
 pub mod version;
 
+pub use agent::*;
+pub use control::*;
 pub use crypto::*;
 pub use fragment::*;
+pub use input::*;
+pub use keycodes::*;
 pub use messages::*;
 pub use nostr::*;
 pub use password::*;

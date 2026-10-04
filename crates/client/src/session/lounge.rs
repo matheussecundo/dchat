@@ -235,7 +235,8 @@ impl RoomSession {
         let s = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
             match media::capture_screen().await {
-                Ok(track) => {
+                Ok((track, info)) => {
+                    s.set_screen_info(Some(info));
                     // Stopping from the browser's own "Stop sharing" control ends the share.
                     let s_end = s.clone();
                     let track_id = track.id();
@@ -354,6 +355,10 @@ impl RoomSession {
         }
         lounge.states.borrow_mut().insert(author.to_string(), info);
         lounge.envelopes.borrow_mut().insert(author.to_string(), envelope.clone());
+        let video_changed = previous.map_or(true, |p| p.in_voice != info.in_voice || p.video != info.video);
+        if video_changed {
+            self.on_control_voice_state(author, info.in_voice);
+        }
 
         let newly_in_voice = info.in_voice && !previous.is_some_and(|p| p.in_voice);
         if newly_in_voice
@@ -447,7 +452,7 @@ impl RoomSession {
 
     // ---- Media plumbing ----------------------------------------------------------------
 
-    fn local_track(&self, kind: &str) -> Option<MediaStreamTrack> {
+    pub(super) fn local_track(&self, kind: &str) -> Option<MediaStreamTrack> {
         self.inner.lounge.local_stream.borrow().as_ref().and_then(|s| media::first_track(s, kind))
     }
 
@@ -482,6 +487,7 @@ impl RoomSession {
     }
 
     fn stop_video(&self) {
+        self.set_screen_info(None);
         if let Some(stream) = self.inner.lounge.local_stream.borrow().as_ref() {
             if let Some(track) = media::first_track(stream, "video") {
                 stream.remove_track(&track);

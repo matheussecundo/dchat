@@ -228,7 +228,21 @@ Any Nostr relay that forwards ephemeral events (kinds 20000–29999) works, for 
 
 ---
 
-## 5. Troubleshooting
+## 5. Remote control app (dchat-host)
+
+Remote control needs `dchat-host` on the computer being controlled (Linux for now; Windows comes next). Build it with `cargo build -p host-agent --release`; the binary is `target/release/dchat-host`.
+
+It only accepts your dchat site, so tell it the site's address:
+- at run time: `dchat-host --allow-origin https://chat.example.com` (repeatable, or `DCHAT_HOST_ALLOWED_ORIGINS=https://a,https://b`);
+- or bake it in at build time: `DCHAT_HOST_ORIGINS=https://chat.example.com cargo build -p host-agent --release`.
+
+On a GitHub Pages site the origin is `https://<user>.github.io` for all of your repositories; the pairing code still protects the app, but a custom domain keeps it to dchat.
+
+On Linux, install `crates/host-agent/dist/60-dchat-host.rules` (see the README) so it can use `/dev/uinput` without root. It listens on `127.0.0.1:7448` (`--port` to change; the same port goes in dchat's dialog), never on the network.
+
+---
+
+## 6. Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|

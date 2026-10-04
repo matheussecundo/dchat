@@ -2,6 +2,7 @@
 members = [
     "crates/protocol",
     "crates/relay",
+    "crates/host-agent",
     "crates/server",
     "crates/client",
 ]
