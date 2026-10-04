@@ -7,23 +7,26 @@ controller (up to four). Nothing happens unless you click Allow in dchat.
 
 Run it
 ------
-  Linux:    ./dchat-host --allow-origin https://your-dchat-site
-  Windows:  dchat-host.exe --allow-origin https://your-dchat-site
+  Windows:  double-click dchat-host.exe
+  Linux:    ./install.sh once (asks for your password), then ./dchat-host
 
-(If this build was made with your site built in, --allow-origin is optional.)
-It prints a one-time code. In dchat: join voice, share your entire screen, tap
-the mouse button, type the code and Connect.
+If it asks which dchat site may connect, type your site's address (for example
+https://chat.example.com). Builds made for your site don't ask. You can also
+give it on the command line: --allow-origin https://your-dchat-site
+
+It prints a one-time code. In dchat, on this same computer: join voice, share
+your entire screen, tap the mouse button, type the code and Connect. Keep the
+dchat-host window open while others control this computer.
 
 Stop at any time: Ctrl+Alt+Shift+Q (Windows and X11), Enter in this terminal,
 Ctrl+C, or Stop in dchat. Everything held down is released.
 
 Linux setup (once)
 ------------------
-dchat-host creates virtual input devices through /dev/uinput:
-  sudo cp 60-dchat-host.rules /etc/udev/rules.d/
-  sudo cp uinput.conf /etc/modules-load.d/
-  sudo modprobe uinput && sudo udevadm control --reload && sudo udevadm trigger
-Then log out and back in.
+dchat-host creates virtual input devices through /dev/uinput. ./install.sh lets
+whoever is logged in at this computer do that (it installs
+60-dchat-host.rules and uinput.conf under /etc). ./install.sh --uninstall undoes
+it. If dchat-host still says it has no permission, log out and back in once.
 
 Windows notes
 -------------

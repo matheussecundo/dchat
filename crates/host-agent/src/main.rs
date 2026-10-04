@@ -2,7 +2,7 @@
 //! dchat's "Remote control" dialog.
 
 use clap::Parser;
-use host_agent::config::{built_in_origins, normalize_origins, AgentConfig};
+use host_agent::config::{built_in_origins, normalize_origins, origin_from_input, AgentConfig};
 use host_agent::engine::Engine;
 use host_agent::inject::mock::Recorder;
 use host_agent::inject::{platform_injector, Injector};
@@ -86,12 +86,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    let interactive = std::io::stdin().is_terminal();
     let mut origins = built_in_origins();
     origins.extend(normalize_origins(args.allow_origins.iter().map(String::as_str)));
-    let origins = normalize_origins(origins.iter().map(String::as_str));
+    let mut origins = normalize_origins(origins.iter().map(String::as_str));
     if origins.is_empty() {
-        eprintln!("No dchat site is allowed to connect. Start with --allow-origin https://<your dchat site>.");
-        std::process::exit(2);
+        if !interactive {
+            fatal("No dchat site is allowed to connect. Start with --allow-origin https://<your dchat site>.", 2, false);
+        }
+        origins.push(ask_for_site());
     }
 
     let (injector, recording): (Box<dyn Injector>, _) = if args.mock_injector {
@@ -110,10 +113,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = SocketAddr::from(([127, 0, 0, 1], args.port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => listener,
-        Err(err) => {
-            eprintln!("Cannot listen on {addr}: {err}. Is dchat-host already running? (--port picks another port)");
-            std::process::exit(1);
-        }
+        Err(err) => fatal(
+            &format!("Cannot listen on {addr}: {err}. Is dchat-host already running? (--port picks another port)"),
+            1,
+            interactive,
+        ),
     };
 
     let (status_tx, mut status_rx) = mpsc::unbounded_channel::<String>();
@@ -142,7 +146,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => println!("Controllers: up to {}", caps.pads),
         Some(err) => println!("Controllers: unavailable: {err}"),
     }
-    let interactive = std::io::stdin().is_terminal();
     let shortcut = if args.no_hotkey {
         Err("turned off".to_string())
     } else {
@@ -192,6 +195,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await?;
     Ok(())
+}
+
+/// No site was built in or given: ask (double-clicking on Windows lands here). Only the
+/// site's origin is kept; nothing typed is stored, and if someone pastes a whole room link
+/// anyway, its path and key are dropped and never printed.
+fn ask_for_site() -> String {
+    println!("Which dchat site may connect to this computer? Type its address, for example");
+    println!("https://chat.example.com, then press Enter. Only that site will be able to use dchat-host.");
+    loop {
+        print!("> ");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let mut line = String::new();
+        match std::io::stdin().read_line(&mut line) {
+            Ok(0) | Err(_) => std::process::exit(2),
+            Ok(_) => {}
+        }
+        match origin_from_input(&line) {
+            Some(origin) => {
+                println!("Only {origin} may connect.");
+                return origin;
+            }
+            None => println!("That doesn't look like a web address (for example https://chat.example.com). Try again:"),
+        }
+    }
+}
+
+/// Print why dchat-host can't run and exit. On Windows a double-clicked console window
+/// would close at once, so it waits for Enter first.
+fn fatal(message: &str, code: i32, interactive: bool) -> ! {
+    eprintln!("{message}");
+    if cfg!(windows) && interactive {
+        eprintln!("Press Enter to close.");
+        let _ = std::io::stdin().read_line(&mut String::new());
+    }
+    std::process::exit(code)
 }
 
 async fn shutdown_signal() {

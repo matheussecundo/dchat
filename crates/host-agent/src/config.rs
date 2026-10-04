@@ -73,6 +73,41 @@ impl AgentConfig {
     }
 }
 
+/// The origin (`scheme://host[:port]`) of what someone typed or pasted when asked which
+/// dchat site may connect: a bare host name (https assumed), a site address, or a whole
+/// room link, whose path and fragment (with the room key) are dropped.
+pub fn origin_from_input(input: &str) -> Option<String> {
+    let input = input.trim();
+    if input.is_empty() || input.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let (scheme, rest) = match input.split_once("://") {
+        Some((scheme, rest)) => (scheme.to_ascii_lowercase(), rest),
+        None => ("https".to_string(), input),
+    };
+    if scheme != "https" && scheme != "http" {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("").to_ascii_lowercase();
+    let valid_chars = authority.chars().all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c));
+    if authority.is_empty() || !valid_chars {
+        return None;
+    }
+    // Host, and an optional port (IPv6 hosts are in brackets).
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(v6) => {
+            let (host, after) = v6.split_once(']')?;
+            (host, after.strip_prefix(':'))
+        }
+        None => match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority.as_str(), None),
+        },
+    };
+    let port_ok = port.map_or(true, |p| p.parse::<u16>().is_ok_and(|n| n > 0));
+    (!host.is_empty() && port_ok).then(|| format!("{scheme}://{authority}"))
+}
+
 /// Simple token bucket.
 #[derive(Debug)]
 pub struct TokenBucket {
@@ -129,6 +164,19 @@ mod tests {
         assert!(!cfg.host_allowed(Some("evil.example:7448")), "DNS rebinding");
         assert!(!cfg.host_allowed(Some("127.0.0.1.nip.io:7448")));
         assert!(!cfg.host_allowed(None));
+    }
+
+    #[test]
+    fn test_origins_from_what_people_type_or_paste() {
+        assert_eq!(origin_from_input("https://chat.example.com/#room=abc&key=SECRET").as_deref(), Some("https://chat.example.com"));
+        assert_eq!(origin_from_input("chat.example.com").as_deref(), Some("https://chat.example.com"));
+        assert_eq!(origin_from_input(" HTTPS://Chat.Example.com/ ").as_deref(), Some("https://chat.example.com"));
+        assert_eq!(origin_from_input("http://127.0.0.1:3333/x?y=1").as_deref(), Some("http://127.0.0.1:3333"));
+        assert_eq!(origin_from_input("https://user.github.io/dchat/#room=x").as_deref(), Some("https://user.github.io"));
+        assert_eq!(origin_from_input("https://[::1]:3333/").as_deref(), Some("https://[::1]:3333"));
+        for bad in ["", "ftp://x.example", "https://", "https://a b", "https://evil@chat.example.com", "https://x:99999", "https://x:", "https://x:0"] {
+            assert_eq!(origin_from_input(bad), None, "{bad}");
+        }
     }
 
     #[test]

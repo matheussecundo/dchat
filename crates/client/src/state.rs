@@ -333,6 +333,17 @@ pub fn create_room(caps: RoomCaps) -> Result<(), String> {
     Ok(())
 }
 
+/// Where people get the dchat-host app: `DCHAT_HOST_DOWNLOAD_URL` at build time, otherwise
+/// the Releases page of the GitHub repository that built this site (GitHub Actions sets
+/// `GITHUB_REPOSITORY`), otherwise unknown.
+pub fn host_download_url() -> Option<String> {
+    let configured = option_env!("DCHAT_HOST_DOWNLOAD_URL").map(str::trim).filter(|u| !u.is_empty()).map(str::to_string);
+    let releases = option_env!("GITHUB_REPOSITORY")
+        .filter(|repo| !repo.is_empty())
+        .map(|repo| format!("https://github.com/{repo}/releases/latest"));
+    configured.or(releases).filter(|u| u.starts_with("https://") || u.starts_with("http://"))
+}
+
 /// The app's own address without the fragment, e.g. `https://user.github.io/dchat/`.
 /// Use this instead of `/`, which is the root of the whole site when the app is hosted
 /// under a path.

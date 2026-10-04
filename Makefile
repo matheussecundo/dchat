@@ -14,7 +14,7 @@ build-host-agent:
 
 build-client-e2e:
 	@echo "==> Building WebAssembly client with E2E test hooks (dist-e2e, never deployed)..."
-	cd crates/client && trunk build index.html --release --features e2e-hooks --dist dist-e2e
+	cd crates/client && DCHAT_HOST_DOWNLOAD_URL=https://downloads.example.test/dchat-host trunk build index.html --release --features e2e-hooks --dist dist-e2e
 
 build-server:
 	@echo "==> Building Axum server..."

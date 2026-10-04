@@ -56,6 +56,13 @@ test('pair the app, request, allow, control mouse and keyboard, release and revo
   const { members: [ana, bo], anaKey } = await sharingRoom(browser, ['Bo']);
   await expect(tile(bo.page, anaKey).locator('.control-request-btn')).toHaveCount(0, { timeout: 2000 });
 
+  // The dialog says where to get dchat-host (the site's configured download address).
+  await ana.page.locator('#control-host-btn').click();
+  const download = ana.page.locator('#agent-download-link');
+  await expect(download).toHaveAttribute('href', 'https://downloads.example.test/dchat-host');
+  await expect(download).toHaveAttribute('rel', 'noopener noreferrer');
+  await ana.page.locator('#control-host-modal .modal-title-row button').click();
+
   // A wrong code is refused; the right one pairs, and control is offered.
   await pairAgent(ana.page, 'WRONG-000');
   await expect(ana.page.locator('#agent-status')).toHaveAttribute('data-status', 'wrong_code', { timeout: 10000 });

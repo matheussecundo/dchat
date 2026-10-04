@@ -71,7 +71,8 @@ Every agent modifying this codebase must enforce these non-negotiable security a
    - **Only by the sharer's click**: `ControlRequest` waits in `ControlState` until the sharer allows it; nothing is ever granted automatically. One member holds mouse and keyboard at a time (granting moves it, `TakenOver`); controllers take slots P1–P4, limited to what the app reports it can create, and a pad with no update for 0.5 s goes back to neutral. Grants end with the share (or a share that isn't a whole monitor), the app pairing, the viewer's voice seat, the link, and the session (`set_available(false)`, `on_control_peer_lost`, `on_control_voice_state`).
    - **Input path**: viewer → sharer only over their direct link's `input-events` (reliable) and `input-state` (unordered, no retransmits) channels, sealed with the room key and an AAD binding lane, seq, sender and recipient (`seal_input`). Never relayed. The sharer's tab opens, budgets (`InputBudget`) and filters (`InputGate`: only what that member holds, pads mapped to their slot) before forwarding to the app, which checks roles again.
    - **dchat-host**: listens on 127.0.0.1 only; Host header must be its own loopback port (DNS rebinding); Origin must be in a never-empty allow-list; pairing needs the one-time code printed in its terminal, proven by HMAC both ways (the tab sends nothing to an app that can't prove it), with lockout after 5 wrong codes; one connected session at a time (a disconnected one is replaced by a new pairing). It releases everything held on every exit path (revoke, `ReleaseAll`, socket loss, `Bye`, stop shortcut, Enter, Ctrl+C, SIGTERM/SIGHUP or Windows console close/logoff/shutdown, watchdog after 1.5 s without input, panic hook, Drop), never logs input, and writes no files.
-   - **Tab side**: the app link opens only when the user clicks Connect; the code and session token live in RAM. Mouse and keyboard can do anything the sharer can (including clicking Allow for others): the prompt says so.
+   - **Tab side**: the app link opens only when the user clicks Connect; the code and session token live in RAM. The dialog's download link (`host_download_url`: `DCHAT_HOST_DOWNLOAD_URL`, else the building repository's latest release) opens with `rel="noopener noreferrer"`.
+   - **Allowed site**: when none is built in or given and a console is attached, dchat-host asks; `origin_from_input` keeps only `scheme://host[:port]` (a pasted room link's key is dropped and never printed). Without a console it refuses to start. Mouse and keyboard can do anything the sharer can (including clicking Allow for others): the prompt says so.
    - **Versions**: the tab ↔ app messages have their own `AGENT_PROTOCOL_VERSION` and fingerprint test (`protocol/src/agent.rs`); room messages and input packets are in `PROTOCOL_VERSION`.
 
 ---
@@ -107,7 +108,7 @@ dchat/
 │   │   │   └── main.rs         # CLI / env config, graceful shutdown, IP-free logs
 │   │   └── tests/relay.rs      # Integration tests over real WebSockets
 │   ├── host-agent/             # dchat-host: remote-control companion app on the shared computer (lib + binary)
-│   │   ├── dist/               # 60-dchat-host.rules (udev: /dev/uinput for the seat user), uinput.conf, README.txt (shipped in releases)
+│   │   ├── dist/               # install.sh (Linux setup, --uninstall), 60-dchat-host.rules (udev: /dev/uinput for the seat user), uinput.conf, README.txt: all shipped in releases
 │   │   ├── src/
 │   │   │   ├── server.rs       # ws://127.0.0.1 only: Host + Origin checks, mutual pairing, one session, resume, limits
 │   │   │   ├── pairing.rs      # One-time codes, lockout, session token (pure, unit-tested)

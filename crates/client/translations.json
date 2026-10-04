@@ -221,7 +221,10 @@
     "control_mode_title": "Desktop mode: click where you point. Game mode: the mouse is captured and moves the view, for games. Click to switch.",
     "btn_request_pad": "🎮 Request controller",
     "control_pad_hint": "Your controller plays as P{n} on this computer. If nothing happens, press a button on it.",
-    "agent_pads_unavailable": "No controllers on this computer: {error}"
+    "agent_pads_unavailable": "No controllers on this computer: {error}",
+    "agent_download_link": "⬇️ Download dchat-host",
+    "agent_download_hint": "Windows: open dchat-host.exe. Linux: run ./install.sh once, then ./dchat-host. It shows the code to type here.",
+    "agent_download_ask": "Ask whoever runs this dchat site where to get the dchat-host app."
   },
   "zh": {
     "scan_qr": "📱 扫描二维码",
@@ -445,7 +448,10 @@
     "control_mode_title": "桌面模式：指向哪里就点击哪里。游戏模式：鼠标被锁定并用于转动视角，适合游戏。点击切换。",
     "btn_request_pad": "🎮 请求手柄",
     "control_pad_hint": "你的手柄在这台电脑上作为 P{n}。如果没有反应，请按一下手柄上的按键。",
-    "agent_pads_unavailable": "这台电脑无法使用手柄：{error}"
+    "agent_pads_unavailable": "这台电脑无法使用手柄：{error}",
+    "agent_download_link": "⬇️ 下载 dchat-host",
+    "agent_download_hint": "Windows：打开 dchat-host.exe。Linux：先运行一次 ./install.sh，再运行 ./dchat-host。它会显示要在这里输入的代码。",
+    "agent_download_ask": "请向运营这个 dchat 站点的人询问从哪里获取 dchat-host 应用。"
   },
   "hi": {
     "scan_qr": "📱 क्यूआर स्कैन करें",
@@ -669,7 +675,10 @@
     "control_mode_title": "डेस्कटॉप मोड: जहाँ इशारा करें वहीं क्लिक होता है। गेम मोड: माउस लॉक होकर दृश्य घुमाता है, गेम के लिए। बदलने के लिए क्लिक करें।",
     "btn_request_pad": "🎮 कंट्रोलर माँगें",
     "control_pad_hint": "आपका कंट्रोलर इस कंप्यूटर पर P{n} के रूप में चलता है। कुछ न हो तो उस पर कोई बटन दबाएँ।",
-    "agent_pads_unavailable": "इस कंप्यूटर पर कंट्रोलर उपलब्ध नहीं: {error}"
+    "agent_pads_unavailable": "इस कंप्यूटर पर कंट्रोलर उपलब्ध नहीं: {error}",
+    "agent_download_link": "⬇️ dchat-host डाउनलोड करें",
+    "agent_download_hint": "Windows: dchat-host.exe खोलें। Linux: एक बार ./install.sh चलाएँ, फिर ./dchat-host। यह वह कोड दिखाता है जिसे यहाँ टाइप करना है।",
+    "agent_download_ask": "dchat-host ऐप कहाँ से मिलेगा, यह इस dchat साइट को चलाने वाले से पूछें।"
   },
   "es": {
     "scan_qr": "📱 Escanear QR",
@@ -893,7 +902,10 @@
     "control_mode_title": "Modo escritorio: haces clic donde apuntas. Modo juego: el ratón queda capturado y mueve la vista, para juegos. Haz clic para cambiar.",
     "btn_request_pad": "🎮 Pedir mando",
     "control_pad_hint": "Tu mando juega como P{n} en este equipo. Si no pasa nada, pulsa un botón del mando.",
-    "agent_pads_unavailable": "No hay mandos en este equipo: {error}"
+    "agent_pads_unavailable": "No hay mandos en este equipo: {error}",
+    "agent_download_link": "⬇️ Descargar dchat-host",
+    "agent_download_hint": "Windows: abre dchat-host.exe. Linux: ejecuta ./install.sh una vez y luego ./dchat-host. Muestra el código que debes escribir aquí.",
+    "agent_download_ask": "Pregunta a quien administra este sitio de dchat dónde conseguir la app dchat-host."
   },
   "fr": {
     "scan_qr": "📱 Scanner QR",
@@ -1117,7 +1129,10 @@
     "control_mode_title": "Mode bureau : vous cliquez là où vous pointez. Mode jeu : la souris est capturée et déplace la vue, pour les jeux. Cliquez pour changer.",
     "btn_request_pad": "🎮 Demander une manette",
     "control_pad_hint": "Votre manette joue en tant que P{n} sur cet ordinateur. Si rien ne se passe, appuyez sur un de ses boutons.",
-    "agent_pads_unavailable": "Pas de manettes sur cet ordinateur : {error}"
+    "agent_pads_unavailable": "Pas de manettes sur cet ordinateur : {error}",
+    "agent_download_link": "⬇️ Télécharger dchat-host",
+    "agent_download_hint": "Windows : ouvrez dchat-host.exe. Linux : lancez ./install.sh une fois, puis ./dchat-host. Il affiche le code à saisir ici.",
+    "agent_download_ask": "Demandez à la personne qui gère ce site dchat où obtenir l'application dchat-host."
   },
   "ar": {
     "scan_qr": "📱 مسح رمز QR",
@@ -1341,7 +1356,10 @@
     "control_mode_title": "وضع سطح المكتب: تنقر حيث تشير. وضع الألعاب: تُحتجز الفأرة وتحرّك المشهد، للألعاب. انقر للتبديل.",
     "btn_request_pad": "🎮 طلب يد تحكم",
     "control_pad_hint": "تعمل يد التحكم لديك بصفة P{n} على هذا الحاسوب. إن لم يحدث شيء، فاضغط زرًا عليها.",
-    "agent_pads_unavailable": "لا تتوفر أيادي تحكم على هذا الحاسوب: {error}"
+    "agent_pads_unavailable": "لا تتوفر أيادي تحكم على هذا الحاسوب: {error}",
+    "agent_download_link": "⬇️ تنزيل dchat-host",
+    "agent_download_hint": "Windows: افتح dchat-host.exe. Linux: شغّل ./install.sh مرة واحدة، ثم ./dchat-host. يعرض الرمز الذي تكتبه هنا.",
+    "agent_download_ask": "اسأل من يدير موقع dchat هذا عن مكان الحصول على تطبيق dchat-host."
   },
   "bn": {
     "scan_qr": "📱 কিউআর স্ক্যান",
@@ -1565,7 +1583,10 @@
     "control_mode_title": "ডেস্কটপ মোড: যেখানে নির্দেশ করেন সেখানে ক্লিক হয়। গেম মোড: মাউস আটকে থেকে দৃশ্য ঘোরায়, গেমের জন্য। বদলাতে ক্লিক করুন।",
     "btn_request_pad": "🎮 কন্ট্রোলার চান",
     "control_pad_hint": "আপনার কন্ট্রোলার এই কম্পিউটারে P{n} হিসেবে খেলছে। কিছু না হলে এর একটি বোতাম চাপুন।",
-    "agent_pads_unavailable": "এই কম্পিউটারে কন্ট্রোলার নেই: {error}"
+    "agent_pads_unavailable": "এই কম্পিউটারে কন্ট্রোলার নেই: {error}",
+    "agent_download_link": "⬇️ dchat-host ডাউনলোড করুন",
+    "agent_download_hint": "Windows: dchat-host.exe খুলুন। Linux: একবার ./install.sh চালান, তারপর ./dchat-host। এটি এখানে লেখার কোডটি দেখায়।",
+    "agent_download_ask": "dchat-host অ্যাপটি কোথায় পাবেন, এই dchat সাইট যিনি চালান তাঁকে জিজ্ঞেস করুন।"
   },
   "pt": {
     "scan_qr": "📱 Escanear QR",
@@ -1789,7 +1810,10 @@
     "control_mode_title": "Modo área de trabalho: você clica onde aponta. Modo jogo: o mouse fica capturado e move a visão, para jogos. Clique para trocar.",
     "btn_request_pad": "🎮 Pedir controle",
     "control_pad_hint": "Seu controle joga como P{n} neste computador. Se nada acontecer, aperte um botão nele.",
-    "agent_pads_unavailable": "Sem controles neste computador: {error}"
+    "agent_pads_unavailable": "Sem controles neste computador: {error}",
+    "agent_download_link": "⬇️ Baixar o dchat-host",
+    "agent_download_hint": "Windows: abra o dchat-host.exe. Linux: rode ./install.sh uma vez e depois ./dchat-host. Ele mostra o código para digitar aqui.",
+    "agent_download_ask": "Pergunte a quem mantém este site do dchat onde obter o app dchat-host."
   },
   "ru": {
     "scan_qr": "📱 Сканировать QR",
@@ -2013,7 +2037,10 @@
     "control_mode_title": "Режим рабочего стола: нажатие там, куда указываете. Игровой режим: мышь захватывается и поворачивает обзор, для игр. Нажмите, чтобы переключить.",
     "btn_request_pad": "🎮 Запросить геймпад",
     "control_pad_hint": "Ваш геймпад работает на этом компьютере как P{n}. Если ничего не происходит, нажмите на нём любую кнопку.",
-    "agent_pads_unavailable": "Геймпады на этом компьютере недоступны: {error}"
+    "agent_pads_unavailable": "Геймпады на этом компьютере недоступны: {error}",
+    "agent_download_link": "⬇️ Скачать dchat-host",
+    "agent_download_hint": "Windows: откройте dchat-host.exe. Linux: один раз запустите ./install.sh, затем ./dchat-host. Он покажет код, который нужно ввести здесь.",
+    "agent_download_ask": "Спросите у владельца этого сайта dchat, где взять приложение dchat-host."
   },
   "de": {
     "scan_qr": "📱 QR scannen",
@@ -2237,6 +2264,9 @@
     "control_mode_title": "Desktop-Modus: Du klickst, wohin du zeigst. Spielmodus: Die Maus wird gefangen und bewegt die Ansicht, für Spiele. Klicke zum Wechseln.",
     "btn_request_pad": "🎮 Controller anfragen",
     "control_pad_hint": "Dein Controller spielt an diesem Computer als P{n}. Wenn nichts passiert, drücke eine Taste darauf.",
-    "agent_pads_unavailable": "Keine Controller an diesem Computer: {error}"
+    "agent_pads_unavailable": "Keine Controller an diesem Computer: {error}",
+    "agent_download_link": "⬇️ dchat-host herunterladen",
+    "agent_download_hint": "Windows: dchat-host.exe öffnen. Linux: einmal ./install.sh ausführen, dann ./dchat-host. Es zeigt den Code, den du hier eingibst.",
+    "agent_download_ask": "Frag die Person, die diese dchat-Seite betreibt, wo es die App dchat-host gibt."
   }
 }
