@@ -1,0 +1,161 @@
+# Deploying dchat
+
+dchat is a static web app. What gets deployed is the release build in `crates/client/dist/`: one HTML page, a JS loader, a WebAssembly module, a stylesheet and a service worker. There is no backend to run. Members connect to each other directly, and Nostr relays carry only the encrypted handshake.
+
+The Axum server in `crates/server` is for development only (self-signed certificate, mock relay). Never expose it to the internet.
+
+This guide covers two hosting options:
+
+| | GitHub Pages | Cloudflare Workers |
+|---|---|---|
+| Cost | Free | Free for the site; TURN free up to 1,000 GB, then $0.05/GB |
+| Address | `https://<user>.github.io/<repo>/` or a custom domain | `https://dchat.<subdomain>.workers.dev` or a custom domain |
+| TURN for members who can't connect directly | Not included: add your own with `&turn=` in room links | Built in: fresh Cloudflare TURN credentials for every room entry |
+| Setup | ~5 minutes | ~15 minutes |
+
+Pick **GitHub Pages** to get online quickly. Pick **Cloudflare** if people will join from mobile data or strict networks, where voice, video and files often need TURN (see README: "When Members Can't Connect Directly (NAT)"). You can also run both.
+
+---
+
+## 1. Put the repository on GitHub
+
+Both options build and deploy from GitHub Actions, so the code must be on GitHub first.
+
+1. Create an empty repository on GitHub (no README or license, so the first push doesn't conflict).
+2. Push this repository to it:
+   ```bash
+   git remote add origin https://github.com/<user>/<repo>.git
+   git push -u origin main
+   ```
+
+How the workflows fit together (`.github/workflows/`):
+
+| Workflow | Runs | Does |
+|---|---|---|
+| `build.yml` | Called by the two below | Rust unit tests, Worker unit tests, release build of the client, a check that no test hooks ended up in the bundle; hands the build over as the `site` artifact |
+| `pages.yml` | Every push to `main`, or by hand | Builds, then publishes to GitHub Pages |
+| `cloudflare.yml` | Every push to `main`, or by hand | Builds, then deploys to Cloudflare; skips the deploy until its secrets are set |
+
+Builds use the committed `Cargo.lock` (`--locked`), so CI ships exactly the dependency versions that were tested.
+
+Using only one host? Disable the other workflow under **Actions** → (workflow name) → **⋯** → **Disable workflow**. Otherwise `pages.yml` fails on every push while Pages is not enabled.
+
+---
+
+## 2. GitHub Pages
+
+### Setup
+1. In the repository, open **Settings → Pages**.
+2. Under **Build and deployment → Source**, choose **GitHub Actions**.
+3. Start a deploy: push to `main`, or open **Actions → Deploy to GitHub Pages → Run workflow**.
+4. When the run finishes (about 5–10 minutes the first time, faster later thanks to caching), the address appears in the run summary and under **Settings → Pages**: `https://<user>.github.io/<repo>/`.
+
+### Custom domain (optional)
+1. **Settings → Pages → Custom domain**: enter e.g. `chat.example.com` and save.
+2. At your DNS provider, add a `CNAME` record from `chat.example.com` to `<user>.github.io`.
+3. Once the DNS check passes, tick **Enforce HTTPS**. Browsers only allow camera and microphone access over HTTPS.
+
+### Check it works
+- Open the site, create a room and open the invite on a second device on a different network. Both should show **Connected** within a few seconds, and messages should go both ways.
+- In the browser's developer tools, **Network** shows one `404` for `ice-servers` each time you enter a room. That is expected on GitHub Pages: there is no TURN endpoint, so the app uses STUN only.
+
+### TURN on GitHub Pages
+GitHub Pages can't run server code, so it can't hand out TURN credentials. Members on mobile data or behind strict NATs may get text only. To give them voice, video and files, run a TURN server yourself (for example [coturn](https://github.com/coturn/coturn)) and add it to room links:
+```
+https://<user>.github.io/<repo>/#room=…&key=…&turn=turns:turn.example.com:5349&turnuser=dchat&turnpass=…
+```
+Everyone with the link can see those credentials, so give them a dedicated account on your TURN server.
+
+---
+
+## 3. Cloudflare (Workers + TURN)
+
+The Cloudflare setup deploys the same static files as a Worker with static assets (`wrangler.jsonc`), plus a small script (`worker/`) with one endpoint, `GET /ice-servers`. When someone enters a room, the app asks that endpoint for TURN servers. The Worker gets fresh, short-lived credentials from Cloudflare's TURN API and returns them.
+
+Security properties:
+- The TURN API token exists only as a Worker secret. It never reaches the browser or the repository.
+- Credentials expire after 12 hours and are never cached (`Cache-Control: no-store`; the service worker doesn't touch the endpoint).
+- The request carries no room information. The room ID and key live in the URL fragment, which browsers never send.
+- Cross-site requests are refused, and each IP may make 20 requests per minute, so other websites can't spend your TURN quota.
+- TURN relays encrypted packets only. Cloudflare sees IP addresses and traffic volume, never message or media content.
+
+### Setup
+You need a Cloudflare account (the free plan is enough).
+
+1. **Create a TURN key.** In the Cloudflare dashboard, open **Realtime → TURN**, create a TURN key and copy its **key ID** and **API token** right away (you may not be able to view the token again). You'll need both in step 5.
+2. **Create a deploy token.** Open **My Profile → API Tokens → Create Token**, use the **Edit Cloudflare Workers** template, and copy the token. Also copy your **Account ID**, shown in the dashboard (for example on the **Workers & Pages** overview).
+3. **Add GitHub secrets.** In the repository, open **Settings → Secrets and variables → Actions → New repository secret** and add:
+   - `CLOUDFLARE_API_TOKEN`: the deploy token from step 2
+   - `CLOUDFLARE_ACCOUNT_ID`: your account ID
+4. **Deploy.** Push to `main`, or open **Actions → Deploy to Cloudflare → Run workflow**. The first deploy creates the Worker `dchat`. The site is then at `https://dchat.<your-subdomain>.workers.dev`; the address is also shown in the run log and on the Worker's page in the dashboard.
+5. **Give the Worker the TURN key.** This is needed once; secrets are kept across deploys. Either:
+   - in the dashboard: **Workers & Pages → dchat → Settings → Variables and Secrets → Add**, type **Secret**, names `TURN_KEY_ID` and `TURN_KEY_API_TOKEN`; or
+   - from a terminal (Node.js 22+): `npx wrangler login`, then `npx wrangler secret put TURN_KEY_ID` and `npx wrangler secret put TURN_KEY_API_TOKEN`.
+
+Without the TURN secrets the site still works; it just behaves like GitHub Pages (STUN only).
+
+### Custom domain (optional)
+If the domain's DNS is on Cloudflare: **Workers & Pages → dchat → Settings → Domains & Routes → Add → Custom domain**. Cloudflare creates the DNS record and the HTTPS certificate.
+
+### Check it works
+1. **The endpoint.** Run (the header imitates the app's own request):
+   ```bash
+   curl -H "Sec-Fetch-Site: same-origin" https://dchat.<your-subdomain>.workers.dev/ice-servers
+   ```
+   - JSON with an `iceServers` list containing `turn:turn.cloudflare.com…` URLs, a `username` and a `credential`: working.
+   - `TURN not configured` (404): step 5 is missing.
+   - `TURN credentials unavailable` (502): the key ID or token is wrong.
+2. **In the app.** Enter a room with the developer tools open: **Network** shows `ice-servers` with status `200`.
+3. **In a call.** Two members on different networks join voice. In Chrome, `chrome://webrtc-internals` lists candidates of type `relay` when TURN is in use. Members who can connect directly still do; TURN is only a fallback.
+
+### Deploy from your own machine (optional)
+Requires Node.js 22 or newer (Wrangler 4).
+```bash
+npx wrangler login
+make deploy-cloudflare      # release build + wrangler deploy
+```
+
+### Test the Worker locally (optional)
+```bash
+make build-client
+npx wrangler@4 dev          # serves the app and /ice-servers at http://localhost:8787
+```
+To test TURN locally, put the TURN key in a `.dev.vars` file at the repository root (it is git-ignored):
+```
+TURN_KEY_ID=...
+TURN_KEY_API_TOKEN=...
+```
+Worker unit tests need no account: `node --test worker/` (or `make test-worker`).
+
+### Costs and limits
+- TURN: $0.05 per GB that the TURN server sends to clients, after a free tier of 1,000 GB. Only pairs of members who can't connect directly use it.
+- A credential lasts 12 hours (`TTL_SECONDS` in `worker/ice.js`; Cloudflare allows up to 48). A call longer than that loses its relay until the member rejoins the room.
+- Rate limit: 20 `/ice-servers` requests per minute per IP (`ratelimits` in `wrangler.jsonc`; the period must be 10 or 60 seconds). Many mobile users share an IP, so don't set it much lower.
+- Serving the static site is free on Workers.
+
+### Rotating the TURN key
+Create a new TURN key, update the two Worker secrets (step 5), then delete the old key in **Realtime → TURN**. Credentials already issued stop working when they expire or when the old key is deleted.
+
+---
+
+## 4. Nostr relays
+
+Wherever it's hosted, the app signals through public Nostr relays (`wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.primal.net`). Relays see only encrypted, signed, short-lived events tagged with a hash of the room ID. If you see joins hanging at **Connecting to Relay**, or want independence from public relays, run your own relay (for example [strfry](https://github.com/hoytech/strfry) or nostr-rs-relay) and add it to room links:
+```
+…#room=…&key=…&relays=wss://relay.example.com
+```
+
+---
+
+## 5. Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `pages.yml` fails at "configure-pages" | Pages isn't enabled: **Settings → Pages → Source: GitHub Actions**. Or disable the workflow if you only use Cloudflare. |
+| `cloudflare.yml` passes but deploys nothing | The `CLOUDFLARE_API_TOKEN` secret isn't set; the run log shows "skipping the Cloudflare deploy". |
+| Wrangler says it needs Node.js 22 | Wrangler 4 requires Node.js 22+. CI already uses 22; update Node locally. |
+| The page is blank and the console shows 404s for `.js`/`.wasm` files | The build isn't using relative paths. Build from `crates/client` so `Trunk.toml` (`public_url = "./"`) applies. |
+| An old version keeps showing after a deploy | The service worker updates in the background: reload once more, or close and reopen the tab. |
+| Camera or microphone is blocked | The site must be served over HTTPS (both hosts do this; enable **Enforce HTTPS** for a GitHub custom domain). |
+| Members show `via <name>` and can't hear each other | No direct path between them. Use the Cloudflare setup or add `&turn=…` (section 2). |
+| Stuck at "Connecting to Relay" | The public relays are unreachable or rate-limiting. Retry, or add your own relay with `&relays=` (section 4). |

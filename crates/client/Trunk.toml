@@ -1,0 +1,5 @@
+[build]
+target = "index.html"
+# Relative asset URLs, so the build works from any path: a domain root, a GitHub Pages
+# project path (https://<user>.github.io/<repo>/) or IPFS.
+public_url = "./"

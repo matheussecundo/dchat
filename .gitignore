@@ -1,9 +1,11 @@
 target/
 **/*.rs.bk
-Cargo.lock
 crates/client/dist/
 crates/client/dist-e2e/
 e2e/node_modules/
 e2e/test-results/
 e2e/playwright-report/
 .system_generated/
+.wrangler/
+# Wrangler local secrets (TURN token for `wrangler dev`): never commit
+.dev.vars

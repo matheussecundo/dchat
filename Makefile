@@ -1,4 +1,4 @@
-.PHONY: all build build-client build-client-e2e build-server test test-rust test-e2e serve serve-http clean
+.PHONY: all build build-client build-client-e2e build-server test test-rust test-worker test-e2e serve serve-http deploy-cloudflare clean
 
 all: build test
 
@@ -20,11 +20,15 @@ test-rust:
 	@echo "==> Running Rust unit and integration tests..."
 	cargo test --workspace
 
+test-worker:
+	@echo "==> Running Cloudflare Worker unit tests..."
+	node --test worker/
+
 test-e2e: build-client-e2e
 	@echo "==> Running Playwright multi-peer browser E2E tests..."
 	cd e2e && npm test
 
-test: test-rust test-e2e
+test: test-rust test-worker test-e2e
 
 serve: build-client
 	@echo "==> Starting dchat server in HTTPS mode (default port 8443)..."
@@ -33,6 +37,10 @@ serve: build-client
 serve-http: build-client
 	@echo "==> Starting dchat server in HTTP mode (port 3000)..."
 	cargo run -p server --release -- --http --port 3000 --static-dir crates/client/dist
+
+deploy-cloudflare: build-client
+	@echo "==> Deploying to Cloudflare Workers (needs: npx wrangler login, or CLOUDFLARE_API_TOKEN)..."
+	npx wrangler@4 deploy
 
 clean:
 	cargo clean

@@ -1,0 +1,19 @@
+// Cloudflare Workers deployment: the static client plus worker/index.js (GET /ice-servers).
+// One-time setup and secrets: see README "Cloudflare (Workers + TURN)".
+{
+  "name": "dchat",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./crates/client/dist",
+    "binding": "ASSETS"
+  },
+  // Up to 20 credential requests per minute per client IP.
+  "ratelimits": [
+    {
+      "name": "ICE_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 20, "period": 60 }
+    }
+  ]
+}

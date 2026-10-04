@@ -1,0 +1,54 @@
+# Shared by the deploy workflows: test everything, build the static client and hand
+# crates/client/dist over as the "site" artifact.
+name: Build site
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  TRUNK_VERSION: v0.21.14
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Trunk
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" | tar -xz -C "$HOME/.local/bin" trunk
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/trunk" --version
+
+      - name: Rust unit tests
+        run: cargo test --workspace --locked
+
+      - name: Worker unit tests
+        run: node --test worker/
+
+      - name: Build client (release, relative asset paths from Trunk.toml)
+        working-directory: crates/client
+        run: trunk build --release --locked
+
+      - name: Check no test hooks shipped
+        run: "! grep -q __dchat crates/client/dist/*.wasm"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: crates/client/dist
+          if-no-files-found: error
