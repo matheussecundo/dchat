@@ -64,6 +64,7 @@ fn App() -> impl IntoView {
     let (voice_cap_input, set_voice_cap_input) = create_signal(DEFAULT_VOICE_CAP.to_string());
     let (video_cap_input, set_video_cap_input) = create_signal(DEFAULT_VIDEO_CAP.to_string());
     let (history_input, set_history_input) = create_signal(false);
+    let (hide_ip_input, set_hide_ip_input) = create_signal(false);
     // Relay choice: what the link already says, else public; a deployment can pre-fill its
     // own relay address at build time (DCHAT_RELAY_URL).
     let initial_relays = fragment_relay_choice();
@@ -99,6 +100,7 @@ fn App() -> impl IntoView {
     let (room_id_sig, set_room_id_sig) = create_signal(String::new());
     let (toast, set_toast) = create_signal(Option::<&'static str>::None);
     let (update_required, set_update_required) = create_signal(false);
+    let (no_turn, set_no_turn) = create_signal(false);
 
     // Voice lounge
     let (lounge, set_lounge) = create_signal(Vec::<LoungeMemberUi>::new());
@@ -148,6 +150,7 @@ fn App() -> impl IntoView {
             dms: set_dms,
             dm_unread: set_dm_unread,
             update_required: set_update_required,
+            no_turn: set_no_turn,
         };
         set_room_id_sig.set(room_id.clone());
         match RoomSession::start(room_id, key, my_name.get_value(), signals, migrated, host_ice.get_value()) {
@@ -204,6 +207,7 @@ fn App() -> impl IntoView {
             voice: parse_cap(Some(&voice_cap_input.get_untracked()), DEFAULT_VOICE_CAP),
             video: parse_cap(Some(&video_cap_input.get_untracked()), DEFAULT_VIDEO_CAP),
             history: history_input.get_untracked(),
+            hide_ip: hide_ip_input.get_untracked(),
             relays: match (relay_mode.get_untracked(), custom_relays.get_untracked()) {
                 (RelayMode::Public, _) => None,
                 (mode, Some(urls)) => Some(format_relay_list(&urls, mode == RelayMode::CustomWithPublic)),
@@ -543,6 +547,7 @@ fn App() -> impl IntoView {
         }
     };
     let history_on = move || session_ref.with_value(|s| s.as_ref().is_some_and(|s| s.history_enabled()));
+    let hides_ip = move || session_ref.with_value(|s| s.as_ref().is_some_and(|s| s.hides_ip()));
 
     let is_connected = move || status.get() == ConnectionStatus::Connected;
     let display_name = move |pubkey: &str| {
@@ -661,6 +666,18 @@ fn App() -> impl IntoView {
                         />
                         <span>{move || t(lang.get(), "history_label")}</span>
                     </label>
+                    <label class="lobby-check" for="hide-ip-checkbox">
+                        <input
+                            type="checkbox"
+                            id="hide-ip-checkbox"
+                            prop:checked=move || hide_ip_input.get()
+                            on:change=move |ev| set_hide_ip_input.set(event_target_checked(&ev))
+                        />
+                        <span>{move || t(lang.get(), "hide_ip_label")}</span>
+                    </label>
+                    {move || hide_ip_input.get().then(|| view! {
+                        <p class="lobby-hint">{move || t(lang.get(), "hide_ip_hint")}</p>
+                    })}
                     {move || cap_is_large().then(|| view! {
                         <p class="lobby-warning">{move || t(lang.get(), "cap_warning")}</p>
                     })}
@@ -859,6 +876,11 @@ fn App() -> impl IntoView {
                             {move || t(lang.get(), "history_badge")}
                         </span>
                     })}
+                    {move || hides_ip().then(|| view! {
+                        <span class="history-badge hide-ip-badge" title=move || t(lang.get(), "hide_ip_badge_title")>
+                            {move || t(lang.get(), "hide_ip_badge")}
+                        </span>
+                    })}
                     <button class="btn btn-secondary copy-invite-btn" on:click=copy_invite_link>
                         {move || if copied.get() { t(lang.get(), "btn_copied") } else { t(lang.get(), "btn_copy_link") }}
                     </button>
@@ -991,6 +1013,12 @@ fn App() -> impl IntoView {
                     </button>
                 </div>
             </div>
+
+            {move || no_turn.get().then(|| view! {
+                <div id="no-turn-banner" class="update-banner" role="alert">
+                    <span>{move || t(lang.get(), "no_turn_banner")}</span>
+                </div>
+            })}
 
             {move || update_required.get().then(|| view! {
                 <div id="update-banner" class="update-banner" role="alert">

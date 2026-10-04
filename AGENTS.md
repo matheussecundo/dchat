@@ -35,7 +35,7 @@ Every agent modifying this codebase must enforce these non-negotiable security a
 
 5. **Group Mesh Invariants (Phase 8)**:
    - **Topology**: full mesh, one `RTCPeerConnection` (`mesh::PeerLink`) per member pair. No SFU or any other server ever handles messages or media.
-   - **Addressed signaling**: `Offer`/`Answer`/`IceBatch` carry the recipient session pubkey in `to` (inside the encrypted payload); `NostrRelayPool` drops signals addressed to someone else. The lower pubkey of each pair dials; perfect negotiation (polite = higher pubkey) handles any later glare.
+   - **Addressed signaling**: `Offer`/`Answer`/`IceBatch` carry the recipient session pubkey in `to` (inside the encrypted payload); `NostrRelayPool` drops signals addressed to someone else. Through the relays they travel as `RelaySignal::Sealed`: sealed with ECDH to the recipient's session key inside the room-key encryption, so the room key alone opens only `Presence` and `PeerLeft` (SDP and ICE carry IP addresses). The lower pubkey of each pair dials; perfect negotiation (polite = higher pubkey) handles any later glare.
    - **Signed room messages**: every data-channel message is a `RoomEnvelope` signed by its author's session key (`sign_message`, domain-separated from Nostr event signatures) and encrypted with the room key. Receivers verify the signature **before** recording the message id for dedup, then relay it to neighbors without a direct link to the author (`Roster::forward_targets`). Attribution always comes from the verified `author`, never from a self-declared name.
    - **Protocol version**: members link only with members on the same `PROTOCOL_VERSION` (`protocol/src/version.rs`), so nothing exchanged needs to stay compatible across versions. Every relay signal is `VersionedSignal { v, payload }` inside the room-key encryption; `decode_signal` reads `v` first and never parses another version's payload. The pool reports other versions instead of linking: the older side shows a reload banner (`#update-banner`), the newer side a one-time toast per member. Links form only through that check, so data-channel messages carry no version.
    - **When to bump `PROTOCOL_VERSION`**: any change to how signals or room messages are encoded (the `wire_format_matches_protocol_version` test fails until you bump it and record the new fingerprint), signed-bytes formats, the file chunk layout, or a rule every member must apply alike (caps, gossip, history, rekey). UI-only changes don't bump it, so deploying them never splits a live room. The shape of `v` itself must never change.
@@ -59,10 +59,12 @@ Every agent modifying this codebase must enforce these non-negotiable security a
    - `dchat-relay` must stay RAM-only and dchat-only: ephemeral kinds only, signature and freshness checks, per-connection rate limits, per-IP connection caps, optional origin allow-list, no IPs/topics/content in logs. The dev server mounts the same code at `/nostr`, so E2E runs exercise it.
 
 8. **NAT Traversal (known limitation, must stay documented)**:
-   - ICE uses STUN only by default (`stun:stun.l.google.com:19302`). Pairs behind carrier-grade NAT (mobile data) or symmetric NAT often cannot link directly: roughly 10–20% of pairs, and more pairs fail as a room grows.
+   - **STUN choice** (`protocol::plan_ice`): the room's `&stun=`, otherwise any STUN the host offers (`./ice-servers`), otherwise `FALLBACK_STUN_URL` (Google, which then sees members' IPs). Never add Google, or any other third party, when something else already does the job.
+   - **Hide IP addresses** (`&hideip=1`, a create-form checkbox): `iceTransportPolicy: "relay"`, no STUN at all, so members see only the TURN server's address. It needs TURN (host or `&turn=`); without one the room shows `#no-turn-banner`. It hides members from each other, not from relays or the TURN server.
+   - Without TURN, ICE has STUN only. Pairs behind carrier-grade NAT (mobile data) or symmetric NAT often cannot link directly: roughly 10–20% of pairs, and more pairs fail as a room grows.
    - Such pairs show `via <name>` in the member list: **text** still flows, gossip-relayed through a mutual member (signed, room-key encrypted). **Audio, video and files** need a direct link and are unavailable for that pair. With no mutual member the person stays `connecting…`.
    - The fix is an optional TURN server supplied in the URL fragment (`&turn=…&turnuser=…&turnpass=…`, see `build_rtc_config` in `session.rs`). TURN relays encrypted packets only; it sees IPs and timing, never content.
-   - The README section "When Members Can't Connect Directly (NAT)" is the user-facing version; keep both in sync.
+   - The README section "When Members Can't Connect Directly (NAT)" is the user-facing version; keep both in sync. `docs/PRIVACY.md` lists who sees what: update it whenever data flows change.
 
 ---
 
@@ -135,6 +137,7 @@ dchat/
 │       ├── relay_reconnect.spec.js # Dropped relay connection reconnects; newcomers still reach the member
 │       ├── link_renegotiation.spec.js # With every relay cut after linking, voice and video still negotiate over the link
 │       ├── protocol_version.spec.js # Different protocol versions never link; the older member gets a reload banner
+│       ├── privacy.spec.js     # Sealed handshakes vs the room key, STUN fallback, hideip through a real TURN (node-turn)
 │       ├── audio_call.spec.js  # 2-member lounge audio, mic/speaker mute, leave (replaceTrack null) and rejoin
 │       ├── video_call.spec.js  # Camera tiles, camera flip keeps the mic, camera off, grid teardown
 │       ├── screen_share.spec.js# Screen share, switch to camera on the same sender, stop
@@ -153,6 +156,7 @@ dchat/
 │   ├── ice.js                  # Fresh Cloudflare TURN credentials (token stays server-side), port-53 filter
 │   └── index.test.mjs          # node --test worker/ (stubbed TURN API)
 ├── docs/DEPLOYMENT.md          # Step-by-step hosting: GitHub Pages, Cloudflare Workers + TURN, troubleshooting
+├── docs/PRIVACY.md             # Who sees what (members, relays, STUN/TURN, host), protections, possible improvements
 ├── README.md                   # User guide, building, running locally, mobile test
 └── AGENTS.md                   # This document
 ```
@@ -280,6 +284,8 @@ When writing or reviewing code, check off every item:
 - [ ] Relay URLs from links or the create form pass `is_relay_url` (no `&`, `#`, `,` or whitespace), and HTTPS pages only use `wss://`.
 - [ ] The Cloudflare TURN API token exists only as a Worker secret; `/ice-servers` responses are short-lived, `no-store` and never cached by the Service Worker; the client request carries no room data.
 - [ ] `e2e-hooks` code (`window.__dchat.selfPubkey/blockPeer/throttleUploads`, and reading `window.__dchatProtocolVersion`) stays behind `#[cfg(feature = "e2e-hooks")]` and out of `make build-client` output.
+- [ ] Offers, answers and ICE reach the relays only as `RelaySignal::Sealed` (never readable with the room key alone).
+- [ ] No third-party server is contacted by default when the room or host provides one (Google STUN only via `plan_ice`'s fallback); `hideip` rooms gather relay candidates only.
 - [ ] Wire or shared-rule changes bump `PROTOCOL_VERSION` and record the new fingerprint; signals from other versions are reported, never parsed or linked.
 - [ ] `LinkSignal` is applied only from the link's own remote (direct-only), and only for offers, answers and ICE addressed to us.
 - [ ] Direct-only room messages (`RoomBody::recipient()` is `Some`) are applied only when `to` is us and the envelope came straight from its author; they are never relayed.

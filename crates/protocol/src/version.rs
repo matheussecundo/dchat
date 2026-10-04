@@ -1,14 +1,14 @@
 //! Protocol version: members link only with members on the same version, so the
 //! messages they exchange never need to stay compatible with older or newer clients.
 
-use crate::messages::SignalPayload;
+use crate::messages::RelaySignal;
 use serde::{Deserialize, Serialize};
 
 /// Bump whenever members on the old and new code could misunderstand each other: the
 /// encoding of any signal or room message (the `wire_format_matches_protocol_version`
 /// test catches those), signed bytes, the file chunk layout, or a rule every member must
 /// apply alike (caps, gossip, history, rekey).
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// What travels through the relays (encrypted with the room key): the sender's protocol
 /// version and its signal. Every version must keep `v` readable, whatever `payload` becomes.
@@ -20,13 +20,13 @@ pub struct VersionedSignal<T> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodedSignal {
-    Signal(SignalPayload),
+    Signal(RelaySignal),
     /// From a member on another protocol version: its payload is not parsed.
     OtherVersion(u32),
     Invalid,
 }
 
-pub fn encode_signal(signal: &SignalPayload, version: u32) -> serde_json::Result<Vec<u8>> {
+pub fn encode_signal(signal: &RelaySignal, version: u32) -> serde_json::Result<Vec<u8>> {
     serde_json::to_vec(&VersionedSignal { v: version, payload: signal })
 }
 
@@ -38,7 +38,7 @@ pub fn decode_signal(json: &[u8], version: u32) -> DecodedSignal {
     }
     match serde_json::from_slice::<VersionOnly>(json) {
         Ok(VersionOnly { v }) if v != version => DecodedSignal::OtherVersion(v),
-        Ok(_) => match serde_json::from_slice::<VersionedSignal<SignalPayload>>(json) {
+        Ok(_) => match serde_json::from_slice::<VersionedSignal<RelaySignal>>(json) {
             Ok(signal) => DecodedSignal::Signal(signal.payload),
             Err(_) => DecodedSignal::Invalid,
         },
@@ -56,14 +56,32 @@ mod tests {
 
     /// The wire fingerprint recorded for the current version. When the test below fails,
     /// bump `PROTOCOL_VERSION` and record the new pair here.
-    const RECORDED: (u32, &str) = (1, "a90036681b3dce01d9615dcf6b2f70ba1c4b010e8260e61c53829b5538e3f981");
+    const RECORDED: (u32, &str) = (2, "6aeb1f32428d89b189042c16cd25a4cb61902c8ff7a1a68b6902c0aba89fe3a3");
 
     fn sealed() -> EncryptedPayload {
         EncryptedPayload { nonce: "n".into(), ciphertext: "c".into() }
     }
 
-    /// One sample of every signal. Adding a variant breaks the exhaustive match below;
-    /// add its sample here too.
+    /// One sample of every relay signal. Adding a variant breaks the exhaustive match
+    /// below; add its sample here too.
+    fn relay_signals() -> Vec<RelaySignal> {
+        vec![
+            RelaySignal::Presence,
+            RelaySignal::PeerLeft,
+            RelaySignal::Sealed { to: "b".into(), sealed: sealed() },
+        ]
+    }
+
+    fn relay_signal_kind(signal: &RelaySignal) -> &'static str {
+        match signal {
+            RelaySignal::Presence => "Presence",
+            RelaySignal::PeerLeft => "PeerLeft",
+            RelaySignal::Sealed { .. } => "Sealed",
+        }
+    }
+
+    /// One sample of every signal (sealed inside `RelaySignal::Sealed`, or sent over a
+    /// link). Adding a variant breaks the exhaustive match below; add its sample here too.
     fn signals() -> Vec<SignalPayload> {
         vec![
             SignalPayload::Presence,
@@ -165,8 +183,11 @@ mod tests {
     /// A hash over the encoding of everything members exchange.
     fn wire_fingerprint() -> String {
         let mut wire: Vec<String> = Vec::new();
-        for signal in signals() {
+        for signal in relay_signals() {
             wire.push(String::from_utf8(encode_signal(&signal, 0).unwrap()).unwrap());
+        }
+        for signal in signals() {
+            wire.push(serde_json::to_string(&signal).unwrap());
         }
         for body in bodies() {
             wire.push(String::from_utf8(RoomEnvelope::signed_bytes("id", "a", 1, &body).unwrap()).unwrap());
@@ -186,6 +207,8 @@ mod tests {
 
     #[test]
     fn test_samples_cover_every_variant_once() {
+        let kinds: std::collections::HashSet<_> = relay_signals().iter().map(relay_signal_kind).collect();
+        assert_eq!(kinds.len(), relay_signals().len());
         let kinds: std::collections::HashSet<_> = signals().iter().map(signal_kind).collect();
         assert_eq!(kinds.len(), signals().len());
         let kinds: std::collections::HashSet<_> = bodies().iter().map(body_kind).collect();
@@ -208,7 +231,7 @@ mod tests {
 
     #[test]
     fn test_same_version_signals_roundtrip() {
-        for signal in signals() {
+        for signal in relay_signals() {
             let json = encode_signal(&signal, 4).unwrap();
             assert_eq!(decode_signal(&json, 4), DecodedSignal::Signal(signal));
         }
@@ -219,12 +242,12 @@ mod tests {
         // A future version may send a payload this one cannot parse; the version still reads.
         let future = br#"{"v":9,"payload":{"kind":"Teleport","content":{"to":"b"}}}"#;
         assert_eq!(decode_signal(future, 4), DecodedSignal::OtherVersion(9));
-        let older = encode_signal(&SignalPayload::Presence, 3).unwrap();
+        let older = encode_signal(&RelaySignal::Presence, 3).unwrap();
         assert_eq!(decode_signal(&older, 4), DecodedSignal::OtherVersion(3));
         let unknown_payload = br#"{"v":4,"payload":{"kind":"Teleport"}}"#;
         assert_eq!(decode_signal(unknown_payload, 4), DecodedSignal::Invalid);
-        // Today's unversioned signals (bare payloads) are not mistaken for anything.
-        let bare = serde_json::to_vec(&SignalPayload::Presence).unwrap();
+        // Unversioned signals (bare payloads, before version 1) are not mistaken for anything.
+        let bare = serde_json::to_vec(&RelaySignal::Presence).unwrap();
         assert_eq!(decode_signal(&bare, 4), DecodedSignal::Invalid);
     }
 }

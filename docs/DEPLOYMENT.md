@@ -66,6 +66,14 @@ https://<user>.github.io/<repo>/#room=…&key=…&turn=turns:turn.example.com:53
 ```
 Everyone with the link can see those credentials, so give them a dedicated account on your TURN server.
 
+Rooms created with *Hide members' IP addresses* need such a TURN server in the link; without one, nobody can connect.
+
+### STUN on GitHub Pages
+Without the Cloudflare endpoint, members use Google's public STUN server (`stun.l.google.com`), which sees their IP addresses. To avoid it, name another STUN server in room links, for example your own coturn, or Cloudflare's public one:
+```
+https://<user>.github.io/<repo>/#room=…&key=…&stun=stun:stun.cloudflare.com:3478
+```
+
 ---
 
 ## 3. Cloudflare (Workers + TURN)
@@ -78,6 +86,8 @@ Security properties:
 - The request carries no room information. The room ID and key live in the URL fragment, which browsers never send.
 - Cross-site requests are refused, and each IP may make 20 requests per minute, so other websites can't spend your TURN quota.
 - TURN relays encrypted packets only. Cloudflare sees IP addresses and traffic volume, never message or media content.
+- The answer also lists Cloudflare's STUN server, so members never contact Google's.
+- Rooms created with *Hide members' IP addresses* work out of the box: members connect only through Cloudflare's TURN.
 
 ### Setup
 You need a Cloudflare account (the free plan is enough).

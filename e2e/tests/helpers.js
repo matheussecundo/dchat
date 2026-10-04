@@ -24,10 +24,11 @@ export async function newMember(browser, label) {
 }
 
 /** Create a room from the lobby. Returns the creator's URL, which is the admin link. */
-export async function createRoom(page, { name, max, voiceCap, videoCap } = {}) {
+export async function createRoom(page, { name, max, voiceCap, videoCap, hideIp } = {}) {
   await page.goto('/');
   await page.locator('#create-room-btn').waitFor();
   if (name !== undefined) await page.locator('#name-input').fill(name);
+  if (hideIp) await page.locator('#hide-ip-checkbox').check();
   if (max !== undefined) await page.locator('#cap-input').fill(String(max));
   if (voiceCap !== undefined) await page.locator('#voice-cap-input').fill(String(voiceCap));
   if (videoCap !== undefined) await page.locator('#video-cap-input').fill(String(videoCap));

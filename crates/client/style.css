@@ -1300,6 +1300,12 @@ select.lobby-input {
   cursor: help;
 }
 
+.hide-ip-badge {
+  color: #6ee7b7;
+  background-color: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
 .kick-btn {
   margin-inline-start: auto;
   padding: 1px 8px;

@@ -17,6 +17,11 @@ impl RoomSession {
         self.inner.params.history
     }
 
+    /// The room connects only through TURN, hiding members' IP addresses from each other.
+    pub fn hides_ip(&self) -> bool {
+        self.inner.params.hide_ip
+    }
+
     pub(super) fn record_history(&self, envelope: &RoomEnvelope) {
         if self.inner.params.history {
             self.inner.history.borrow_mut().record(envelope);

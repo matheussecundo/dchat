@@ -31,6 +31,7 @@ features = [
   "RtcDataChannel",
   "RtcDataChannelState",
   "RtcConfiguration",
+  "RtcIceTransportPolicy",
   "RtcSdpType",
   "RtcSessionDescription",
   "RtcSessionDescriptionInit",
