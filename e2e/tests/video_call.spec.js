@@ -1,6 +1,19 @@
 import { test, expect } from '@playwright/test';
 import { expectVideoFrames, joinVoice, sentTracks, twoMembers, videoTile, voiceChip } from './helpers.js';
 
+/** The video grid never scrolls and every tile lies inside it. */
+async function expectGridFits(page) {
+  await expect.poll(() => page.evaluate(() => {
+    const grid = document.getElementById('video-grid');
+    const box = grid.getBoundingClientRect();
+    const inside = [...grid.querySelectorAll('.tile')].every((t) => {
+      const r = t.getBoundingClientRect();
+      return r.width > 0 && r.top >= box.top - 1 && r.bottom <= box.bottom + 1 && r.left >= box.left - 1 && r.right <= box.right + 1;
+    });
+    return inside && grid.scrollHeight <= grid.clientHeight && grid.scrollWidth <= grid.clientWidth;
+  })).toBe(true);
+}
+
 test('lounge video: camera tiles, camera flip keeps the mic, camera off, leave hides the grid', async ({ browser }) => {
   test.setTimeout(90000);
   const [ana, bo] = await twoMembers(browser);
@@ -23,11 +36,22 @@ test('lounge video: camera tiles, camera flip keeps the mic, camera off, leave h
   expect(audioAfter.id).toBe(audioBefore.id);
   expect(audioAfter.readyState).toBe('live');
 
-  // Bo's camera too: two tiles on both sides, fullscreen available.
+  // Bo's camera too: two tiles on both sides, fitted to the stage without scrolling.
   await bo.page.locator('#camera-btn').click();
   await expectVideoFrames(ana.page, 'Bo');
   await expect(bo.page.locator('#video-grid .tile')).toHaveCount(2);
-  await expect(ana.page.locator('.grid-fullscreen')).toBeVisible();
+  await expectGridFits(ana.page);
+
+  // Fullscreen: the whole grid from the voice bar, then a single tile by double-click.
+  await ana.page.locator('#fullscreen-btn').click();
+  await expect.poll(() => ana.page.evaluate(() => document.fullscreenElement?.id)).toBe('video-grid');
+  await expectGridFits(ana.page);
+  await expect(ana.page.locator('.grid-fullscreen')).toHaveText('✕');
+  await ana.page.locator('.grid-fullscreen').click();
+  await expect.poll(() => ana.page.evaluate(() => document.fullscreenElement === null)).toBe(true);
+  await videoTile(ana.page, 'Bo').dblclick();
+  await expect.poll(() => ana.page.evaluate(() => document.fullscreenElement?.classList.contains('tile'))).toBe(true);
+  await ana.page.evaluate(() => document.exitFullscreen());
 
   // Camera off removes the tile but keeps the call.
   await ana.page.locator('#camera-btn').click();

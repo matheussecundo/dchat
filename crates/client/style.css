@@ -1254,7 +1254,8 @@ header {
 }
 
 @media (hover: none) {
-  .message-actions {
+  .message-actions,
+  .tile-fullscreen {
     opacity: 0.6;
   }
 }
@@ -1418,31 +1419,71 @@ header {
   flex-shrink: 0;
 }
 
+/* The stage has a fixed height; tile sizes and columns are computed to fit it exactly
+   (see layout.rs), so it never scrolls. Keep `gap` in sync with GRID_GAP_PX. */
 .video-grid {
   position: relative;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  justify-content: center;
+  align-content: center;
   gap: 8px;
   padding: 8px 24px;
-  max-height: 45vh;
-  overflow-y: auto;
+  height: clamp(200px, 46vh, 640px);
+  overflow: hidden;
   background-color: #000;
   flex-shrink: 0;
 }
 
-.video-grid:fullscreen {
-  max-height: none;
-  align-content: center;
+.video-grid:fullscreen,
+.video-grid.expanded {
+  height: 100vh;
+  height: 100dvh;
+  padding: 12px;
+}
+
+/* Fallback where element fullscreen is unavailable (iPhone Safari). */
+.video-grid.expanded {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
 }
 
 .tile {
   position: relative;
-  aspect-ratio: 16 / 9;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
   background-color: #111;
   border: 2px solid transparent;
   border-radius: 8px;
   overflow: hidden;
   transition: border-color 0.15s ease;
+}
+
+.tile:fullscreen {
+  border: none;
+  border-radius: 0;
+  background-color: #000;
+}
+
+.tile-fullscreen {
+  position: absolute;
+  top: 6px;
+  inset-inline-end: 6px;
+  background-color: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 6px;
+  padding: 2px 7px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.tile:hover .tile-fullscreen,
+.tile:focus-within .tile-fullscreen {
+  opacity: 1;
 }
 
 .tile.speaking {
@@ -1468,10 +1509,12 @@ header {
 
 .grid-fullscreen {
   position: absolute;
-  top: 12px;
-  inset-inline-end: 28px;
-  padding: 4px 8px;
-  opacity: 0.8;
+  bottom: 12px;
+  inset-inline-end: 12px;
+  z-index: 2;
+  padding: 4px 10px;
+  font-size: 1rem;
+  background-color: rgba(17, 24, 39, 0.75);
 }
 
 .audio-settings-modal {
@@ -1532,8 +1575,8 @@ header {
     padding: 8px 12px;
   }
   .video-grid {
-    padding: 8px 12px;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    padding: 6px 12px;
+    height: clamp(160px, 34vh, 360px);
   }
   .lobby-row {
     flex-direction: column;
