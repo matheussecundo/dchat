@@ -5,8 +5,8 @@ use gloo_net::websocket::Message;
 use protocol::crypto::{decrypt_bytes, encrypt_bytes, EncryptedPayload};
 use protocol::{
     decode_signal, encode_signal, hash_room_topic, verify_event, ClientRelayMessage, DecodedSignal, GossipDedup,
-    NostrBurnerKey, NostrFilter, RelayClientMessage, SignalPayload, KIND_EPHEMERAL_SIGNAL, KEY_LENGTH,
-    PROTOCOL_VERSION,
+    NostrBurnerKey, NostrFilter, RelayClientMessage, RelaySignal, SignalPayload, KIND_EPHEMERAL_SIGNAL,
+    KEY_LENGTH, PROTOCOL_VERSION,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -206,22 +206,29 @@ impl NostrRelayPool {
             log::warn!("Failed to decrypt incoming Nostr signal payload with room key");
             return;
         };
-        // 5. Same protocol version only; signals addressed to other members are dropped.
+        // 5. Same protocol version only; signals addressed to other members are dropped, and
+        // ours are opened with our session key.
         match decode_signal(&plaintext, self.version) {
-            DecodedSignal::Signal(signal) => {
-                if signal.recipient().is_some_and(|to| to != self.burner_key.pubkey()) {
+            DecodedSignal::Signal(relayed) => {
+                if relayed.recipient().is_some_and(|to| to != self.burner_key.pubkey()) {
                     return;
                 }
-                (events.on_signal)(event.pubkey, signal);
+                match relayed.open(&self.burner_key, &event.pubkey) {
+                    Some(signal) => (events.on_signal)(event.pubkey, signal),
+                    None => log::warn!("Dropping a sealed signal that does not open"),
+                }
             }
             DecodedSignal::OtherVersion(version) => (events.on_other_version)(event.pubkey, version),
             DecodedSignal::Invalid => log::warn!("Dropping an unreadable signal"),
         }
     }
 
-    /// Encrypt, sign and serialize `signal` as an EVENT message.
+    /// Seal (when addressed), encrypt, sign and serialize `signal` as an EVENT message.
     fn signed_event_json(&self, signal: &SignalPayload) -> Option<String> {
-        let plaintext = encode_signal(signal, self.version).ok()?;
+        let relayed = RelaySignal::seal(&self.burner_key, signal)
+            .map_err(|e| log::error!("Failed to seal signaling payload: {:?}", e))
+            .ok()?;
+        let plaintext = encode_signal(&relayed, self.version).ok()?;
         let encrypted = encrypt_bytes(&self.key, &plaintext)
             .map_err(|e| log::error!("Failed to encrypt signaling payload: {:?}", e))
             .ok()?;

@@ -15,6 +15,7 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 * **Decentralized Nostr Signaling**: Replaces proprietary signaling servers with public, open Nostr relays using NIP-16 Ephemeral Events (Kind 20001, dropped upon dispatch, zero disk storage).
 * **Serverless Architecture**: 100% static client deployable to GitHub Pages, Cloudflare Pages, Netlify, or IPFS. No backend required!
 * **Multi-Relay Pool Resilience**: Broadcasts and subscribes across a concurrent relay pool (`wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.primal.net`) with automatic event deduplication.
+* **Metadata Protection**: WebRTC handshakes (which carry IP addresses) are sealed to their recipient, Google's STUN server is only a fallback, and rooms can hide members' IP addresses from each other by connecting through TURN. See [`docs/PRIVACY.md`](./docs/PRIVACY.md) for who sees what.
 * **Ephemeral Burner Keypairs**: Generates fresh in-memory secp256k1 burner keypairs per session for BIP-340 Schnorr event signatures, discarding them on exit.
 * **Dual-Layer E2EE**: In addition to standard WebRTC DTLS, messages and signaling envelopes are encrypted with **ChaCha20-Poly1305** using the URL fragment key. Relays are completely blind to message contents.
 * **Instant Destruction**: Reloading the page or closing the tab wipes linear memory, destroys the WebRTC connection, and permanently erases all history.
@@ -95,6 +96,8 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 
 Every room message is signed with its author's session key, so a member relaying it cannot alter it or forge messages from someone else.
 
+**Privacy**: tick *Hide members' IP addresses from each other* when creating a room and every member connects through a TURN server, so nobody in the room learns anyone's IP address (the room shows 🛡️ *IPs hidden*). It needs a TURN server from the host or the link. [`docs/PRIVACY.md`](./docs/PRIVACY.md) explains what members, relays and servers can see, and lists possible improvements.
+
 **Versions**: members connect only with members running the same dchat protocol version. If someone in the room has a newer version, you see *Someone in this room is using a newer version of dchat* with a **Reload** button; reloading loads the latest version and keeps the room link (like any reload, it clears this tab's chat). Members on the newer version see a short notice instead. Updates that only change the interface don't affect who can connect.
 
 **History for late joiners** is off by default: you only see messages sent while you are in the room. The creator can tick *Let late joiners see the last 200 messages*, which adds `&hist=1` to the link and shows a 🕒 badge. Members then keep recent messages in memory (never on disk) and hand them to newcomers as signed originals, so they can't be altered. Each message carries its author's own setting: someone who joined with a link without `hist=1` keeps their messages out of history. History disappears when the last member leaves. Like any chat, "off" can't stop someone who is present from copying a message.
@@ -143,10 +146,12 @@ Everything after `#` stays in the browser and is never sent to any server.
 | `relays` | `relays=wss://a,nostr` | The room's Nostr relays, exactly; `nostr` stands for the public relays (default when absent) |
 | `turn` | `turn=turns:turn.example.com:5349` | Optional TURN server(s), comma-separated |
 | `turnuser`, `turnpass` | `turnuser=me&turnpass=s3cret` | TURN credentials (percent-encode special characters) |
+| `stun` | `stun=stun:stun.example.com:3478` | The room's STUN server(s), comma-separated. Without it, the host's STUN is used, and only if there is none, Google's |
+| `hideip` | `hideip=1` | Connect only through TURN, so members never see each other's IP addresses (needs a TURN server) |
 
 ### When Members Can't Connect Directly (NAT)
 
-dchat uses STUN only by default, so it needs no infrastructure of its own. Most home and office networks connect fine. But two members behind **carrier-grade NAT** (common on mobile data) or **symmetric NAT** often cannot open a direct WebRTC link: roughly 10–20% of pairs. In a group mesh, the more members a room has, the more likely it is that some pair fails.
+Without TURN, dchat uses STUN only, so it needs no infrastructure of its own. Most home and office networks connect fine. But two members behind **carrier-grade NAT** (common on mobile data) or **symmetric NAT** often cannot open a direct WebRTC link: roughly 10–20% of pairs. In a group mesh, the more members a room has, the more likely it is that some pair fails.
 
 What you will see:
 - The member list shows the other person as **`via <name>`** instead of `direct`.

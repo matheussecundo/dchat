@@ -20,18 +20,17 @@ use lounge::{Lounge, VoiceInfo};
 use leptos::*;
 use protocol::crypto::{decrypt_json, encrypt_json};
 use protocol::{
-    admin_proof_message, verify_message, EncryptedPayload, GossipDedup, HistoryBuffer, Member,
-    NostrBurnerKey, Reactions, RoomBody, RoomEnvelope, RoomParams, Roster, SignalPayload,
-    HISTORY_LIMIT, KEY_LENGTH,
+    admin_proof_message, plan_ice, verify_message, EncryptedPayload, GossipDedup, HistoryBuffer, IcePlan,
+    Member, NostrBurnerKey, Reactions, RoomBody, RoomEnvelope, RoomParams, Roster, SignalPayload,
+    FALLBACK_STUN_URL, HISTORY_LIMIT, KEY_LENGTH,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
-use web_sys::{window, RtcConfiguration};
+use web_sys::{window, RtcConfiguration, RtcIceTransportPolicy};
 
-const DEFAULT_STUN: &str = "stun:stun.l.google.com:19302";
 const TICK_MS: i32 = 2500;
 /// Beacon every tick while joining, then every `SLOW_BEACON_EVERY` ticks.
 const FAST_BEACON_FOR_MS: f64 = 20_000.0;
@@ -78,6 +77,8 @@ pub struct SessionSignals {
     pub dm_unread: WriteSignal<HashMap<String, usize>>,
     /// A member runs a newer protocol version: reload to update and connect with them.
     pub update_required: WriteSignal<bool>,
+    /// The room hides IP addresses (TURN only) but no TURN server is available here.
+    pub no_turn: WriteSignal<bool>,
 }
 
 #[derive(Clone)]
@@ -157,10 +158,12 @@ impl RoomSession {
             .filter(|admin| params.admin_pubkey.as_deref() == Some(admin.pubkey()))
             .and_then(|admin| admin.sign_message(&admin_proof_message(&room_id, &me)).ok());
 
+        let (rtc_config, ice_plan) = build_rtc_config(&params, host_ice.as_ref());
+        signals.no_turn.set(ice_plan.relay_only && !ice_plan.has_turn);
         let session = Self {
             inner: Rc::new(Inner {
                 key,
-                rtc_config: build_rtc_config(&params, host_ice.as_ref()),
+                rtc_config,
                 params,
                 room_id: room_id.clone(),
                 identity: identity.clone(),
@@ -928,18 +931,24 @@ fn clean_remote_name(raw: &str, author: &str) -> String {
 
 /// STUN by default, plus TURN for members whose NATs block direct connections: servers the
 /// host offers (`host_ice`) and/or one from the room link (`&turn=`, `&turnuser=`, `&turnpass=`).
-fn build_rtc_config(params: &RoomParams, host_ice: Option<&js_sys::Array>) -> RtcConfiguration {
+/// ICE settings for every link (see `protocol::plan_ice`): the room's STUN and TURN, then
+/// the host's; Google's STUN only when nothing else offers STUN; TURN only with `&hideip=1`.
+fn build_rtc_config(params: &RoomParams, host_ice: Option<&js_sys::Array>) -> (RtcConfiguration, IcePlan) {
     let config = RtcConfiguration::new();
     let servers = js_sys::Array::new();
+    let server = |urls: &[String]| {
+        let entry = js_sys::Object::new();
+        let urls: js_sys::Array = urls.iter().map(|u| wasm_bindgen::JsValue::from_str(u)).collect();
+        let _ = js_sys::Reflect::set(&entry, &"urls".into(), &urls);
+        entry
+    };
 
-    let stun = js_sys::Object::new();
-    let _ = js_sys::Reflect::set(&stun, &"urls".into(), &DEFAULT_STUN.into());
-    servers.push(&stun);
-
+    if !params.stun_urls.is_empty() {
+        servers.push(&server(&params.stun_urls));
+    }
     if !params.turn_urls.is_empty() {
-        let turn = js_sys::Object::new();
-        let urls: js_sys::Array = params.turn_urls.iter().map(|u| wasm_bindgen::JsValue::from_str(&decode(u))).collect();
-        let _ = js_sys::Reflect::set(&turn, &"urls".into(), &urls);
+        let urls: Vec<String> = params.turn_urls.iter().map(|u| decode(u)).collect();
+        let turn = server(&urls);
         if let Some(user) = &params.turn_user {
             let _ = js_sys::Reflect::set(&turn, &"username".into(), &decode(user).into());
         }
@@ -948,13 +957,26 @@ fn build_rtc_config(params: &RoomParams, host_ice: Option<&js_sys::Array>) -> Rt
         }
         servers.push(&turn);
     }
-
-    for server in host_ice.into_iter().flat_map(|list| list.iter()) {
-        servers.push(&server);
+    let mut host_urls = Vec::new();
+    for entry in host_ice.into_iter().flat_map(|list| list.iter()) {
+        if let Ok(urls) = js_sys::Reflect::get(&entry, &"urls".into()) {
+            match urls.dyn_ref::<js_sys::Array>() {
+                Some(list) => host_urls.extend(list.iter().filter_map(|u| u.as_string())),
+                None => host_urls.extend(urls.as_string()),
+            }
+        }
+        servers.push(&entry);
     }
 
+    let plan = plan_ice(params, &host_urls);
+    if plan.fallback_stun {
+        servers.push(&server(&[FALLBACK_STUN_URL.to_string()]));
+    }
+    if plan.relay_only {
+        config.set_ice_transport_policy(RtcIceTransportPolicy::Relay);
+    }
     config.set_ice_servers(&servers);
-    config
+    (config, plan)
 }
 
 /// Fragment values may be percent-encoded (e.g. TURN credentials with special characters).

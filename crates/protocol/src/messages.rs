@@ -47,8 +47,8 @@ pub struct IceCandidateData {
     pub sdp_m_line_index: Option<u16>,
 }
 
-/// The inner signaling payload that is encrypted into an `EncryptedPayload` using
-/// the secret key from the URL hash. The server/relays never see this in plaintext!
+/// A WebRTC signal between members. Through the relays it travels as a `RelaySignal`;
+/// over an open link, inside a `RoomBody::LinkSignal`.
 ///
 /// Every room member subscribes to the same topic, so SDP and ICE carry the
 /// recipient's session pubkey in `to`; everyone else ignores them.
@@ -80,6 +80,58 @@ impl SignalPayload {
             | SignalPayload::Answer { to, .. }
             | SignalPayload::IceBatch { to, .. } => Some(to),
             SignalPayload::Presence | SignalPayload::PeerLeft => None,
+        }
+    }
+}
+
+/// A signal as the relays carry it, inside the room-key encryption. Offers, answers and
+/// ICE (SDP and IP addresses) are also sealed to the recipient's session key (ECDH), so
+/// the room key alone does not open them: not for other members, and not for anyone who
+/// gets the link later and kept relay traffic. Session keys live only in the tab's RAM.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "content")]
+pub enum RelaySignal {
+    Presence,
+    PeerLeft,
+    Sealed { to: String, sealed: EncryptedPayload },
+}
+
+impl RelaySignal {
+    /// Wrap `signal` from `sender` for the relays, sealing it when it is addressed.
+    pub fn seal(sender: &NostrBurnerKey, signal: &SignalPayload) -> Result<Self, NostrError> {
+        Ok(match signal {
+            SignalPayload::Presence => Self::Presence,
+            SignalPayload::PeerLeft => Self::PeerLeft,
+            SignalPayload::Offer { to, .. } | SignalPayload::Answer { to, .. } | SignalPayload::IceBatch { to, .. } => {
+                Self::Sealed {
+                    to: to.clone(),
+                    sealed: seal_json(sender, to, signal)?,
+                }
+            }
+        })
+    }
+
+    pub fn recipient(&self) -> Option<&str> {
+        match self {
+            Self::Sealed { to, .. } => Some(to),
+            Self::Presence | Self::PeerLeft => None,
+        }
+    }
+
+    /// The signal from the member `sender`, when it is for `recipient` and opens with
+    /// their two session keys; `None` otherwise.
+    pub fn open(&self, recipient: &NostrBurnerKey, sender: &str) -> Option<SignalPayload> {
+        match self {
+            Self::Presence => Some(SignalPayload::Presence),
+            Self::PeerLeft => Some(SignalPayload::PeerLeft),
+            Self::Sealed { to, sealed } => {
+                if to != recipient.pubkey() {
+                    return None;
+                }
+                let signal: SignalPayload = open_json(recipient, sender, sealed)?;
+                // Only addressed signals are sealed, and only to whoever they address.
+                (signal.recipient() == Some(recipient.pubkey())).then_some(signal)
+            }
         }
     }
 }
@@ -379,6 +431,39 @@ mod tests {
 
         let json = serde_json::to_string(&offer).unwrap();
         assert_eq!(serde_json::from_str::<SignalPayload>(&json).unwrap(), offer);
+    }
+
+    #[test]
+    fn test_relay_signals_seal_handshakes_to_their_recipient() {
+        let ana = NostrBurnerKey::generate().unwrap();
+        let bo = NostrBurnerKey::generate().unwrap();
+        let cy = NostrBurnerKey::generate().unwrap();
+        let offer = SignalPayload::Offer { to: bo.pubkey().into(), sdp: "v=0 c=IN IP4 203.0.113.7".into() };
+
+        let relayed = RelaySignal::seal(&ana, &offer).unwrap();
+        assert_eq!(relayed.recipient(), Some(bo.pubkey()));
+        // What the room key reveals: who it is for, not the SDP or its addresses.
+        let with_room_key = serde_json::to_string(&relayed).unwrap();
+        assert!(!with_room_key.contains("v=0") && !with_room_key.contains("203.0.113.7"));
+
+        assert_eq!(relayed.open(&bo, ana.pubkey()), Some(offer.clone()));
+        assert_eq!(relayed.open(&cy, ana.pubkey()), None, "another member cannot open it");
+        assert_eq!(relayed.open(&bo, cy.pubkey()), None, "the sender's key is part of the seal");
+
+        // A member sealing to Bo a signal addressed to someone else is refused.
+        let misaddressed = RelaySignal::Sealed {
+            to: bo.pubkey().into(),
+            sealed: seal_json(&ana, bo.pubkey(), &SignalPayload::Answer { to: cy.pubkey().into(), sdp: "x".into() })
+                .unwrap(),
+        };
+        assert_eq!(misaddressed.open(&bo, ana.pubkey()), None);
+
+        // Room-wide signals carry nothing to seal.
+        for signal in [SignalPayload::Presence, SignalPayload::PeerLeft] {
+            let relayed = RelaySignal::seal(&ana, &signal).unwrap();
+            assert_eq!(relayed.recipient(), None);
+            assert_eq!(relayed.open(&cy, ana.pubkey()), Some(signal));
+        }
     }
 
     #[test]

@@ -7,6 +7,7 @@
     "screenshot": "node screenshot.js"
   },
   "devDependencies": {
-    "@playwright/test": "^1.48.0"
+    "@playwright/test": "^1.48.0",
+    "node-turn": "^0.0.6"
   }
 }

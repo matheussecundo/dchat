@@ -116,6 +116,8 @@ pub struct RoomCaps {
     pub voice: Option<usize>,
     pub video: Option<usize>,
     pub history: bool,
+    /// Connect only through TURN, hiding members' IP addresses from each other.
+    pub hide_ip: bool,
     pub relays: Option<String>,
 }
 
@@ -263,10 +265,12 @@ pub fn create_room(caps: RoomCaps) -> Result<(), String> {
             params.set(key, &format_cap(cap));
         }
     }
-    if caps.history {
-        params.set("hist", "1");
-    } else {
-        params.remove("hist");
+    for (key, on) in [("hist", caps.history), ("hideip", caps.hide_ip)] {
+        if on {
+            params.set(key, "1");
+        } else {
+            params.remove(key);
+        }
     }
     match &caps.relays {
         Some(relays) => params.set("relays", relays),

@@ -432,6 +432,10 @@ pub struct RoomParams {
     pub turn_urls: Vec<String>,
     pub turn_user: Option<String>,
     pub turn_pass: Option<String>,
+    /// STUN servers chosen for the room (`stun`, comma-separated, invalid entries dropped).
+    pub stun_urls: Vec<String>,
+    /// Connect only through TURN, so members never see each other's IP addresses (`hideip=1`).
+    pub hide_ip: bool,
 }
 
 impl RoomParams {
@@ -456,7 +460,48 @@ impl RoomParams {
                 .unwrap_or_default(),
             turn_user: owned("turnuser"),
             turn_pass: owned("turnpass"),
+            stun_urls: params
+                .get("stun")
+                .map(|v| v.split(',').map(str::trim).filter(|u| is_stun_url(u)).map(str::to_string).collect())
+                .unwrap_or_default(),
+            hide_ip: params.get("hideip") == Some("1"),
         }
+    }
+}
+
+/// STUN server used only when neither the room (`&stun=`) nor the host offers one. Google
+/// sees the IP address of every member who uses it.
+pub const FALLBACK_STUN_URL: &str = "stun:stun.l.google.com:19302";
+
+/// A `stun:` or `stuns:` URL that `RTCPeerConnection` accepts (a bad one makes it throw).
+pub fn is_stun_url(value: &str) -> bool {
+    let rest = value.strip_prefix("stuns:").or_else(|| value.strip_prefix("stun:"));
+    rest.is_some_and(|host| {
+        !host.is_empty()
+            && value.len() <= 200
+            && host.chars().all(|c| c.is_ascii_alphanumeric() || ".-:[]_".contains(c))
+    })
+}
+
+/// How a member's WebRTC connections are set up. Pure, so the rule is tested off the browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IcePlan {
+    /// Gather only TURN relay candidates: other members never learn this member's IP addresses.
+    pub relay_only: bool,
+    /// Add `FALLBACK_STUN_URL`: nothing else offers STUN, and IP addresses are not hidden anyway.
+    pub fallback_stun: bool,
+    /// A TURN server is configured (required for `relay_only`).
+    pub has_turn: bool,
+}
+
+/// `host_urls`: every URL of the ICE servers the host offered (`./ice-servers`).
+pub fn plan_ice(params: &RoomParams, host_urls: &[String]) -> IcePlan {
+    let host_offers = |schemes: [&str; 2]| host_urls.iter().any(|u| schemes.iter().any(|s| u.starts_with(s)));
+    let has_stun = !params.stun_urls.is_empty() || host_offers(["stun:", "stuns:"]);
+    IcePlan {
+        relay_only: params.hide_ip,
+        fallback_stun: !has_stun && !params.hide_ip,
+        has_turn: !params.turn_urls.is_empty() || host_offers(["turn:", "turns:"]),
     }
 }
 
@@ -747,5 +792,44 @@ mod tests {
         assert_eq!(defaults.voice_cap, Some(DEFAULT_VOICE_CAP));
         assert_eq!(defaults.video_cap, Some(DEFAULT_VIDEO_CAP));
         assert!(defaults.turn_urls.is_empty());
+        assert!(defaults.stun_urls.is_empty());
+        assert!(!defaults.hide_ip);
+    }
+
+    #[test]
+    fn test_stun_and_hide_ip_params() {
+        let params = RoomParams::from_fragment(&FragmentParams::parse(
+            "#room=r&stun=stun:a.example:3478, bogus,stuns:b.example,stun:,stun:c d&hideip=1",
+        ));
+        assert_eq!(params.stun_urls, vec!["stun:a.example:3478", "stuns:b.example"]);
+        assert!(params.hide_ip);
+        assert!(!RoomParams::from_fragment(&FragmentParams::parse("#room=r&hideip=0")).hide_ip);
+        assert!(is_stun_url("stun:[2001:db8::1]:3478"));
+        assert!(!is_stun_url("turn:a.example"));
+        assert!(!is_stun_url("stun:a.example?x=1&key=y"));
+    }
+
+    #[test]
+    fn test_google_stun_only_as_a_fallback() {
+        let plan = |fragment: &str, host: &[&str]| {
+            let host: Vec<String> = host.iter().map(|u| u.to_string()).collect();
+            plan_ice(&RoomParams::from_fragment(&FragmentParams::parse(fragment)), &host)
+        };
+        // Nothing else offers STUN: the fallback is needed to get through NAT.
+        assert_eq!(plan("#room=r", &[]), IcePlan { relay_only: false, fallback_stun: true, has_turn: false });
+        let turn_only = plan("#room=r", &["turn:t.example:3478?transport=udp"]);
+        assert!(turn_only.fallback_stun && turn_only.has_turn);
+        // The host's or the room's own STUN replaces it.
+        assert!(!plan("#room=r", &["stun:stun.cloudflare.com:3478", "turn:t.example"]).fallback_stun);
+        assert!(!plan("#room=r&stun=stun:mine.example:3478", &[]).fallback_stun);
+        // Hiding IP addresses: TURN only, no STUN at all.
+        assert_eq!(
+            plan("#room=r&hideip=1&turn=turns:t.example", &[]),
+            IcePlan { relay_only: true, fallback_stun: false, has_turn: true }
+        );
+        assert_eq!(
+            plan("#room=r&hideip=1", &[]),
+            IcePlan { relay_only: true, fallback_stun: false, has_turn: false }
+        );
     }
 }

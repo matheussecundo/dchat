@@ -156,7 +156,12 @@
     "relay_hint": "Everyone in the room uses these relays to find each other. Relays only see encrypted, short-lived handshake messages.",
     "update_required": "Someone in this room is using a newer version of dchat. Reload to update and connect with them.",
     "btn_reload": "Reload",
-    "toast_peer_outdated": "Someone on an older version of dchat can't connect until they reload."
+    "toast_peer_outdated": "Someone on an older version of dchat can't connect until they reload.",
+    "hide_ip_label": "Hide members' IP addresses from each other",
+    "hide_ip_hint": "Calls and messages go through a TURN server, so this site or the link must provide one.",
+    "hide_ip_badge": "🛡️ IPs hidden",
+    "hide_ip_badge_title": "Connections go through a TURN server: members can't see each other's IP addresses",
+    "no_turn_banner": "This room hides members' IP addresses, which needs a TURN server, but none is available here. Nobody can connect until the site or the link provides one."
   },
   "zh": {
     "scan_qr": "📱 扫描二维码",
@@ -315,7 +320,12 @@
     "relay_hint": "房间内的所有人都通过这些中继找到彼此。中继只能看到经过加密、短暂存在的握手消息。",
     "update_required": "此房间中有人正在使用较新版本的 dchat。请重新加载以更新并与对方连接。",
     "btn_reload": "重新加载",
-    "toast_peer_outdated": "有人正在使用旧版本的 dchat，需重新加载后才能连接。"
+    "toast_peer_outdated": "有人正在使用旧版本的 dchat，需重新加载后才能连接。",
+    "hide_ip_label": "对其他成员隐藏 IP 地址",
+    "hide_ip_hint": "通话和消息将通过 TURN 服务器中转，因此本站点或链接必须提供一个。",
+    "hide_ip_badge": "🛡️ IP 已隐藏",
+    "hide_ip_badge_title": "连接经由 TURN 服务器中转：成员无法看到彼此的 IP 地址",
+    "no_turn_banner": "此房间会隐藏成员的 IP 地址，这需要 TURN 服务器，但此处没有可用的服务器。在站点或链接提供之前，任何人都无法连接。"
   },
   "hi": {
     "scan_qr": "📱 क्यूआर स्कैन करें",
@@ -474,7 +484,12 @@
     "relay_hint": "कमरे के सभी लोग एक-दूसरे को ढूंढने के लिए इन्हीं रिले का उपयोग करते हैं। रिले को केवल एन्क्रिप्टेड, अल्पकालिक हैंडशेक संदेश दिखते हैं।",
     "update_required": "इस रूम में कोई dchat का नया संस्करण इस्तेमाल कर रहा है। अपडेट करने और उनसे जुड़ने के लिए पेज फिर से लोड करें।",
     "btn_reload": "फिर से लोड करें",
-    "toast_peer_outdated": "dchat के पुराने संस्करण वाला कोई व्यक्ति पेज फिर से लोड करने तक नहीं जुड़ सकता।"
+    "toast_peer_outdated": "dchat के पुराने संस्करण वाला कोई व्यक्ति पेज फिर से लोड करने तक नहीं जुड़ सकता।",
+    "hide_ip_label": "सदस्यों से एक-दूसरे के IP पते छिपाएँ",
+    "hide_ip_hint": "कॉल और संदेश एक TURN सर्वर से होकर जाते हैं, इसलिए यह साइट या लिंक एक TURN सर्वर उपलब्ध कराए।",
+    "hide_ip_badge": "🛡️ IP छिपे हैं",
+    "hide_ip_badge_title": "कनेक्शन TURN सर्वर से होकर जाते हैं: सदस्य एक-दूसरे के IP पते नहीं देख सकते",
+    "no_turn_banner": "यह रूम सदस्यों के IP पते छिपाता है, जिसके लिए TURN सर्वर चाहिए, लेकिन यहाँ कोई उपलब्ध नहीं है। जब तक साइट या लिंक एक TURN सर्वर नहीं देता, कोई कनेक्ट नहीं कर सकता।"
   },
   "es": {
     "scan_qr": "📱 Escanear QR",
@@ -633,7 +648,12 @@
     "relay_hint": "Todos en la sala usan estos relés para encontrarse. Los relés solo ven mensajes de conexión cifrados y efímeros.",
     "update_required": "Alguien en esta sala usa una versión más reciente de dchat. Recarga para actualizar y conectarte.",
     "btn_reload": "Recargar",
-    "toast_peer_outdated": "Alguien con una versión anterior de dchat no podrá conectarse hasta que recargue."
+    "toast_peer_outdated": "Alguien con una versión anterior de dchat no podrá conectarse hasta que recargue.",
+    "hide_ip_label": "Ocultar las direcciones IP de los miembros entre sí",
+    "hide_ip_hint": "Las llamadas y los mensajes pasan por un servidor TURN, así que este sitio o el enlace debe proporcionar uno.",
+    "hide_ip_badge": "🛡️ IP ocultas",
+    "hide_ip_badge_title": "Las conexiones pasan por un servidor TURN: los miembros no ven las direcciones IP de los demás",
+    "no_turn_banner": "Esta sala oculta las direcciones IP de los miembros, lo que requiere un servidor TURN, pero aquí no hay ninguno disponible. Nadie podrá conectarse hasta que el sitio o el enlace proporcione uno."
   },
   "fr": {
     "scan_qr": "📱 Scanner QR",
@@ -792,7 +812,12 @@
     "relay_hint": "Tous les membres du salon utilisent ces relais pour se retrouver. Les relais ne voient que des messages de connexion chiffrés et éphémères.",
     "update_required": "Quelqu'un dans ce salon utilise une version plus récente de dchat. Rechargez pour mettre à jour et vous connecter.",
     "btn_reload": "Recharger",
-    "toast_peer_outdated": "Une personne avec une version plus ancienne de dchat ne pourra se connecter qu'après avoir rechargé."
+    "toast_peer_outdated": "Une personne avec une version plus ancienne de dchat ne pourra se connecter qu'après avoir rechargé.",
+    "hide_ip_label": "Masquer les adresses IP des membres entre eux",
+    "hide_ip_hint": "Les appels et les messages passent par un serveur TURN : ce site ou le lien doit en fournir un.",
+    "hide_ip_badge": "🛡️ IP masquées",
+    "hide_ip_badge_title": "Les connexions passent par un serveur TURN : les membres ne voient pas les adresses IP des autres",
+    "no_turn_banner": "Ce salon masque les adresses IP des membres, ce qui nécessite un serveur TURN, mais aucun n'est disponible ici. Personne ne peut se connecter tant que le site ou le lien n'en fournit pas."
   },
   "ar": {
     "scan_qr": "📱 مسح رمز QR",
@@ -951,7 +976,12 @@
     "relay_hint": "يستخدم كل من في الغرفة هذه المرحلات للعثور على بعضهم البعض. لا ترى المرحلات سوى رسائل مصافحة مشفرة وقصيرة العمر.",
     "update_required": "يستخدم أحد الأعضاء في هذه الغرفة إصدارًا أحدث من dchat. أعد التحميل للتحديث والاتصال به.",
     "btn_reload": "إعادة التحميل",
-    "toast_peer_outdated": "لا يمكن لعضو يستخدم إصدارًا أقدم من dchat الاتصال حتى يعيد التحميل."
+    "toast_peer_outdated": "لا يمكن لعضو يستخدم إصدارًا أقدم من dchat الاتصال حتى يعيد التحميل.",
+    "hide_ip_label": "إخفاء عناوين IP للأعضاء عن بعضهم",
+    "hide_ip_hint": "تمر المكالمات والرسائل عبر خادم TURN، لذا يجب أن يوفّره هذا الموقع أو الرابط.",
+    "hide_ip_badge": "🛡️ عناوين IP مخفية",
+    "hide_ip_badge_title": "تمر الاتصالات عبر خادم TURN: لا يرى الأعضاء عناوين IP الخاصة ببعضهم",
+    "no_turn_banner": "تُخفي هذه الغرفة عناوين IP للأعضاء، وهذا يتطلب خادم TURN، لكن لا يتوفر أي خادم هنا. لن يتمكن أحد من الاتصال حتى يوفّره الموقع أو الرابط."
   },
   "bn": {
     "scan_qr": "📱 কিউআর স্ক্যান",
@@ -1110,7 +1140,12 @@
     "relay_hint": "রুমের সবাই একে অপরকে খুঁজে পেতে এই রিলেগুলো ব্যবহার করে। রিলে শুধু এনক্রিপ্ট করা, স্বল্পস্থায়ী হ্যান্ডশেক বার্তা দেখতে পায়।",
     "update_required": "এই রুমে কেউ dchat-এর নতুন সংস্করণ ব্যবহার করছেন। আপডেট করে তাঁদের সাথে যুক্ত হতে পেজটি আবার লোড করুন।",
     "btn_reload": "আবার লোড করুন",
-    "toast_peer_outdated": "dchat-এর পুরনো সংস্করণ ব্যবহারকারী কেউ পেজ আবার লোড না করা পর্যন্ত যুক্ত হতে পারবেন না।"
+    "toast_peer_outdated": "dchat-এর পুরনো সংস্করণ ব্যবহারকারী কেউ পেজ আবার লোড না করা পর্যন্ত যুক্ত হতে পারবেন না।",
+    "hide_ip_label": "সদস্যদের IP ঠিকানা একে অপরের কাছ থেকে লুকান",
+    "hide_ip_hint": "কল ও বার্তা একটি TURN সার্ভারের মাধ্যমে যায়, তাই এই সাইট বা লিংককে একটি TURN সার্ভার দিতে হবে।",
+    "hide_ip_badge": "🛡️ IP লুকানো",
+    "hide_ip_badge_title": "সংযোগগুলো TURN সার্ভারের মাধ্যমে যায়: সদস্যরা একে অপরের IP ঠিকানা দেখতে পান না",
+    "no_turn_banner": "এই রুম সদস্যদের IP ঠিকানা লুকায়, যার জন্য একটি TURN সার্ভার প্রয়োজন, কিন্তু এখানে কোনোটি নেই। সাইট বা লিংক একটি না দেওয়া পর্যন্ত কেউ সংযুক্ত হতে পারবেন না।"
   },
   "pt": {
     "scan_qr": "📱 Escanear QR",
@@ -1269,7 +1304,12 @@
     "relay_hint": "Todos na sala usam esses relays para se encontrar. Os relays só veem mensagens de conexão criptografadas e efêmeras.",
     "update_required": "Alguém nesta sala está usando uma versão mais recente do dchat. Recarregue para atualizar e se conectar.",
     "btn_reload": "Recarregar",
-    "toast_peer_outdated": "Alguém com uma versão mais antiga do dchat só consegue se conectar depois de recarregar a página."
+    "toast_peer_outdated": "Alguém com uma versão mais antiga do dchat só consegue se conectar depois de recarregar a página.",
+    "hide_ip_label": "Ocultar os endereços IP dos membros entre si",
+    "hide_ip_hint": "Chamadas e mensagens passam por um servidor TURN, então este site ou o link precisa fornecer um.",
+    "hide_ip_badge": "🛡️ IPs ocultos",
+    "hide_ip_badge_title": "As conexões passam por um servidor TURN: os membros não veem os endereços IP uns dos outros",
+    "no_turn_banner": "Esta sala oculta os endereços IP dos membros, o que exige um servidor TURN, mas nenhum está disponível aqui. Ninguém consegue se conectar até que o site ou o link forneça um."
   },
   "ru": {
     "scan_qr": "📱 Сканировать QR",
@@ -1428,7 +1468,12 @@
     "relay_hint": "Все участники комнаты находят друг друга через эти реле. Реле видят только зашифрованные кратковременные сообщения для установления соединения.",
     "update_required": "Кто-то в этой комнате использует более новую версию dchat. Перезагрузите страницу, чтобы обновиться и подключиться.",
     "btn_reload": "Перезагрузить",
-    "toast_peer_outdated": "Участник со старой версией dchat не сможет подключиться, пока не перезагрузит страницу."
+    "toast_peer_outdated": "Участник со старой версией dchat не сможет подключиться, пока не перезагрузит страницу.",
+    "hide_ip_label": "Скрывать IP-адреса участников друг от друга",
+    "hide_ip_hint": "Звонки и сообщения идут через TURN-сервер, поэтому его должен предоставить этот сайт или ссылка.",
+    "hide_ip_badge": "🛡️ IP скрыты",
+    "hide_ip_badge_title": "Соединения идут через TURN-сервер: участники не видят IP-адреса друг друга",
+    "no_turn_banner": "Эта комната скрывает IP-адреса участников, для чего нужен TURN-сервер, но здесь он недоступен. Никто не сможет подключиться, пока сайт или ссылка его не предоставит."
   },
   "de": {
     "scan_qr": "📱 QR scannen",
@@ -1587,6 +1632,11 @@
     "relay_hint": "Alle im Raum finden sich über diese Relays. Relays sehen nur verschlüsselte, kurzlebige Verbindungsnachrichten.",
     "update_required": "Jemand in diesem Raum nutzt eine neuere Version von dchat. Lade die Seite neu, um zu aktualisieren und dich zu verbinden.",
     "btn_reload": "Neu laden",
-    "toast_peer_outdated": "Jemand mit einer älteren dchat-Version kann sich erst nach dem Neuladen verbinden."
+    "toast_peer_outdated": "Jemand mit einer älteren dchat-Version kann sich erst nach dem Neuladen verbinden.",
+    "hide_ip_label": "IP-Adressen der Mitglieder voreinander verbergen",
+    "hide_ip_hint": "Anrufe und Nachrichten laufen über einen TURN-Server, den diese Seite oder der Link bereitstellen muss.",
+    "hide_ip_badge": "🛡️ IPs verborgen",
+    "hide_ip_badge_title": "Verbindungen laufen über einen TURN-Server: Mitglieder sehen die IP-Adressen der anderen nicht",
+    "no_turn_banner": "Dieser Raum verbirgt die IP-Adressen der Mitglieder. Dafür ist ein TURN-Server nötig, hier ist aber keiner verfügbar. Niemand kann sich verbinden, bis die Seite oder der Link einen bereitstellt."
   }
 }
