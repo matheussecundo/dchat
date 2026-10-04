@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { expect } from '@playwright/test';
 
 // Records every RTCPeerConnection the page creates in `window.__pcs`, for stats checks.
@@ -24,11 +25,12 @@ export async function newMember(browser, label) {
 }
 
 /** Create a room from the lobby. Returns the creator's URL, which is the admin link. */
-export async function createRoom(page, { name, max, voiceCap, videoCap, hideIp } = {}) {
+export async function createRoom(page, { name, max, voiceCap, videoCap, hideIp, password } = {}) {
   await page.goto('/');
   await page.locator('#create-room-btn').waitFor();
   if (name !== undefined) await page.locator('#name-input').fill(name);
   if (hideIp) await page.locator('#hide-ip-checkbox').check();
+  if (password !== undefined) await page.locator('#password-input').fill(password);
   if (max !== undefined) await page.locator('#cap-input').fill(String(max));
   if (voiceCap !== undefined) await page.locator('#voice-cap-input').fill(String(voiceCap));
   if (videoCap !== undefined) await page.locator('#video-cap-input').fill(String(videoCap));
@@ -46,10 +48,11 @@ export function inviteFrom(adminUrl) {
   return url.toString();
 }
 
-export async function joinRoom(page, url, name) {
+export async function joinRoom(page, url, name, { password } = {}) {
   await page.goto(url);
   await page.locator('#enter-room-btn').waitFor();
   await page.locator('#name-input').fill(name);
+  if (password !== undefined) await page.locator('#password-input').fill(password);
   await page.locator('#enter-room-btn').click();
   await expect(page.locator('.status-indicator')).toBeVisible();
 }
@@ -147,3 +150,24 @@ export async function twoMembers(browser, createOptions = {}) {
   await expectDirectMesh(bo.page, ['Ana', 'Bo'], 'Bo');
   return [ana, bo];
 }
+
+/** Open an `EncryptedPayload` with the key in `roomUrl`, as anyone holding the link could. */
+export function openWithRoomKey(roomUrl, payload) {
+  const key = Buffer.from(new URLSearchParams(new URL(roomUrl).hash.slice(1)).get('key'), 'base64url');
+  const data = Buffer.from(payload.ciphertext, 'base64url');
+  const decipher = crypto.createDecipheriv('chacha20-poly1305', key, Buffer.from(payload.nonce, 'base64url'), {
+    authTagLength: 16,
+  });
+  decipher.setAuthTag(data.subarray(data.length - 16));
+  return Buffer.concat([decipher.update(data.subarray(0, data.length - 16)), decipher.final()]).toString();
+}
+
+/** Init script: record every text frame the page sends on a data channel (`window.__sentFrames`). */
+export const RECORD_SENT_FRAMES = () => {
+  window.__sentFrames = [];
+  const send = RTCDataChannel.prototype.send;
+  RTCDataChannel.prototype.send = function (data) {
+    if (typeof data === 'string') window.__sentFrames.push(data);
+    return send.call(this, data);
+  };
+};

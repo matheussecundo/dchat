@@ -570,6 +570,24 @@ header {
   cursor: not-allowed;
 }
 
+.settings-section {
+  margin: 14px 0 6px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.settings-hint {
+  margin: 2px 4px 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.password-badge {
+  color: #fcd34d;
+  background-color: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.3);
+}
+
 .audio-option-hint {
   margin-inline-start: auto;
   font-size: 0.75rem;

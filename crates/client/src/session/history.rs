@@ -22,6 +22,11 @@ impl RoomSession {
         self.inner.params.hide_ip
     }
 
+    /// Joining the room needs a password as well as the link.
+    pub fn has_password(&self) -> bool {
+        self.inner.params.password_salt.is_some()
+    }
+
     pub(super) fn record_history(&self, envelope: &RoomEnvelope) {
         if self.inner.params.history {
             self.inner.history.borrow_mut().record(envelope);

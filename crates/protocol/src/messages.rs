@@ -205,9 +205,10 @@ pub enum RoomBody {
     Edit { target: String, text: String },
     /// Remove the author's own message `target` (best effort on honest clients).
     Delete { target: String },
-    /// A private message to `to`, sealed with the two members' session keys (ECDH).
-    /// Relayable like any message, but only `to` can open it and `to` never relays it.
-    Dm { to: String, sealed: EncryptedPayload },
+    /// A private message sealed with the author's and the recipient's session keys (ECDH).
+    /// It does not name the recipient: members relaying it can't tell who it is for. Each
+    /// member tries to open it; the one who can keeps it and relays it no further.
+    Dm { sealed: EncryptedPayload },
     /// WebRTC renegotiation (offer, answer, ICE) for the link between author and `to`, sent
     /// over that link itself once it is open, so Nostr relays only carry the first handshake.
     LinkSignal { to: String, signal: SignalPayload },
@@ -414,7 +415,8 @@ mod tests {
         let sealed = seal_json(&ana, bo.pubkey(), &DmContent { text: "psst".into() }).unwrap();
         assert_eq!(open_json::<DmContent>(&bo, ana.pubkey(), &sealed), Some(DmContent { text: "psst".into() }));
         assert_eq!(open_json::<DmContent>(&cy, ana.pubkey(), &sealed), None);
-        assert_eq!(RoomBody::Dm { to: bo.pubkey().into(), sealed }.recipient(), None, "DMs are relayable");
+        assert!(!serde_json::to_string(&RoomBody::Dm { sealed: sealed.clone() }).unwrap().contains(bo.pubkey()));
+        assert_eq!(RoomBody::Dm { sealed }.recipient(), None, "DMs are relayable");
     }
 
     #[test]

@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 /// encoding of any signal or room message (the `wire_format_matches_protocol_version`
 /// test catches those), signed bytes, the file chunk layout, or a rule every member must
 /// apply alike (caps, gossip, history, rekey).
-pub const PROTOCOL_VERSION: u32 = 2;
+///
+/// Never change how a plain room's relay topic is derived (`hash_room_topic`): members on
+/// different versions only notice each other (and show the reload banner) on a shared topic.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// What travels through the relays (encrypted with the room key): the sender's protocol
 /// version and its signal. Every version must keep `v` readable, whatever `payload` becomes.
@@ -52,11 +55,12 @@ mod tests {
     use crate::crypto::{encrypt_chunk, EncryptedPayload, CHUNK_SIZE};
     use crate::messages::*;
     use crate::nostr::hash_room_topic;
+    use crate::password::{password_room_key, password_room_topic, stretch_password};
     use sha2::{Digest, Sha256};
 
     /// The wire fingerprint recorded for the current version. When the test below fails,
     /// bump `PROTOCOL_VERSION` and record the new pair here.
-    const RECORDED: (u32, &str) = (2, "6aeb1f32428d89b189042c16cd25a4cb61902c8ff7a1a68b6902c0aba89fe3a3");
+    const RECORDED: (u32, &str) = (3, "e71fc716144948a82ee6505ac3948d144bb0ab8500393767df78ff9424646d3f");
 
     fn sealed() -> EncryptedPayload {
         EncryptedPayload { nonce: "n".into(), ciphertext: "c".into() }
@@ -147,7 +151,7 @@ mod tests {
             RoomBody::Reaction { target: "m".into(), emoji: "👍".into(), on: true },
             RoomBody::Edit { target: "m".into(), text: "hello".into() },
             RoomBody::Delete { target: "m".into() },
-            RoomBody::Dm { to: "b".into(), sealed: sealed() },
+            RoomBody::Dm { sealed: sealed() },
             RoomBody::LinkSignal { to: "b".into(), signal: SignalPayload::Offer { to: "b".into(), sdp: "v=0".into() } },
             RoomBody::AdminRekey {
                 kicked: Some("c".into()),
@@ -199,6 +203,7 @@ mod tests {
         wire.push(serde_json::to_string(&RoomGrant { room: "r".into(), key: "k".into() }).unwrap());
         wire.push(String::from_utf8(admin_proof_message("r", "s")).unwrap());
         wire.push(hash_room_topic("r"));
+        wire.push(password_room_topic("r", &password_room_key(&[1; 32], &stretch_password("pw", &[2; 16]).unwrap())));
         // File chunks: the header layout (the rest is a random nonce and ciphertext).
         let packet = encrypt_chunk(&[7; 32], &[1; 16], 2, 3, b"data").unwrap();
         wire.push(format!("{:?} {} {}", &packet[..24], packet.len(), CHUNK_SIZE));

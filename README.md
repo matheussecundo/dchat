@@ -96,6 +96,8 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 
 Every room message is signed with its author's session key, so a member relaying it cannot alter it or forge messages from someone else.
 
+**Room passwords**: optionally set a password when creating a room. Joining then needs the link *and* the password (share it separately, for example by voice), so a leaked link alone doesn't open the room. The link only carries a salt (`pw=`), never the password. A wrong password shows no error: you just find nobody. The room shows 🔒 *Password*.
+
 **Privacy**: tick *Hide members' IP addresses from each other* when creating a room and every member connects through a TURN server, so nobody in the room learns anyone's IP address (the room shows 🛡️ *IPs hidden*). It needs a TURN server from the host or the link. [`docs/PRIVACY.md`](./docs/PRIVACY.md) explains what members, relays and servers can see, and lists possible improvements.
 
 **Versions**: members connect only with members running the same dchat protocol version. If someone in the room has a newer version, you see *Someone in this room is using a newer version of dchat* with a **Reload** button; reloading loads the latest version and keeps the room link (like any reload, it clears this tab's chat). Members on the newer version see a short notice instead. Updates that only change the interface don't affect who can connect.
@@ -107,7 +109,7 @@ Every room message is signed with its author's session key, so a member relaying
 - **Typing**: *"Bo is typing…"* appears above the message box.
 - **Reactions**: hover a message and tap 😀 to add 👍 ❤️ 😂 😮 😢 🎉; tap a reaction chip to add or remove yours.
 - **Edit / delete your own messages**: ✏️ puts the text back in the box (Enter saves, Esc cancels) and others see *(edited)*. 🗑️ removes it for everyone. Both are signed by you; deletion is best effort, since anyone may have already read or copied the message. Edited or deleted messages leave the history shown to late joiners.
-- **Private messages**: ✉️ next to a member opens a private chat. Messages are sealed with a key only the two of you can derive (ECDH between your session keys). With a direct link they travel only over that link; otherwise other members relay them without being able to read them. The conversation ends when either of you leaves, because session keys are per tab.
+- **Private messages**: ✉️ next to a member opens a private chat. Messages are sealed with a key only the two of you can derive (ECDH between your session keys). With a direct link they travel only over that link; otherwise other members relay them without being able to read them or see whom they are for. The conversation ends when either of you leaves, because session keys are per tab.
 - **@mentions**: write `@Name` and that member sees the message highlighted, hears a short chime and, if the tab is in the background, gets a `(n)` badge in the tab title.
 
 ### Voice Lounge
@@ -148,6 +150,7 @@ Everything after `#` stays in the browser and is never sent to any server.
 | `turnuser`, `turnpass` | `turnuser=me&turnpass=s3cret` | TURN credentials (percent-encode special characters) |
 | `stun` | `stun=stun:stun.example.com:3478` | The room's STUN server(s), comma-separated. Without it, the host's STUN is used, and only if there is none, Google's |
 | `hideip` | `hideip=1` | Connect only through TURN, so members never see each other's IP addresses (needs a TURN server) |
+| `pw` | `pw=q8Zt…` | Password room: random salt; the room key also needs the password, which is never in the link |
 
 ### When Members Can't Connect Directly (NAT)
 

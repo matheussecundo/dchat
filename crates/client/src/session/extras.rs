@@ -158,20 +158,8 @@ impl RoomSession {
                 self.inner.history.borrow_mut().remove(target);
                 self.inner.signals.messages.update(|msgs| msgs.retain(|m| m.id != *target));
             }
-            RoomBody::Dm { to, sealed } => {
-                if to != &self.inner.me || author == self.inner.me {
-                    return;
-                }
-                if let Some(content) = open_json::<DmContent>(&self.inner.identity, author, sealed) {
-                    self.push_dm(author, DmUi {
-                        id: envelope.id.clone(),
-                        from_me: false,
-                        text: content.text,
-                        time: current_time_string(),
-                        notice: false,
-                    });
-                    self.inner.signals.dm_unread.update(|unread| *unread.entry(author.to_string()).or_default() += 1);
-                }
+            RoomBody::Dm { .. } => {
+                self.receive_dm(envelope);
             }
             _ => {}
         }
@@ -188,8 +176,33 @@ impl RoomSession {
 
     // ---- Direct messages ----------------------------------------------------------------
 
+    /// Open a private message if it is for us (it names no recipient: only the two
+    /// members' session keys open it). Returns whether it was ours.
+    pub(super) fn receive_dm(&self, envelope: &RoomEnvelope) -> bool {
+        let author = envelope.author.as_str();
+        let RoomBody::Dm { sealed } = &envelope.body else {
+            return false;
+        };
+        if author == self.inner.me {
+            return false;
+        }
+        let Some(content) = open_json::<DmContent>(&self.inner.identity, author, sealed) else {
+            return false;
+        };
+        self.push_dm(author, DmUi {
+            id: envelope.id.clone(),
+            from_me: false,
+            text: content.text,
+            time: current_time_string(),
+            notice: false,
+        });
+        self.inner.signals.dm_unread.update(|unread| *unread.entry(author.to_string()).or_default() += 1);
+        true
+    }
+
     /// Send a private message: sealed to `to` with ECDH; over our direct link when there is
-    /// one (so nobody else even sees the envelope), otherwise relayed through the room.
+    /// one (so nobody else even sees the envelope), otherwise relayed through the room,
+    /// where members see that we sent a private message but not to whom.
     pub fn send_dm(&self, to: &str, text: &str) -> Result<(), String> {
         let text = text.trim();
         if text.is_empty() {
@@ -199,7 +212,7 @@ impl RoomSession {
             return Err("That member is not in the room".into());
         }
         let sealed = seal_json(&self.inner.identity, to, &DmContent { text: text.to_string() }).map_err(|e| e.to_string())?;
-        let body = RoomBody::Dm { to: to.to_string(), sealed };
+        let body = RoomBody::Dm { sealed };
         let envelope = RoomEnvelope::sign(&self.inner.identity, js_sys::Date::now() as u64, body).map_err(|e| e.to_string())?;
         self.inner.dedup.borrow_mut().insert(&envelope.id);
         let frame = self.encode(&envelope).ok_or("Failed to encrypt")?;

@@ -1,24 +1,14 @@
-import crypto from 'node:crypto';
 import Turn from 'node-turn';
 import { test, expect } from '@playwright/test';
-import { createRoom, expectDirectMesh, inviteFrom, joinRoom, newMember, sendMessage } from './helpers.js';
+import {
+  createRoom, expectDirectMesh, inviteFrom, joinRoom, memberRow, newMember, openWithRoomKey, sendMessage,
+} from './helpers.js';
 
 const GOOGLE_STUN = 'stun:stun.l.google.com:19302';
 
 /** Every ICE server URL of the page's first link. */
 const iceUrls = (page) => page.evaluate(() =>
   window.__pcs[0].getConfiguration().iceServers.flatMap((s) => [].concat(s.urls)));
-
-/** Open an `EncryptedPayload` with the room key, as a relay that has the link could. */
-function openWithRoomKey(roomUrl, payload) {
-  const key = Buffer.from(new URLSearchParams(new URL(roomUrl).hash.slice(1)).get('key'), 'base64url');
-  const data = Buffer.from(payload.ciphertext, 'base64url');
-  const decipher = crypto.createDecipheriv('chacha20-poly1305', key, Buffer.from(payload.nonce, 'base64url'), {
-    authTagLength: 16,
-  });
-  decipher.setAuthTag(data.subarray(data.length - 16));
-  return Buffer.concat([decipher.update(data.subarray(0, data.length - 16)), decipher.final()]).toString();
-}
 
 test('handshakes through the relays are sealed: the room key alone does not reveal SDP or IP addresses', async ({ browser }) => {
   test.setTimeout(60000);
@@ -160,4 +150,34 @@ test.describe('hiding IP addresses', () => {
     await expect(ana.page.locator('#no-turn-banner')).toBeVisible({ timeout: 10000 });
     await ana.context.close();
   });
+});
+
+test('nothing typed is kept by the browser, and spell checking can be turned off', async ({ browser }) => {
+  test.setTimeout(60000);
+  const ana = await newMember(browser, 'Ana');
+  const bo = await newMember(browser, 'Bo');
+  await ana.page.goto('/');
+  // Form autofill would save names and relay addresses to disk.
+  await expect(ana.page.locator('form.lobby-card')).toHaveAttribute('autocomplete', 'off');
+  for (const id of ['#name-input', '#password-input', '#cap-input']) {
+    await expect(ana.page.locator(id)).toHaveAttribute('autocomplete', 'off');
+  }
+
+  const invite = inviteFrom(await createRoom(ana.page, { name: 'Ana' }));
+  await joinRoom(bo.page, invite, 'Bo');
+  await expectDirectMesh(ana.page, ['Ana', 'Bo'], 'Ana');
+  const messageBox = ana.page.locator('footer.input-bar input[type="text"]');
+  await expect(messageBox).toHaveAttribute('autocomplete', 'off');
+  await expect(messageBox).toHaveAttribute('spellcheck', 'true');
+
+  await ana.page.locator('#audio-settings-btn').click();
+  await ana.page.locator('#spellcheck-toggle').uncheck();
+  await ana.page.locator('.modal-backdrop').click({ position: { x: 5, y: 5 } });
+  await expect(messageBox).toHaveAttribute('spellcheck', 'false');
+  await memberRow(ana.page, 'Bo').locator('.dm-btn').click();
+  await expect(ana.page.locator('#dm-input')).toHaveAttribute('spellcheck', 'false');
+  await expect(ana.page.locator('#dm-input')).toHaveAttribute('autocomplete', 'off');
+
+  await ana.context.close();
+  await bo.context.close();
 });

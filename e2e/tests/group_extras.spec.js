@@ -1,5 +1,8 @@
 import { test, expect } from '@playwright/test';
-import { createRoom, expectDirectMesh, inviteFrom, joinRoom, memberRow, newMember, sendMessage } from './helpers.js';
+import {
+  RECORD_SENT_FRAMES, createRoom, expectDirectMesh, inviteFrom, joinRoom, memberRow, newMember, openWithRoomKey,
+  sendMessage,
+} from './helpers.js';
 
 test.describe.configure({ timeout: 120000 });
 
@@ -7,11 +10,13 @@ async function trio(browser) {
   const ana = await newMember(browser, 'Ana');
   const bo = await newMember(browser, 'Bo');
   const cy = await newMember(browser, 'Cy');
+  // What Bo sends, to check what a relaying member can see.
+  await bo.context.addInitScript(RECORD_SENT_FRAMES);
   const invite = inviteFrom(await createRoom(ana.page, { name: 'Ana' }));
   await joinRoom(bo.page, invite, 'Bo');
   await joinRoom(cy.page, invite, 'Cy');
   for (const [m, n] of [[ana, 'Ana'], [bo, 'Bo'], [cy, 'Cy']]) await expectDirectMesh(m.page, ['Ana', 'Bo', 'Cy'], n);
-  return [ana, bo, cy];
+  return [ana, bo, cy, invite];
 }
 
 const row = (page, text) => page.locator('.message-row', { hasText: text });
@@ -65,7 +70,7 @@ test('typing indicator, reactions, edit and delete propagate to everyone', async
 });
 
 test('private DMs reach only their recipient, also when relayed, and @mentions highlight', async ({ browser }) => {
-  const [ana, bo, cy] = await trio(browser);
+  const [ana, bo, cy, invite] = await trio(browser);
 
   // Direct DM: unread badge, panel, reply.
   await memberRow(ana.page, 'Bo').locator('.dm-btn').click();
@@ -97,6 +102,15 @@ test('private DMs reach only their recipient, also when relayed, and @mentions h
   await memberRow(cy.page, 'Ana').locator('.dm-btn').click();
   await expect(cy.page.locator('#dm-panel .dm-line.peer')).toContainText('relayed secret for Cy');
   await expect(bo.page.locator('body')).not.toContainText('relayed secret');
+  // What Bo relayed names no recipient: even with the room key, nobody can tell it was for Cy.
+  const relayedDms = (await bo.page.evaluate(() => window.__sentFrames))
+    .map((frame) => JSON.parse(openWithRoomKey(invite, JSON.parse(frame))))
+    .filter((envelope) => envelope.body.type === 'Dm' && envelope.author === anaKey);
+  expect(relayedDms.length).toBeGreaterThan(0);
+  for (const envelope of relayedDms) {
+    expect(Object.keys(envelope.body.data)).toEqual(['sealed']);
+    expect(JSON.stringify(envelope)).not.toContain(cyKey);
+  }
 
   // Mentions: highlighted only for the mentioned member.
   await sendMessage(bo.page, 'hey @Ana, look at this');

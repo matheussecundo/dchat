@@ -2,6 +2,7 @@
 //! gossip routing, cap eviction and room parameters. Pure Rust, no browser APIs.
 
 use crate::fragment::FragmentParams;
+use base64::Engine;
 use crate::messages::{RoomBody, RoomEnvelope};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -436,6 +437,8 @@ pub struct RoomParams {
     pub stun_urls: Vec<String>,
     /// Connect only through TURN, so members never see each other's IP addresses (`hideip=1`).
     pub hide_ip: bool,
+    /// Salt of a password room (`pw`): the room key also needs the password.
+    pub password_salt: Option<Vec<u8>>,
 }
 
 impl RoomParams {
@@ -465,6 +468,10 @@ impl RoomParams {
                 .map(|v| v.split(',').map(str::trim).filter(|u| is_stun_url(u)).map(str::to_string).collect())
                 .unwrap_or_default(),
             hide_ip: params.get("hideip") == Some("1"),
+            password_salt: params
+                .get("pw")
+                .and_then(|salt| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(salt).ok())
+                .filter(|salt| salt.len() == crate::password::PASSWORD_SALT_LENGTH),
         }
     }
 }
@@ -804,6 +811,9 @@ mod tests {
         assert_eq!(params.stun_urls, vec!["stun:a.example:3478", "stuns:b.example"]);
         assert!(params.hide_ip);
         assert!(!RoomParams::from_fragment(&FragmentParams::parse("#room=r&hideip=0")).hide_ip);
+        let password_room = RoomParams::from_fragment(&FragmentParams::parse("#room=r&pw=AAECAwQFBgcICQoLDA0ODw"));
+        assert_eq!(password_room.password_salt, Some((0u8..16).collect::<Vec<_>>()));
+        assert_eq!(RoomParams::from_fragment(&FragmentParams::parse("#room=r&pw=short")).password_salt, None);
         assert!(is_stun_url("stun:[2001:db8::1]:3478"));
         assert!(!is_stun_url("turn:a.example"));
         assert!(!is_stun_url("stun:a.example?x=1&key=y"));
