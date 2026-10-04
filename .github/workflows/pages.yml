@@ -1,5 +1,6 @@
-# Build the static client and publish it to GitHub Pages on every push to main.
+# Publish the static client to GitHub Pages on every push to main.
 # Repository setting required once: Settings → Pages → Source: "GitHub Actions".
+# Deploying to Cloudflare instead? Disable this workflow in the Actions tab.
 name: Deploy to GitHub Pages
 
 on:
@@ -16,43 +17,9 @@ concurrency:
   group: pages
   cancel-in-progress: true
 
-env:
-  TRUNK_VERSION: v0.21.14
-
 jobs:
   build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install Trunk
-        run: |
-          mkdir -p "$HOME/.local/bin"
-          curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" | tar -xz -C "$HOME/.local/bin" trunk
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/trunk" --version
-
-      - name: Unit tests
-        run: cargo test --workspace --locked
-
-      - name: Build client (release, relative asset paths from Trunk.toml)
-        working-directory: crates/client
-        run: trunk build --release --locked
-
-      - name: Check no test hooks shipped
-        run: "! grep -q __dchat crates/client/dist/*.wasm"
-
-      - uses: actions/configure-pages@v5
-
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: crates/client/dist
+    uses: ./.github/workflows/build.yml
 
   deploy:
     needs: build
@@ -61,5 +28,13 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: site
+          path: site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
       - id: deployment
         uses: actions/deploy-pages@v4

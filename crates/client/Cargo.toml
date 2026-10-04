@@ -92,4 +92,5 @@ features = [
   "ResizeObserverEntry",
   "DomRectReadOnly",
   "KeyboardEvent",
+  "Response",
 ]

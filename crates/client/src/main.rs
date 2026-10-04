@@ -1,4 +1,5 @@
 mod i18n;
+mod ice;
 mod layout;
 mod media;
 mod mesh;
@@ -101,6 +102,8 @@ fn App() -> impl IntoView {
     let session_ref = store_value(None::<RoomSession>);
     // The session name, reused when an admin moves the room to a new link.
     let my_name = store_value(String::new());
+    // TURN servers the host offered (fetched once, reused if the room moves).
+    let host_ice = store_value(None::<js_sys::Array>);
 
     let start_session = move |room_id: String, key: [u8; protocol::KEY_LENGTH], migrated: bool| -> Option<RoomSession> {
         let signals = SessionSignals {
@@ -123,7 +126,7 @@ fn App() -> impl IntoView {
             dm_unread: set_dm_unread,
         };
         set_room_id_sig.set(room_id.clone());
-        match RoomSession::start(room_id, key, my_name.get_value(), signals, migrated) {
+        match RoomSession::start(room_id, key, my_name.get_value(), signals, migrated, host_ice.get_value()) {
             Ok(session) => {
                 session_ref.set_value(Some(session.clone()));
                 set_screen.set(Screen::Room);
@@ -136,12 +139,22 @@ fn App() -> impl IntoView {
         }
     };
 
+    let (entering, set_entering) = create_signal(false);
     let enter_room = move || {
         let Some((room_id, key)) = read_credentials() else {
             return;
         };
+        if entering.get_untracked() {
+            return;
+        }
+        set_entering.set(true);
         my_name.set_value(sanitize_name(&name_input.get_untracked()));
-        start_session(room_id, key, false);
+        wasm_bindgen_futures::spawn_local(async move {
+            // Optional host TURN servers (Cloudflare Worker); quick 404 on static hosts.
+            host_ice.set_value(ice::fetch_ice_servers().await);
+            start_session(room_id, key, false);
+            set_entering.set(false);
+        });
     };
 
     // An admin moved the room: follow it with a fresh session, keeping the chat on screen.
@@ -582,7 +595,7 @@ fn App() -> impl IntoView {
                     {move || cap_is_large().then(|| view! {
                         <p class="lobby-warning">{move || t(lang.get(), "cap_warning")}</p>
                     })}
-                    <button id="create-room-btn" type="submit" class="btn btn-primary lobby-submit">
+                    <button id="create-room-btn" type="submit" class="btn btn-primary lobby-submit" disabled=move || entering.get()>
                         {move || t(lang.get(), "btn_create_room")}
                     </button>
                 </form>
@@ -598,7 +611,7 @@ fn App() -> impl IntoView {
                     <h2>{move || t_replace_1(lang.get(), "join_title", "{room}", &room)}</h2>
                     <p class="lobby-desc">{move || t(lang.get(), "join_desc")}</p>
                     {name_field}
-                    <button id="enter-room-btn" type="submit" class="btn btn-primary lobby-submit">
+                    <button id="enter-room-btn" type="submit" class="btn btn-primary lobby-submit" disabled=move || entering.get()>
                         {move || t(lang.get(), "btn_enter_room")}
                     </button>
                 </form>

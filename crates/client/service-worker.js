@@ -36,8 +36,13 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
-  // Bypass WebSocket and non-GET requests entirely
-  if (event.request.method !== "GET" || url.pathname === "/ws" || url.pathname === "/health") {
+  // Bypass WebSocket, non-GET requests and per-request TURN credentials entirely
+  if (
+    event.request.method !== "GET" ||
+    url.pathname === "/ws" ||
+    url.pathname === "/health" ||
+    url.pathname.endsWith("/ice-servers")
+  ) {
     return;
   }
 

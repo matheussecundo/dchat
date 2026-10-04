@@ -152,13 +152,16 @@ What you will see:
 - **Voice, video and files don't work with that person**: media and file transfers only travel over direct links (the lounge marks them with ⚠, file cards say *Sender not directly reachable*).
 - If no mutual member exists, the person stays `connecting…` until a path appears.
 
-**Fix: supply a TURN server.** A TURN server forwards encrypted packets between members who can't reach each other. It sees IP addresses and traffic timing, but never message or media content (DTLS/SRTP plus the room key). Add it to the room URL and share that URL:
+**Fix: add a TURN server.** A TURN server forwards encrypted packets between members who can't reach each other. It sees IP addresses and traffic timing, but never message or media content (DTLS/SRTP plus the room key). There are two ways to provide one:
 
-```
-https://your-domain.com/#room=…&key=…&turn=turns:turn.example.com:5349&turnuser=alice&turnpass=s3cret
-```
+- **From the host (recommended):** when the site is deployed on Cloudflare (see "Cloudflare (Workers + TURN)" below), the app asks the site for fresh, short-lived Cloudflare TURN credentials each time you enter a room (`GET ./ice-servers`). Nothing needs to go in the link. On hosts without that endpoint the request just returns 404 and the app carries on with STUN.
+- **In the room link:** add a TURN server you run yourself (for example [coturn](https://github.com/coturn/coturn)) and share that URL:
 
-Run your own with [coturn](https://github.com/coturn/coturn) or use a hosted provider. Everyone who opens the link uses it. Credentials in the link are visible to all members, so use credentials scoped to this purpose.
+  ```
+  https://your-domain.com/#room=…&key=…&turn=turns:turn.example.com:5349&turnuser=alice&turnpass=s3cret
+  ```
+
+  Everyone who opens the link uses it, and the credentials are visible to all members, so use credentials scoped to this purpose.
 
 ---
 
@@ -199,7 +202,22 @@ Deploy the resulting `crates/client/dist/` directory to any static host. Asset p
 2. In the repository, open **Settings → Pages** and set **Source** to **GitHub Actions** (one time).
 3. Push to `main` (or run the workflow by hand from the **Actions** tab). The site appears at `https://<user>.github.io/<repo>/`.
 
-Once hosted, rooms use the public Nostr relays below instead of the local mock relay. For dependable voice and video across mobile networks, also run a TURN server and add it to room links (see "When Members Can't Connect Directly (NAT)").
+#### Cloudflare (Workers + TURN)
+`wrangler.jsonc` deploys the client as a Cloudflare Worker with static assets, plus `worker/` with one endpoint, `GET /ice-servers`. It returns short-lived [Cloudflare Realtime TURN](https://developers.cloudflare.com/realtime/turn/) credentials (12-hour lifetime). The TURN API token stays in the Worker; the request carries no room information, because the room ID and key live in the URL fragment, which is never sent. The endpoint only answers same-origin browser requests and allows 20 requests per minute per IP, so other sites can't spend your quota.
+
+One-time setup:
+1. In the Cloudflare dashboard, open **Realtime → TURN** and create a TURN key. Note its **key ID** and **API token**.
+2. Create an API token for deploys (template **Edit Cloudflare Workers**) and note your **account ID**.
+3. In the GitHub repository, add the secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. From then on, `.github/workflows/cloudflare.yml` deploys on every push to `main`; without these secrets it skips the deploy. If you use Cloudflare only, disable the GitHub Pages workflow in the **Actions** tab.
+4. After the first deploy, give the Worker the TURN key (once; it is kept across deploys): `npx wrangler secret put TURN_KEY_ID` and `npx wrangler secret put TURN_KEY_API_TOKEN`, or add both under the Worker's **Settings → Variables and Secrets**.
+
+The site is then at `https://dchat.<your-subdomain>.workers.dev` (or a custom domain). Without the TURN secrets the site still works, just without TURN.
+
+To deploy from your machine instead: `npx wrangler login`, then `make deploy-cloudflare`. Wrangler 4 needs Node.js 22 or newer.
+
+TURN pricing: $0.05 per GB the TURN server sends to clients, after a free tier of 1,000 GB. Only members who can't connect directly use it. A credential stops working after 12 hours, so a call longer than that loses its relay; rejoining the room fetches fresh credentials.
+
+Once hosted, rooms use the public Nostr relays below instead of the local mock relay. For dependable voice and video across mobile networks, add TURN: deploy on Cloudflare (below), or add your own TURN server to room links (see "When Members Can't Connect Directly (NAT)").
 
 ### 2. Custom Nostr Relays
 By default, `dchat` connects to a resilient pool of public Nostr relays:

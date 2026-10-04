@@ -133,12 +133,14 @@ struct Inner {
 
 impl RoomSession {
     /// Join `room_id`. `migrated` is set when an admin moved the room here from another link.
+    /// `host_ice` are extra ICE servers the host offered (see `ice.rs`).
     pub fn start(
         room_id: String,
         key: [u8; KEY_LENGTH],
         name: String,
         signals: SessionSignals,
         migrated: bool,
+        host_ice: Option<js_sys::Array>,
     ) -> Result<Self, String> {
         let params = RoomParams::from_fragment(&current_fragment());
         let identity = Rc::new(NostrBurnerKey::generate().map_err(|e| e.to_string())?);
@@ -154,7 +156,7 @@ impl RoomSession {
         let session = Self {
             inner: Rc::new(Inner {
                 key,
-                rtc_config: build_rtc_config(&params),
+                rtc_config: build_rtc_config(&params, host_ice.as_ref()),
                 params,
                 room_id: room_id.clone(),
                 identity: identity.clone(),
@@ -865,9 +867,9 @@ fn clean_remote_name(raw: &str, author: &str) -> String {
     }
 }
 
-/// STUN by default; a room-supplied TURN server (`&turn=`, `&turnuser=`, `&turnpass=`)
-/// is added for members whose NATs block direct connections.
-fn build_rtc_config(params: &RoomParams) -> RtcConfiguration {
+/// STUN by default, plus TURN for members whose NATs block direct connections: servers the
+/// host offers (`host_ice`) and/or one from the room link (`&turn=`, `&turnuser=`, `&turnpass=`).
+fn build_rtc_config(params: &RoomParams, host_ice: Option<&js_sys::Array>) -> RtcConfiguration {
     let config = RtcConfiguration::new();
     let servers = js_sys::Array::new();
 
@@ -886,6 +888,10 @@ fn build_rtc_config(params: &RoomParams) -> RtcConfiguration {
             let _ = js_sys::Reflect::set(&turn, &"credential".into(), &decode(pass).into());
         }
         servers.push(&turn);
+    }
+
+    for server in host_ice.into_iter().flat_map(|list| list.iter()) {
+        servers.push(&server);
     }
 
     config.set_ice_servers(&servers);

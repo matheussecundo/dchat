@@ -47,6 +47,8 @@ Every agent modifying this codebase must enforce these non-negotiable security a
    - The production build must work at a domain root, under a path (`https://<user>.github.io/<repo>/`) and on IPFS: asset URLs are relative (`crates/client/Trunk.toml`), and code never navigates to `/`; use `state::page_base_url()` for "home".
    - The Service Worker only precaches files with fixed names (`./`, `./index.html`); hashed assets are cached on first fetch. Precaching a missing file makes its install fail on real hosts (the local dev server masks this by answering unknown paths with `index.html`).
    - `Cargo.lock` is committed so CI deploys the dependency versions that were tested (`--locked`).
+   - **Host TURN (Cloudflare)**: the client fetches `./ice-servers` once when entering a room and adds any servers returned to `RtcConfiguration`; 404, HTML or a timeout falls back silently (STUN plus `&turn=`). The Worker keeps `TURN_KEY_API_TOKEN` secret, returns only short-lived credentials (`Cache-Control: no-store`), filters port-53 URLs, rejects cross-site requests and rate-limits per IP. The request never includes room data, and the Service Worker never caches it.
+   - The Worker entry module (`worker/index.js`) may only export its default handler: the Workers runtime rejects other named exports (put helpers in `ice.js`).
 
 7. **NAT Traversal (known limitation, must stay documented)**:
    - ICE uses STUN only by default (`stun:stun.l.google.com:19302`). Pairs behind carrier-grade NAT (mobile data) or symmetric NAT often cannot link directly: roughly 10–20% of pairs, and more pairs fail as a room grows.
@@ -85,6 +87,8 @@ dchat/
 │       └── src/
 │           ├── main.rs         # Leptos UI: create/join lobby, room view, member panel, modals
 │           ├── i18n.rs         # Strongly typed i18n, browser detection, RTL handling
+│           ├── ice.rs          # Optional host TURN: GET ./ice-servers (3 s timeout, silent fallback)
+│           ├── layout.rs       # Video grid fit: largest 16:9 tiles without scrolling (unit-tested)
 │           ├── media.rs        # Capture (mic/camera/screen), per-member <audio>, video attach, speaking meter
 │           ├── mesh.rs         # PeerLink: one RTCPeerConnection per member (chat + file-transfer channels), perfect negotiation, batched ICE, tracks
 │           ├── names.rs        # Random session names, name sanitizing, pubkey tags
@@ -108,13 +112,22 @@ dchat/
 │       ├── group_history.spec.js # hist=1 backlog incl. departed authors' names, default off, per-author shareable flag
 │       ├── group_extras.spec.js  # Typing, reactions, edit/delete, direct + relayed DMs (relay can't read), @mention highlight
 │       ├── p2p_chat.spec.js    # 2-member room, E2EE message exchange, reload wipe, fragment params
+│       ├── host_turn.spec.js   # Host-offered TURN (./ice-servers) used; 404 falls back to STUN; no room data sent
 │       ├── audio_call.spec.js  # 2-member lounge audio, mic/speaker mute, leave (replaceTrack null) and rejoin
 │       ├── video_call.spec.js  # Camera tiles, camera flip keeps the mic, camera off, grid teardown
 │       ├── screen_share.spec.js# Screen share, switch to camera on the same sender, stop
 │       ├── file_sharing.spec.js# Room-wide file cards: parallel pulls, decline/withdraw, upload queue, unreachable sender, sender leaving
 │       ├── audio_settings.spec.js # Mic processing checkboxes, live track swap in voice, carry-over, reload reset
 │       └── i18n.spec.js        # UI localization, dynamic switching, Arabic RTL, zero persistence
-├── .github/workflows/pages.yml # GitHub Pages: unit tests, release build, no-hooks check, deploy
+├── .github/workflows/
+│   ├── build.yml               # Reusable: Rust + Worker tests, release build, no-hooks check, "site" artifact
+│   ├── pages.yml               # Deploy the site to GitHub Pages on push to main
+│   └── cloudflare.yml          # Deploy to Cloudflare Workers (skips until CLOUDFLARE_* secrets exist)
+├── wrangler.jsonc              # Cloudflare Worker: static assets + worker/, ICE_LIMITER rate limit
+├── worker/
+│   ├── index.js                # Entry: GET */ice-servers → ice.js, everything else → static assets
+│   ├── ice.js                  # Fresh Cloudflare TURN credentials (token stays server-side), port-53 filter
+│   └── index.test.mjs          # node --test worker/ (stubbed TURN API)
 ├── README.md                   # User guide, building, running locally, mobile test
 └── AGENTS.md                   # This document
 ```
@@ -212,6 +225,12 @@ make build-client build-client-e2e
 ```
 *Expected: `crates/client/dist/` and `crates/client/dist-e2e/` populated with `client-..._bg.wasm`, `client-...js`, and assets. `grep -c __dchat crates/client/dist/*.wasm` must print `0`.*
 
+Worker unit tests (Cloudflare TURN endpoint, stubbed API):
+```bash
+node --test worker/
+```
+*Expected: all pass.* For Worker changes, also validate in the real runtime: `npx wrangler@4 deploy --dry-run` and `npx wrangler@4 dev` (Node.js 22+).
+
 ### Step 4: Playwright End-to-End Tests (Multi-Peer Simulation)
 Run the headless multi-browser suite: it spins up the server on `dist-e2e`, builds 2–4 member meshes, negotiates WebRTC, exchanges signed encrypted messages, checks caps, relayed text and zero storage, and confirms memory wipe on reload:
 ```bash
@@ -232,6 +251,7 @@ When writing or reviewing code, check off every item:
 - [ ] Room messages are `RoomEnvelope`s: signature verified before dedup/apply, attribution taken from the verified author only.
 - [ ] The admin secret (`admsk`) never appears in the invite link, the QR code, logs, or any message.
 - [ ] Untrusted input (names, signatures, SDP, envelopes from peers) is length-checked and never panics the client (k256 signature parsing panics on short input: use `parse_signature`).
+- [ ] The Cloudflare TURN API token exists only as a Worker secret; `/ice-servers` responses are short-lived, `no-store` and never cached by the Service Worker; the client request carries no room data.
 - [ ] `e2e-hooks` code (`window.__dchat.selfPubkey/blockPeer/throttleUploads`) stays behind `#[cfg(feature = "e2e-hooks")]` and out of `make build-client` output.
 - [ ] Direct-only room messages (`RoomBody::recipient()` is `Some`) are applied only when `to` is us and the envelope came straight from its author; they are never relayed.
 - [ ] File chunks are accepted only from the offer's author over that author's own link, strictly in order; anything else aborts or is dropped.
