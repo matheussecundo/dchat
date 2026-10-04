@@ -1,0 +1,317 @@
+//! Physical key positions on each operating system. Values follow Chromium's
+//! `ui/events/keycodes/dom/dom_code_data.inc` (Copyright The Chromium Authors, BSD-3-Clause).
+//! Every match is exhaustive: a key added to `DomCode` must be mapped here to compile.
+
+use protocol::DomCode;
+
+/// Linux evdev `KEY_*` code (as used by uinput).
+pub fn evdev(code: DomCode) -> u16 {
+    match code {
+        DomCode::KeyA => 30,
+        DomCode::KeyB => 48,
+        DomCode::KeyC => 46,
+        DomCode::KeyD => 32,
+        DomCode::KeyE => 18,
+        DomCode::KeyF => 33,
+        DomCode::KeyG => 34,
+        DomCode::KeyH => 35,
+        DomCode::KeyI => 23,
+        DomCode::KeyJ => 36,
+        DomCode::KeyK => 37,
+        DomCode::KeyL => 38,
+        DomCode::KeyM => 50,
+        DomCode::KeyN => 49,
+        DomCode::KeyO => 24,
+        DomCode::KeyP => 25,
+        DomCode::KeyQ => 16,
+        DomCode::KeyR => 19,
+        DomCode::KeyS => 31,
+        DomCode::KeyT => 20,
+        DomCode::KeyU => 22,
+        DomCode::KeyV => 47,
+        DomCode::KeyW => 17,
+        DomCode::KeyX => 45,
+        DomCode::KeyY => 21,
+        DomCode::KeyZ => 44,
+        DomCode::Digit1 => 2,
+        DomCode::Digit2 => 3,
+        DomCode::Digit3 => 4,
+        DomCode::Digit4 => 5,
+        DomCode::Digit5 => 6,
+        DomCode::Digit6 => 7,
+        DomCode::Digit7 => 8,
+        DomCode::Digit8 => 9,
+        DomCode::Digit9 => 10,
+        DomCode::Digit0 => 11,
+        DomCode::Enter => 28,
+        DomCode::Escape => 1,
+        DomCode::Backspace => 14,
+        DomCode::Tab => 15,
+        DomCode::Space => 57,
+        DomCode::Minus => 12,
+        DomCode::Equal => 13,
+        DomCode::BracketLeft => 26,
+        DomCode::BracketRight => 27,
+        DomCode::Backslash => 43,
+        DomCode::Semicolon => 39,
+        DomCode::Quote => 40,
+        DomCode::Backquote => 41,
+        DomCode::Comma => 51,
+        DomCode::Period => 52,
+        DomCode::Slash => 53,
+        DomCode::CapsLock => 58,
+        DomCode::F1 => 59,
+        DomCode::F2 => 60,
+        DomCode::F3 => 61,
+        DomCode::F4 => 62,
+        DomCode::F5 => 63,
+        DomCode::F6 => 64,
+        DomCode::F7 => 65,
+        DomCode::F8 => 66,
+        DomCode::F9 => 67,
+        DomCode::F10 => 68,
+        DomCode::F11 => 87,
+        DomCode::F12 => 88,
+        DomCode::PrintScreen => 99,
+        DomCode::ScrollLock => 70,
+        DomCode::Pause => 119,
+        DomCode::Insert => 110,
+        DomCode::Home => 102,
+        DomCode::PageUp => 104,
+        DomCode::Delete => 111,
+        DomCode::End => 107,
+        DomCode::PageDown => 109,
+        DomCode::ArrowRight => 106,
+        DomCode::ArrowLeft => 105,
+        DomCode::ArrowDown => 108,
+        DomCode::ArrowUp => 103,
+        DomCode::NumLock => 69,
+        DomCode::NumpadDivide => 98,
+        DomCode::NumpadMultiply => 55,
+        DomCode::NumpadSubtract => 74,
+        DomCode::NumpadAdd => 78,
+        DomCode::NumpadEnter => 96,
+        DomCode::Numpad1 => 79,
+        DomCode::Numpad2 => 80,
+        DomCode::Numpad3 => 81,
+        DomCode::Numpad4 => 75,
+        DomCode::Numpad5 => 76,
+        DomCode::Numpad6 => 77,
+        DomCode::Numpad7 => 71,
+        DomCode::Numpad8 => 72,
+        DomCode::Numpad9 => 73,
+        DomCode::Numpad0 => 82,
+        DomCode::NumpadDecimal => 83,
+        DomCode::IntlBackslash => 86,
+        DomCode::ContextMenu => 127,
+        DomCode::NumpadEqual => 117,
+        DomCode::F13 => 183,
+        DomCode::F14 => 184,
+        DomCode::F15 => 185,
+        DomCode::F16 => 186,
+        DomCode::F17 => 187,
+        DomCode::F18 => 188,
+        DomCode::F19 => 189,
+        DomCode::F20 => 190,
+        DomCode::F21 => 191,
+        DomCode::F22 => 192,
+        DomCode::F23 => 193,
+        DomCode::F24 => 194,
+        DomCode::NumpadComma => 121,
+        DomCode::IntlRo => 89,
+        DomCode::KanaMode => 93,
+        DomCode::IntlYen => 124,
+        DomCode::Convert => 92,
+        DomCode::NonConvert => 94,
+        DomCode::Lang1 => 122,
+        DomCode::Lang2 => 123,
+        DomCode::ControlLeft => 29,
+        DomCode::ShiftLeft => 42,
+        DomCode::AltLeft => 56,
+        DomCode::MetaLeft => 125,
+        DomCode::ControlRight => 97,
+        DomCode::ShiftRight => 54,
+        DomCode::AltRight => 100,
+        DomCode::MetaRight => 126,
+    }
+}
+
+/// `VK_PAUSE`: Pause has no plain scan code (it sends E1 1D 45), so it is injected as a key.
+pub const VK_PAUSE: u16 = 0x13;
+
+/// A Windows set-1 scan code for `SendInput` with `KEYEVENTF_SCANCODE` (plus
+/// `KEYEVENTF_EXTENDEDKEY` for E0-prefixed keys), or a virtual key where a scan code can't
+/// express the key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WinKey {
+    pub scan: u16,
+    pub extended: bool,
+    pub vk: Option<u16>,
+}
+
+/// Note the Windows quirk: NumLock is the extended 0x45 and Pause the plain one.
+pub fn windows(code: DomCode) -> WinKey {
+    match code {
+        DomCode::KeyA => WinKey { scan: 0x1E, extended: false, vk: None },
+        DomCode::KeyB => WinKey { scan: 0x30, extended: false, vk: None },
+        DomCode::KeyC => WinKey { scan: 0x2E, extended: false, vk: None },
+        DomCode::KeyD => WinKey { scan: 0x20, extended: false, vk: None },
+        DomCode::KeyE => WinKey { scan: 0x12, extended: false, vk: None },
+        DomCode::KeyF => WinKey { scan: 0x21, extended: false, vk: None },
+        DomCode::KeyG => WinKey { scan: 0x22, extended: false, vk: None },
+        DomCode::KeyH => WinKey { scan: 0x23, extended: false, vk: None },
+        DomCode::KeyI => WinKey { scan: 0x17, extended: false, vk: None },
+        DomCode::KeyJ => WinKey { scan: 0x24, extended: false, vk: None },
+        DomCode::KeyK => WinKey { scan: 0x25, extended: false, vk: None },
+        DomCode::KeyL => WinKey { scan: 0x26, extended: false, vk: None },
+        DomCode::KeyM => WinKey { scan: 0x32, extended: false, vk: None },
+        DomCode::KeyN => WinKey { scan: 0x31, extended: false, vk: None },
+        DomCode::KeyO => WinKey { scan: 0x18, extended: false, vk: None },
+        DomCode::KeyP => WinKey { scan: 0x19, extended: false, vk: None },
+        DomCode::KeyQ => WinKey { scan: 0x10, extended: false, vk: None },
+        DomCode::KeyR => WinKey { scan: 0x13, extended: false, vk: None },
+        DomCode::KeyS => WinKey { scan: 0x1F, extended: false, vk: None },
+        DomCode::KeyT => WinKey { scan: 0x14, extended: false, vk: None },
+        DomCode::KeyU => WinKey { scan: 0x16, extended: false, vk: None },
+        DomCode::KeyV => WinKey { scan: 0x2F, extended: false, vk: None },
+        DomCode::KeyW => WinKey { scan: 0x11, extended: false, vk: None },
+        DomCode::KeyX => WinKey { scan: 0x2D, extended: false, vk: None },
+        DomCode::KeyY => WinKey { scan: 0x15, extended: false, vk: None },
+        DomCode::KeyZ => WinKey { scan: 0x2C, extended: false, vk: None },
+        DomCode::Digit1 => WinKey { scan: 0x02, extended: false, vk: None },
+        DomCode::Digit2 => WinKey { scan: 0x03, extended: false, vk: None },
+        DomCode::Digit3 => WinKey { scan: 0x04, extended: false, vk: None },
+        DomCode::Digit4 => WinKey { scan: 0x05, extended: false, vk: None },
+        DomCode::Digit5 => WinKey { scan: 0x06, extended: false, vk: None },
+        DomCode::Digit6 => WinKey { scan: 0x07, extended: false, vk: None },
+        DomCode::Digit7 => WinKey { scan: 0x08, extended: false, vk: None },
+        DomCode::Digit8 => WinKey { scan: 0x09, extended: false, vk: None },
+        DomCode::Digit9 => WinKey { scan: 0x0A, extended: false, vk: None },
+        DomCode::Digit0 => WinKey { scan: 0x0B, extended: false, vk: None },
+        DomCode::Enter => WinKey { scan: 0x1C, extended: false, vk: None },
+        DomCode::Escape => WinKey { scan: 0x01, extended: false, vk: None },
+        DomCode::Backspace => WinKey { scan: 0x0E, extended: false, vk: None },
+        DomCode::Tab => WinKey { scan: 0x0F, extended: false, vk: None },
+        DomCode::Space => WinKey { scan: 0x39, extended: false, vk: None },
+        DomCode::Minus => WinKey { scan: 0x0C, extended: false, vk: None },
+        DomCode::Equal => WinKey { scan: 0x0D, extended: false, vk: None },
+        DomCode::BracketLeft => WinKey { scan: 0x1A, extended: false, vk: None },
+        DomCode::BracketRight => WinKey { scan: 0x1B, extended: false, vk: None },
+        DomCode::Backslash => WinKey { scan: 0x2B, extended: false, vk: None },
+        DomCode::Semicolon => WinKey { scan: 0x27, extended: false, vk: None },
+        DomCode::Quote => WinKey { scan: 0x28, extended: false, vk: None },
+        DomCode::Backquote => WinKey { scan: 0x29, extended: false, vk: None },
+        DomCode::Comma => WinKey { scan: 0x33, extended: false, vk: None },
+        DomCode::Period => WinKey { scan: 0x34, extended: false, vk: None },
+        DomCode::Slash => WinKey { scan: 0x35, extended: false, vk: None },
+        DomCode::CapsLock => WinKey { scan: 0x3A, extended: false, vk: None },
+        DomCode::F1 => WinKey { scan: 0x3B, extended: false, vk: None },
+        DomCode::F2 => WinKey { scan: 0x3C, extended: false, vk: None },
+        DomCode::F3 => WinKey { scan: 0x3D, extended: false, vk: None },
+        DomCode::F4 => WinKey { scan: 0x3E, extended: false, vk: None },
+        DomCode::F5 => WinKey { scan: 0x3F, extended: false, vk: None },
+        DomCode::F6 => WinKey { scan: 0x40, extended: false, vk: None },
+        DomCode::F7 => WinKey { scan: 0x41, extended: false, vk: None },
+        DomCode::F8 => WinKey { scan: 0x42, extended: false, vk: None },
+        DomCode::F9 => WinKey { scan: 0x43, extended: false, vk: None },
+        DomCode::F10 => WinKey { scan: 0x44, extended: false, vk: None },
+        DomCode::F11 => WinKey { scan: 0x57, extended: false, vk: None },
+        DomCode::F12 => WinKey { scan: 0x58, extended: false, vk: None },
+        DomCode::PrintScreen => WinKey { scan: 0x37, extended: true, vk: None },
+        DomCode::ScrollLock => WinKey { scan: 0x46, extended: false, vk: None },
+        DomCode::Pause => WinKey { scan: 0x45, extended: false, vk: Some(VK_PAUSE) },
+        DomCode::Insert => WinKey { scan: 0x52, extended: true, vk: None },
+        DomCode::Home => WinKey { scan: 0x47, extended: true, vk: None },
+        DomCode::PageUp => WinKey { scan: 0x49, extended: true, vk: None },
+        DomCode::Delete => WinKey { scan: 0x53, extended: true, vk: None },
+        DomCode::End => WinKey { scan: 0x4F, extended: true, vk: None },
+        DomCode::PageDown => WinKey { scan: 0x51, extended: true, vk: None },
+        DomCode::ArrowRight => WinKey { scan: 0x4D, extended: true, vk: None },
+        DomCode::ArrowLeft => WinKey { scan: 0x4B, extended: true, vk: None },
+        DomCode::ArrowDown => WinKey { scan: 0x50, extended: true, vk: None },
+        DomCode::ArrowUp => WinKey { scan: 0x48, extended: true, vk: None },
+        DomCode::NumLock => WinKey { scan: 0x45, extended: true, vk: None },
+        DomCode::NumpadDivide => WinKey { scan: 0x35, extended: true, vk: None },
+        DomCode::NumpadMultiply => WinKey { scan: 0x37, extended: false, vk: None },
+        DomCode::NumpadSubtract => WinKey { scan: 0x4A, extended: false, vk: None },
+        DomCode::NumpadAdd => WinKey { scan: 0x4E, extended: false, vk: None },
+        DomCode::NumpadEnter => WinKey { scan: 0x1C, extended: true, vk: None },
+        DomCode::Numpad1 => WinKey { scan: 0x4F, extended: false, vk: None },
+        DomCode::Numpad2 => WinKey { scan: 0x50, extended: false, vk: None },
+        DomCode::Numpad3 => WinKey { scan: 0x51, extended: false, vk: None },
+        DomCode::Numpad4 => WinKey { scan: 0x4B, extended: false, vk: None },
+        DomCode::Numpad5 => WinKey { scan: 0x4C, extended: false, vk: None },
+        DomCode::Numpad6 => WinKey { scan: 0x4D, extended: false, vk: None },
+        DomCode::Numpad7 => WinKey { scan: 0x47, extended: false, vk: None },
+        DomCode::Numpad8 => WinKey { scan: 0x48, extended: false, vk: None },
+        DomCode::Numpad9 => WinKey { scan: 0x49, extended: false, vk: None },
+        DomCode::Numpad0 => WinKey { scan: 0x52, extended: false, vk: None },
+        DomCode::NumpadDecimal => WinKey { scan: 0x53, extended: false, vk: None },
+        DomCode::IntlBackslash => WinKey { scan: 0x56, extended: false, vk: None },
+        DomCode::ContextMenu => WinKey { scan: 0x5D, extended: true, vk: None },
+        DomCode::NumpadEqual => WinKey { scan: 0x59, extended: false, vk: None },
+        DomCode::F13 => WinKey { scan: 0x64, extended: false, vk: None },
+        DomCode::F14 => WinKey { scan: 0x65, extended: false, vk: None },
+        DomCode::F15 => WinKey { scan: 0x66, extended: false, vk: None },
+        DomCode::F16 => WinKey { scan: 0x67, extended: false, vk: None },
+        DomCode::F17 => WinKey { scan: 0x68, extended: false, vk: None },
+        DomCode::F18 => WinKey { scan: 0x69, extended: false, vk: None },
+        DomCode::F19 => WinKey { scan: 0x6A, extended: false, vk: None },
+        DomCode::F20 => WinKey { scan: 0x6B, extended: false, vk: None },
+        DomCode::F21 => WinKey { scan: 0x6C, extended: false, vk: None },
+        DomCode::F22 => WinKey { scan: 0x6D, extended: false, vk: None },
+        DomCode::F23 => WinKey { scan: 0x6E, extended: false, vk: None },
+        DomCode::F24 => WinKey { scan: 0x76, extended: false, vk: None },
+        DomCode::NumpadComma => WinKey { scan: 0x7E, extended: false, vk: None },
+        DomCode::IntlRo => WinKey { scan: 0x73, extended: false, vk: None },
+        DomCode::KanaMode => WinKey { scan: 0x70, extended: false, vk: None },
+        DomCode::IntlYen => WinKey { scan: 0x7D, extended: false, vk: None },
+        DomCode::Convert => WinKey { scan: 0x79, extended: false, vk: None },
+        DomCode::NonConvert => WinKey { scan: 0x7B, extended: false, vk: None },
+        DomCode::Lang1 => WinKey { scan: 0x72, extended: false, vk: None },
+        DomCode::Lang2 => WinKey { scan: 0x71, extended: false, vk: None },
+        DomCode::ControlLeft => WinKey { scan: 0x1D, extended: false, vk: None },
+        DomCode::ShiftLeft => WinKey { scan: 0x2A, extended: false, vk: None },
+        DomCode::AltLeft => WinKey { scan: 0x38, extended: false, vk: None },
+        DomCode::MetaLeft => WinKey { scan: 0x5B, extended: true, vk: None },
+        DomCode::ControlRight => WinKey { scan: 0x1D, extended: true, vk: None },
+        DomCode::ShiftRight => WinKey { scan: 0x36, extended: false, vk: None },
+        DomCode::AltRight => WinKey { scan: 0x38, extended: true, vk: None },
+        DomCode::MetaRight => WinKey { scan: 0x5C, extended: true, vk: None },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn test_every_key_has_a_unique_code_on_each_os() {
+        let linux: HashSet<u16> = DomCode::ALL.iter().map(|&k| evdev(k)).collect();
+        assert_eq!(linux.len(), DomCode::ALL.len());
+        assert!(!linux.contains(&0));
+        let win: HashSet<(u16, bool)> = DomCode::ALL.iter().map(|&k| (windows(k).scan, windows(k).extended)).collect();
+        assert_eq!(win.len(), DomCode::ALL.len());
+    }
+
+    #[test]
+    fn test_known_positions() {
+        assert_eq!(evdev(DomCode::KeyA), 30);
+        assert_eq!(windows(DomCode::KeyA), WinKey { scan: 0x1E, extended: false, vk: None });
+        assert_eq!(evdev(DomCode::NumpadEnter), 96);
+        assert_eq!(windows(DomCode::NumpadEnter), WinKey { scan: 0x1C, extended: true, vk: None });
+        assert_eq!(evdev(DomCode::ArrowUp), 103);
+        assert_eq!(windows(DomCode::ArrowUp), WinKey { scan: 0x48, extended: true, vk: None });
+        assert_eq!(evdev(DomCode::ControlRight), 97);
+        assert_eq!(evdev(DomCode::MetaLeft), 125);
+        assert_eq!(windows(DomCode::MetaLeft), WinKey { scan: 0x5B, extended: true, vk: None });
+        assert_eq!(evdev(DomCode::IntlBackslash), 86);
+        assert_eq!(evdev(DomCode::IntlRo), 89);
+        assert_eq!(evdev(DomCode::IntlYen), 124);
+        assert_eq!(windows(DomCode::NumLock), WinKey { scan: 0x45, extended: true, vk: None });
+        assert_eq!(windows(DomCode::Pause).vk, Some(VK_PAUSE));
+        assert_eq!(evdev(DomCode::F13), 183);
+        assert_eq!(windows(DomCode::F24).scan, 0x76);
+    }
+}

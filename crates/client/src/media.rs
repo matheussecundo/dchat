@@ -70,10 +70,78 @@ pub async fn capture_camera(front: bool) -> Result<MediaStreamTrack, JsValue> {
     first_track(&stream, "video").ok_or_else(|| JsValue::from_str("No video track captured"))
 }
 
-pub async fn capture_screen() -> Result<MediaStreamTrack, JsValue> {
+/// What a screen share shows, from `track.getSettings()`: remote control maps pointer
+/// positions only onto a whole monitor (`surface == "monitor"`).
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ScreenInfo {
+    pub surface: String,
+    pub width: u32,
+    pub height: u32,
+    pub label: String,
+}
+
+impl ScreenInfo {
+    pub fn is_monitor(&self) -> bool {
+        self.surface == "monitor"
+    }
+}
+
+/// Share the screen. The picker leans towards a whole screen (what remote control needs),
+/// leaves this dchat tab out, and the shared cursor is always drawn.
+pub async fn capture_screen() -> Result<(MediaStreamTrack, ScreenInfo), JsValue> {
     let media_devices = window().ok_or("No window")?.navigator().media_devices()?;
-    let stream: MediaStream = JsFuture::from(media_devices.get_display_media()?).await?.unchecked_into();
-    first_track(&stream, "video").ok_or_else(|| JsValue::from_str("No screen track captured"))
+    let video = js_sys::Object::new();
+    js_sys::Reflect::set(&video, &"displaySurface".into(), &"monitor".into())?;
+    js_sys::Reflect::set(&video, &"cursor".into(), &"always".into())?;
+    let frame_rate = js_sys::Object::new();
+    js_sys::Reflect::set(&frame_rate, &"ideal".into(), &30.into())?;
+    js_sys::Reflect::set(&frame_rate, &"max".into(), &60.into())?;
+    js_sys::Reflect::set(&video, &"frameRate".into(), &frame_rate)?;
+    let options = js_sys::Object::new();
+    js_sys::Reflect::set(&options, &"video".into(), &video)?;
+    js_sys::Reflect::set(&options, &"audio".into(), &JsValue::FALSE)?;
+    js_sys::Reflect::set(&options, &"selfBrowserSurface".into(), &"exclude".into())?;
+    js_sys::Reflect::set(&options, &"monitorTypeSurfaces".into(), &"include".into())?;
+    let constraints: web_sys::DisplayMediaStreamConstraints = options.unchecked_into();
+    let stream: MediaStream = JsFuture::from(media_devices.get_display_media_with_constraints(&constraints)?).await?.unchecked_into();
+    let track = first_track(&stream, "video").ok_or_else(|| JsValue::from_str("No screen track captured"))?;
+    let info = screen_info(&track);
+    Ok((track, info))
+}
+
+pub fn screen_info(track: &MediaStreamTrack) -> ScreenInfo {
+    let settings = js_sys::Reflect::get(track, &"getSettings".into())
+        .ok()
+        .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+        .and_then(|f| f.call0(track).ok())
+        .unwrap_or(JsValue::UNDEFINED);
+    let field = |name: &str| js_sys::Reflect::get(&settings, &name.into()).unwrap_or(JsValue::UNDEFINED);
+    ScreenInfo {
+        surface: field("displaySurface").as_string().unwrap_or_default(),
+        width: field("width").as_f64().unwrap_or(0.0) as u32,
+        height: field("height").as_f64().unwrap_or(0.0) as u32,
+        label: track.label(),
+    }
+}
+
+/// Ask the capture for a frame rate (best effort: browsers may cap screen capture).
+pub fn set_frame_rate(track: &MediaStreamTrack, fps: u32) {
+    let constraints = js_sys::Object::new();
+    let rate = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&rate, &"ideal".into(), &fps.into());
+    let _ = js_sys::Reflect::set(&constraints, &"frameRate".into(), &rate);
+    if let Ok(apply) = js_sys::Reflect::get(track, &"applyConstraints".into()).and_then(|f| f.dyn_into::<js_sys::Function>()) {
+        if let Ok(promise) = apply.call1(track, &constraints).and_then(|p| p.dyn_into::<js_sys::Promise>()) {
+            let ignore = wasm_bindgen::closure::Closure::once(|_: JsValue| {});
+            let _ = promise.catch(&ignore);
+            ignore.forget();
+        }
+    }
+}
+
+/// `contentHint`: "detail" keeps desktop text sharp, "motion" keeps games smooth.
+pub fn set_content_hint(track: &MediaStreamTrack, hint: &str) {
+    let _ = js_sys::Reflect::set(track, &"contentHint".into(), &hint.into());
 }
 
 pub async fn sleep_ms(ms: i32) {

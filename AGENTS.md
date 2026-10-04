@@ -67,18 +67,29 @@ Every agent modifying this codebase must enforce these non-negotiable security a
    - The fix is an optional TURN server supplied in the URL fragment (`&turn=…&turnuser=…&turnpass=…`, see `build_rtc_config` in `session.rs`). TURN relays encrypted packets only; it sees IPs and timing, never content.
    - The README section "When Members Can't Connect Directly (NAT)" is the user-facing version; keep both in sync. `docs/PRIVACY.md` lists who sees what: update it whenever data flows change.
 
+9. **Remote Control (dchat-host)**:
+   - **Only by the sharer's click**: `ControlRequest` waits in `ControlState` until the sharer allows it; nothing is ever granted automatically. One member holds mouse and keyboard at a time (granting moves it, `TakenOver`); controllers take slots P1–P4, limited to what the app reports it can create, and a pad with no update for 0.5 s goes back to neutral. Grants end with the share (or a share that isn't a whole monitor), the app pairing, the viewer's voice seat, the link, and the session (`set_available(false)`, `on_control_peer_lost`, `on_control_voice_state`).
+   - **Input path**: viewer → sharer only over their direct link's `input-events` (reliable) and `input-state` (unordered, no retransmits) channels, sealed with the room key and an AAD binding lane, seq, sender and recipient (`seal_input`). Never relayed. The sharer's tab opens, budgets (`InputBudget`) and filters (`InputGate`: only what that member holds, pads mapped to their slot) before forwarding to the app, which checks roles again.
+   - **dchat-host**: listens on 127.0.0.1 only; Host header must be its own loopback port (DNS rebinding); Origin must be in a never-empty allow-list; pairing needs the one-time code printed in its terminal, proven by HMAC both ways (the tab sends nothing to an app that can't prove it), with lockout after 5 wrong codes; one connected session at a time (a disconnected one is replaced by a new pairing). It releases everything held on every exit path (revoke, `ReleaseAll`, socket loss, `Bye`, stop shortcut, Enter, Ctrl+C, SIGTERM/SIGHUP or Windows console close/logoff/shutdown, watchdog after 1.5 s without input, panic hook, Drop), never logs input, and writes no files.
+   - **Tab side**: the app link opens only when the user clicks Connect; the code and session token live in RAM. Mouse and keyboard can do anything the sharer can (including clicking Allow for others): the prompt says so.
+   - **Versions**: the tab ↔ app messages have their own `AGENT_PROTOCOL_VERSION` and fingerprint test (`protocol/src/agent.rs`); room messages and input packets are in `PROTOCOL_VERSION`.
+
 ---
 
 ## 2. Repository Layout
 
 ```
 dchat/
-├── Cargo.toml                  # Workspace root (protocol, server, client)
+├── Cargo.toml                  # Workspace root (protocol, relay, host-agent, server, client)
 ├── crates/
 │   ├── protocol/               # Shared types, messages, ChaCha20-Poly1305 crypto
 │   │   └── src/
+│   │       ├── agent.rs        # Tab ↔ dchat-host contract: JSON messages, mutual pairing proofs, own version + fingerprint
+│   │       ├── control.rs      # Remote-control permissions: ControlState (one mouse/keyboard holder, pads P1–P4), InputGate (unit-tested)
 │   │       ├── crypto.rs       # 256-bit keygen, encrypt/decrypt, base64 helpers
 │   │       ├── fragment.rs     # Order-preserving URL fragment parser (keeps unknown params)
+│   │       ├── input.rs        # Remote-control input events, binary codec, sealed packets (room key + AAD), capture helpers
+│   │       ├── keycodes.rs     # DomCode: KeyboardEvent.code ↔ USB HID usage (126 keys)
 │   │       ├── messages.rs     # Addressed SignalPayload, signed RoomEnvelope/RoomBody, ICE types
 │   │       ├── nostr.rs        # NIP-01/16 types, BIP-340 Schnorr keys (k256), message signing, topic hashing
 │   │       ├── relays.rs       # Room relay list: &relays= parsing (exact, `nostr` = public), validation
@@ -95,6 +106,20 @@ dchat/
 │   │   │   ├── lib.rs          # axum router: WebSocket at /, NIP-11 information document
 │   │   │   └── main.rs         # CLI / env config, graceful shutdown, IP-free logs
 │   │   └── tests/relay.rs      # Integration tests over real WebSockets
+│   ├── host-agent/             # dchat-host: remote-control companion app on the shared computer (lib + binary)
+│   │   ├── dist/               # 60-dchat-host.rules (udev: /dev/uinput for the seat user), uinput.conf, README.txt (shipped in releases)
+│   │   ├── src/
+│   │   │   ├── server.rs       # ws://127.0.0.1 only: Host + Origin checks, mutual pairing, one session, resume, limits
+│   │   │   ├── pairing.rs      # One-time codes, lockout, session token (pure, unit-tested)
+│   │   │   ├── engine.rs       # One thread owns the injector and everything held; releases on every exit path; watchdog
+│   │   │   ├── inject/         # Injector trait; linux.rs (uinput keyboard, absolute pointer, relative mouse); windows.rs (SendInput); win_input.rs (SendInput records, unit-tested everywhere); mock.rs (recording)
+│   │   │   ├── geometry.rs     # Shared-monitor choice, desktop-wide absolute coordinates (unit-tested)
+│   │   │   ├── keymap.rs       # DomCode → evdev and Windows scan codes (exhaustive, unit-tested)
+│   │   │   ├── pad_map.rs      # Standard pad state → XInput report (ViGEm) and xpad evdev events (uinput), unit-tested
+│   │   │   ├── monitors/       # Monitor layout: X11 RandR (also through XWayland), Windows EnumDisplayMonitors (physical pixels)
+│   │   │   ├── stop.rs         # Global stop shortcut Ctrl+Alt+Shift+Q (Windows, X11; reported unavailable on Wayland)
+│   │   │   └── config.rs, status.rs, lib.rs, main.rs
+│   │   └── tests/              # agent.rs (WebSockets + recording injector), uinput.rs (real devices where /dev/uinput is writable)
 │   ├── server/                 # Axum dev server: static files + dev TLS + dchat-relay at /nostr
 │   │   └── src/
 │   │       ├── main.rs         # CLI args, LAN IP detection, QR code banner, /nostr (crates/relay) & /ws routing
@@ -108,6 +133,7 @@ dchat/
 │       ├── translations.json   # Embedded UI translation table for top 10 global languages
 │       └── src/
 │           ├── main.rs         # Leptos UI: create/join lobby, room view, member panel, modals
+│           ├── agent.rs        # Link to dchat-host: connects on click only, mutual pairing, resume; code and token in RAM
 │           ├── i18n.rs         # Strongly typed i18n, browser detection, RTL handling
 │           ├── ice.rs          # Optional host TURN: GET ./ice-servers (3 s timeout, silent fallback)
 │           ├── layout.rs       # Video grid fit: largest 16:9 tiles without scrolling (unit-tested)
@@ -116,16 +142,18 @@ dchat/
 │           ├── names.rs        # Random session names, name sanitizing, pubkey tags
 │           ├── nostr_pool.rs   # Multi-relay pool, fan-out broadcast, deduplication, recipient filtering
 │           ├── qr.rs           # On-the-fly SVG QR code generation
+│           ├── remote_input.rs # Viewer capture over a shared screen: pointer (letterbox-aware), keys, wheel, heartbeat
 │           ├── session/
 │           │   ├── mod.rs      # RoomSession: mesh orchestration, signed gossip, roster, caps, e2e hooks
 │           │   ├── admin.rs    # Kick / rotate link: ECDH-sealed AdminRekey, migration to the new room
+│           │   ├── control.rs  # Remote control: requests and grants, input gate to dchat-host, sealed input as a viewer
 │           │   ├── extras.rs   # Typing, reactions, edit/delete, ECDH-sealed DMs, @mention detection
 │           │   ├── files.rs    # Room-wide file cards, per-requester pulls, upload queue, chunk I/O
 │           │   ├── history.rs  # Opt-in history (&hist=1): signed shareable messages for late joiners
 │           │   └── lounge.rs   # Voice lounge: seats, per-link senders, voice/video caps, speaking, controls
 │           └── state.rs        # UI types, URL fragment helpers (create room, invite/admin links), relays
 ├── e2e/                        # Playwright automated multi-peer end-to-end tests
-│   ├── playwright.config.js    # Automatic server launch (serves crates/client/dist-e2e) and browser runner
+│   ├── playwright.config.js    # Starts the dev server (serves crates/client/dist-e2e) and a recording dchat-host on port 7499
 │   └── tests/
 │       ├── helpers.js          # createRoom / joinRoom / memberRow helpers shared by specs
 │       ├── group_chat.spec.js  # 3-member mesh, fan-out, caps + admin seat, relayed text without a direct link
@@ -140,6 +168,7 @@ dchat/
 │       ├── link_renegotiation.spec.js # With every relay cut after linking, voice and video still negotiate over the link
 │       ├── protocol_version.spec.js # Different protocol versions never link; the older member gets a reload banner
 │       ├── room_password.spec.js # Password rooms: link + password, wrong password finds nobody, rekey keeps the password
+│       ├── remote_control.spec.js # dchat-host pairing, request/allow, clicks through letterboxing, one holder, others' raw input dropped, release on shortcut/revoke/link loss, prompts in fullscreen, window shares not offered, game mode (pointer lock, relative moves, motion hint), controllers (P1/P2 per member, neutral + unplug on revoke, kept alongside mouse/keyboard)
 │       ├── privacy.spec.js     # Sealed handshakes vs the room key, STUN fallback, hideip through a real TURN (node-turn)
 │       ├── audio_call.spec.js  # 2-member lounge audio, mic/speaker mute, leave (replaceTrack null) and rejoin
 │       ├── video_call.spec.js  # Camera tiles, camera flip keeps the mic, camera off, grid teardown
@@ -151,7 +180,9 @@ dchat/
 │   ├── build.yml               # Reusable: Rust + Worker tests, release build, no-hooks check, "site" artifact
 │   ├── pages.yml               # Deploy the site to GitHub Pages on push to main
 │   ├── cloudflare.yml          # Deploy to Cloudflare Workers (skips until CLOUDFLARE_* secrets exist)
-│   └── relay-image.yml         # Publish ghcr.io/<owner>/dchat-relay when the relay changes
+│   ├── relay-image.yml         # Publish ghcr.io/<owner>/dchat-relay when the relay changes
+│   ├── host-agent.yml          # dchat-host tests and release build on Linux and Windows
+│   └── host-agent-release.yml  # Tag host-vX.Y.Z: static Linux (musl) and Windows downloads, README, SHA256SUMS, GitHub release
 ├── deploy/relay/               # docker-compose.yml + Caddyfile (automatic wss://), dchat-relay.service (systemd)
 ├── wrangler.jsonc              # Cloudflare Worker: static assets + worker/, ICE_LIMITER rate limit
 ├── worker/
@@ -225,6 +256,12 @@ dchat/
   - **8d Moderation & history (Completed)**: `AdminRekey { kicked, grants }` is gossiped and signed by an admin session (verified via its Hello admin proof); each grant (new room ID + key) is sealed with ECDH between the admin's and the member's session keys (`NostrBurnerKey::shared_key`, `SealedGrant`), so relays and the kicked member can't read it; recipients wait 1.5 s (relay flush), leave, rewrite the fragment and start a new session (chat kept, voice auto-rejoined, join notices muted for 5 s); the kicked member gets a removed screen. History: `Chat.shareable` from the author's own link, `HistoryBuffer` (200, signed originals) served to up to 2 neighbors on request in batches of 40 together with the authors' archived Hellos (names only, never roster); inserted by timestamp. Links stuck in `disconnected` for 10 s now count as lost so killed tabs leave promptly.
   - **8e Chat extras (Completed)**: `Typing` (throttled 3 s, expires after 4.5 s); `Reaction{target, emoji, on}` limited to `REACTIONS`, latest toggle per member wins (`Reactions`, unit-tested); `Edit`/`Delete` honored only from the original author (`message_authors`), and they drop the message from history; `Dm{sealed}` sealed with `seal_json` (ECDH session keys), sent only over the direct link when there is one, otherwise gossiped; it names no recipient (protocol v3): every member tries to open it, only the recipient can, and the recipient never relays it; `mentions()` with word boundaries on both sides; chime via Web Audio; `(n)` title badge while hidden; DM threads end when the peer leaves.
 
+- **Phase 9: Remote Control (Completed)**
+  - **9a Desktop control on Linux (Completed)**: protocol v4 (`ControlStatus`/`ControlRequest`/`ControlGrant`/`ControlRelease`, sealed input packets, `DomCode`); `dchat-host` (loopback WebSocket, mutual pairing, engine with release-on-exit and watchdog, uinput backend, X11/XWayland monitor layout); tab ↔ app link; permission prompts that follow fullscreen; desktop-mode mouse and keyboard with letterbox-aware positions; E2E against a recording dchat-host.
+  - **9b Windows and game mode (Completed)**: `SendInput` backend (scan codes, `VIRTUALDESK` absolute positions, per-monitor DPI awareness, administrator note), Windows monitor layout, `win_input` records unit-tested on every platform, CI on Windows; viewer game mode (pointer lock with `unadjustedMovement`, relative moves, keyboard lock in fullscreen, losing the lock ends control), `Mode` switches the sharer's stream to `contentHint: motion` at 60 fps.
+  - **9c Controllers (Completed)**: viewers send their first "standard" gamepad (`PadPoller`, `pad_state_from`, `PadSampler` heartbeat) while they hold a slot; `ControlStatus.controllers` advertises how many virtual pads the app can create (`ControlState::set_pad_slots`); dchat-host plugs a virtual Xbox 360 pad per slot (uinput copy of xpad `045e:028e` on Linux, ViGEm on Windows with an install hint when the driver is missing), neutralizes a pad after 0.5 s without updates, and unplugs it on revoke.
+  - **9d Releases and polish (Completed)**: global stop shortcut (`global-hotkey`: Windows message loop, X11; Wayland reported unavailable, the GlobalShortcuts portal is left for later); panic hook and SIGHUP / Windows console-close, logoff and shutdown all release held input; release workflow (`host-v*` tags: static musl and MSVC `+crt-static` builds, packaged with the udev rule and README, `SHA256SUMS`, optional `DCHAT_HOST_ORIGINS` repository variable).
+
 ---
 
 ## 4. Verification Loop for AI Agents
@@ -236,7 +273,7 @@ Verify cryptographic primitives, serialization, and room lifecycle in memory:
 ```bash
 cargo test --workspace
 ```
-*Expected: 100% pass, 0 failures, 0 ignored.*
+*Expected: 100% pass, 0 failures, 0 ignored.* This includes `host-agent`; its `tests/uinput.rs` creates real input devices only where `/dev/uinput` is writable and passes (saying so) elsewhere.
 
 ### Step 2: Client WebAssembly Type Checking
 Verify client compilation for the `wasm32-unknown-unknown` target:
@@ -248,6 +285,11 @@ cargo check -p client --target wasm32-unknown-unknown
 Also check the test-hook build compiles cleanly:
 ```bash
 cargo check -p client --target wasm32-unknown-unknown --features e2e-hooks
+```
+
+And that dchat-host still compiles for Windows (`rustup target add x86_64-pc-windows-gnu` once; CI runs its tests on Windows):
+```bash
+cargo check -p host-agent --target x86_64-pc-windows-gnu --all-targets
 ```
 
 ### Step 3: Trunk Frontend Build
@@ -294,6 +336,7 @@ When writing or reviewing code, check off every item:
 - [ ] Direct-only room messages (`RoomBody::recipient()` is `Some`) are applied only when `to` is us and the envelope came straight from its author; they are never relayed.
 - [ ] File chunks are accepted only from the offer's author over that author's own link, strictly in order; anything else aborts or is dropped.
 - [ ] `AdminRekey` is honored only from a member whose Hello carried a valid admin proof; grants are sealed per recipient (never the room key in clear).
+- [ ] Remote control: nothing is granted without the sharer's click; input is accepted only from current holders, over their own direct link, sealed with the input AAD; dchat-host stays loopback-only with Host/Origin checks and mutual pairing, releases held input on every exit path, and logs no input.
 - [ ] DM plaintext is only ever sealed with `seal_json` to the recipient's session key; DMs carry no recipient field; the recipient never relays a DM; no DM text in logs.
 - [ ] A room password never appears in the link, logs, messages or storage: only its salt (`pw`) is in the link, the input is cleared after stretching, and only the stretched value stays in RAM.
 - [ ] Text inputs and lobby forms keep `autocomplete="off"`; message boxes follow the spell-check setting.

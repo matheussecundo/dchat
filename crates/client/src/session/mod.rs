@@ -3,6 +3,7 @@
 //! Everything lives in RAM and is gone on reload.
 
 mod admin;
+mod control;
 mod extras;
 mod files;
 mod history;
@@ -15,6 +16,7 @@ use crate::state::{
     current_fragment, current_time_string, get_default_relays, ChatMessageUi, ConnectionStatus,
     DmUi, LinkUi, LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RekeyTarget,
 };
+use control::Control;
 use files::Files;
 use lounge::{Lounge, VoiceInfo};
 use leptos::*;
@@ -79,6 +81,8 @@ pub struct SessionSignals {
     pub update_required: WriteSignal<bool>,
     /// The room hides IP addresses (TURN only) but no TURN server is available here.
     pub no_turn: WriteSignal<bool>,
+    /// Remote control: offers, my rights, requests waiting for my answer.
+    pub control: WriteSignal<crate::state::ControlUi>,
 }
 
 #[derive(Clone)]
@@ -134,6 +138,7 @@ struct Inner {
     dm_peers: RefCell<HashSet<String>>,
     /// Members already reported as running another protocol version.
     other_versions: RefCell<HashSet<String>>,
+    control: Control,
 }
 
 impl RoomSession {
@@ -205,6 +210,7 @@ impl RoomSession {
                 last_edit: RefCell::new(HashMap::new()),
                 dm_peers: RefCell::new(HashSet::new()),
                 other_versions: RefCell::new(HashSet::new()),
+                control: Control::default(),
             }),
         };
         if migrated {
@@ -266,6 +272,7 @@ impl RoomSession {
         if self.inner.closed.get() {
             return;
         }
+        self.end_control();
         self.close_lounge();
         if let Some(pool) = self.pool() {
             pool.broadcast_signal(&SignalPayload::PeerLeft);
@@ -427,6 +434,7 @@ impl RoomSession {
             LinkEvent::Message(text) => self.on_frame(remote, &text),
             LinkEvent::Track(track, stream) => self.on_remote_track(remote, track, stream),
             LinkEvent::Chunk(packet) => self.on_file_chunk(remote, &packet),
+            LinkEvent::Input { lane, packet } => self.on_input_packet(remote, lane, &packet),
         }
     }
 
@@ -437,6 +445,7 @@ impl RoomSession {
         link.close();
         self.forget_member_media(remote, false);
         self.on_file_peer_lost(remote);
+        self.on_control_peer_lost(remote);
         if failed {
             self.inner
                 .retry_after
@@ -495,7 +504,8 @@ impl RoomSession {
         let hellos = self.inner.hellos.borrow();
         let reports = self.inner.link_reports.borrow();
         let voices = self.inner.lounge.envelopes.borrow();
-        for envelope in hellos.values().chain(reports.values()).chain(voices.values()) {
+        let controls = self.inner.control.envelopes.borrow();
+        for envelope in hellos.values().chain(reports.values()).chain(voices.values()).chain(controls.values()) {
             if let Some(frame) = self.encode(envelope) {
                 link.send(&frame);
             }
@@ -637,6 +647,15 @@ impl RoomSession {
                     self.on_signal(author.to_string(), signal.clone());
                 }
             }
+            RoomBody::ControlStatus { .. } => self.on_control_status(envelope),
+            RoomBody::ControlRequest { mouse_keyboard, controller, .. } => {
+                let wants = protocol::ControlWants { mouse_keyboard: *mouse_keyboard, controller: *controller };
+                self.on_control_request(author, wants);
+            }
+            RoomBody::ControlGrant { mouse_keyboard, pad, reason, .. } => {
+                self.on_control_grant(author, *mouse_keyboard, *pad, *reason);
+            }
+            RoomBody::ControlRelease { .. } => self.on_control_release(author),
             RoomBody::Leave => {
                 if author != self.inner.me {
                     self.remove_member(author);
@@ -676,6 +695,7 @@ impl RoomSession {
         }
         self.forget_member_media(pubkey, true);
         self.on_file_peer_lost(pubkey);
+        self.on_control_peer_lost(pubkey);
         self.publish_link_state();
         self.recompute();
     }
@@ -864,6 +884,7 @@ impl RoomSession {
                 log::info!("Link to {} did not open in time", pubkey_tag(&remote));
                 s.drop_link(&remote, true);
             }
+            s.control_tick();
         }) as Box<dyn FnMut()>);
         if let Some(w) = window() {
             if let Ok(h) = w.set_interval_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), TICK_MS) {
@@ -912,6 +933,16 @@ impl RoomSession {
         }) as Box<dyn Fn(i32)>);
         let _ = js_sys::Reflect::set(&hooks, &"throttleUploads".into(), throttle.as_ref());
         throttle.forget();
+
+        // Send remote-control input (JSON `InputEvent`s) to a sharer, bypassing our own rights.
+        let s = self.clone();
+        let raw_input = Closure::wrap(Box::new(move |sharer: String, events: String| {
+            if let Ok(events) = serde_json::from_str::<Vec<protocol::InputEvent>>(&events) {
+                s.send_raw_input(&sharer, events);
+            }
+        }) as Box<dyn Fn(String, String)>);
+        let _ = js_sys::Reflect::set(&hooks, &"sendRawInput".into(), raw_input.as_ref());
+        raw_input.forget();
 
         let _ = js_sys::Reflect::set(&win, &"__dchat".into(), &hooks);
     }

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Never change how a plain room's relay topic is derived (`hash_room_topic`): members on
 /// different versions only notice each other (and show the reload banner) on a shared topic.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// What travels through the relays (encrypted with the room key): the sender's protocol
 /// version and its signal. Every version must keep `v` readable, whatever `payload` becomes.
@@ -55,12 +55,14 @@ mod tests {
     use crate::crypto::{encrypt_chunk, EncryptedPayload, CHUNK_SIZE};
     use crate::messages::*;
     use crate::nostr::hash_room_topic;
+    use crate::input::{encode_events, seal_input, InputEvent, InputLane};
+    use crate::keycodes::DomCode;
     use crate::password::{password_room_key, password_room_topic, stretch_password};
     use sha2::{Digest, Sha256};
 
     /// The wire fingerprint recorded for the current version. When the test below fails,
     /// bump `PROTOCOL_VERSION` and record the new pair here.
-    const RECORDED: (u32, &str) = (3, "e71fc716144948a82ee6505ac3948d144bb0ab8500393767df78ff9424646d3f");
+    const RECORDED: (u32, &str) = (4, "f7d7d32502cfb3a8c69465d407abb838821b2930ddb72199ef685e78d2ef2dc3");
 
     fn sealed() -> EncryptedPayload {
         EncryptedPayload { nonce: "n".into(), ciphertext: "c".into() }
@@ -157,6 +159,10 @@ mod tests {
                 kicked: Some("c".into()),
                 grants: vec![SealedGrant { to: "b".into(), payload: sealed() }],
             },
+            RoomBody::ControlStatus { seq: 1, available: true, controllers: 2, mouse_keyboard: Some("b".into()), pads: vec![None, Some("c".into())] },
+            RoomBody::ControlRequest { to: "s".into(), mouse_keyboard: true, controller: true },
+            RoomBody::ControlGrant { to: "b".into(), mouse_keyboard: false, pad: Some(1), reason: Some(ControlEnd::TakenOver) },
+            RoomBody::ControlRelease { to: "s".into() },
             RoomBody::Leave,
         ]
     }
@@ -180,6 +186,10 @@ mod tests {
             RoomBody::Dm { .. } => "Dm",
             RoomBody::LinkSignal { .. } => "LinkSignal",
             RoomBody::AdminRekey { .. } => "AdminRekey",
+            RoomBody::ControlStatus { .. } => "ControlStatus",
+            RoomBody::ControlRequest { .. } => "ControlRequest",
+            RoomBody::ControlGrant { .. } => "ControlGrant",
+            RoomBody::ControlRelease { .. } => "ControlRelease",
             RoomBody::Leave => "Leave",
         }
     }
@@ -203,6 +213,11 @@ mod tests {
         wire.push(serde_json::to_string(&RoomGrant { room: "r".into(), key: "k".into() }).unwrap());
         wire.push(String::from_utf8(admin_proof_message("r", "s")).unwrap());
         wire.push(hash_room_topic("r"));
+        // Remote-control input: every event's binary encoding, the packet header, the keys.
+        wire.push(hex::encode(encode_events(&crate::input::tests::samples()).unwrap()));
+        let packet = seal_input(&[7; 32], "a", "b", InputLane::Events, 9, &[InputEvent::Alive]).unwrap();
+        wire.push(format!("{:?} {}", &packet[..5], packet.len()));
+        wire.push(DomCode::ALL.iter().map(|k| format!("{}={}", k.as_code(), k.hid())).collect::<Vec<_>>().join(","));
         wire.push(password_room_topic("r", &password_room_key(&[1; 32], &stretch_password("pw", &[2; 16]).unwrap())));
         // File chunks: the header layout (the rest is a random nonce and ciphertext).
         let packet = encrypt_chunk(&[7; 32], &[1; 16], 2, 3, b"data").unwrap();

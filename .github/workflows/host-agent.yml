@@ -1,0 +1,38 @@
+# dchat-host, the remote-control companion app: its tests on every OS it injects input on.
+# (`cargo test --workspace` in build.yml covers Linux too; this adds Windows.)
+name: dchat-host
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/host-agent/**"
+      - "crates/protocol/**"
+      - "Cargo.lock"
+      - ".github/workflows/host-agent.yml"
+  pull_request:
+    paths:
+      - "crates/host-agent/**"
+      - "crates/protocol/**"
+      - "Cargo.lock"
+      - ".github/workflows/host-agent.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests (key maps, pairing, engine, SendInput records, WebSockets)
+        run: cargo test -p host-agent --locked
+      - name: Release build
+        run: cargo build -p host-agent --release --locked

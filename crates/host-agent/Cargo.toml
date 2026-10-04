@@ -1,0 +1,45 @@
+[package]
+name = "host-agent"
+version = "0.1.0"
+edition = "2021"
+description = "dchat-host: lets members you allow control this computer's mouse, keyboard and controllers"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "dchat-host"
+path = "src/main.rs"
+
+[dependencies]
+protocol = { path = "../protocol" }
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1.38", features = ["full"] }
+futures-util = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.5", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.8"
+base64 = "0.22"
+global-hotkey = "0.8"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13"
+x11rb = { version = "0.13", features = ["randr"] }
+
+[target.'cfg(windows)'.dependencies]
+vigem-client = "0.1"
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Security",
+  "Win32_System_Threading",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tokio-tungstenite = "0.24"

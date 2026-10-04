@@ -21,10 +21,19 @@ export default defineConfig({
       ],
     },
   },
-  webServer: {
-    command: 'cd .. && cargo run -p server -- --http --port 3333 --static-dir crates/client/dist-e2e',
-    url: 'http://127.0.0.1:3333/health',
-    reuseExistingServer: true,
-    timeout: 60000,
-  },
+  webServer: [
+    {
+      command: 'cd .. && cargo run -p server -- --http --port 3333 --static-dir crates/client/dist-e2e',
+      url: 'http://127.0.0.1:3333/health',
+      reuseExistingServer: true,
+      timeout: 60000,
+    },
+    {
+      // The remote-control companion app, recording instead of injecting.
+      command: 'cd .. && cargo run -p host-agent -- --mock-injector --test-code TEST-0000 --port 7499 --allow-origin http://127.0.0.1:3333 --no-hotkey',
+      url: 'http://127.0.0.1:7499/health',
+      reuseExistingServer: true,
+      timeout: 180000,
+    },
+  ],
 });

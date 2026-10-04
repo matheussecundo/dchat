@@ -171,3 +171,83 @@ export const RECORD_SENT_FRAMES = () => {
     return send.call(this, data);
   };
 };
+
+/** Init script: screen sharing returns a 1280×720 canvas reporting `displaySurface`. */
+export const CANVAS_SCREEN = ({ surface }) => {
+  navigator.mediaDevices.getDisplayMedia = async () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1280;
+    canvas.height = 720;
+    const ctx = canvas.getContext('2d');
+    let frame = 0;
+    setInterval(() => {
+      ctx.fillStyle = `hsl(${(frame += 7) % 360}, 60%, 45%)`;
+      ctx.fillRect(0, 0, 1280, 720);
+    }, 50);
+    const stream = canvas.captureStream(30);
+    const track = stream.getVideoTracks()[0];
+    const settings = track.getSettings.bind(track);
+    track.getSettings = () => ({ ...settings(), displaySurface: surface, width: 1280, height: 720 });
+    return stream;
+  };
+};
+
+/** The recording dchat-host started by playwright.config.js. */
+export const AGENT = { port: 7499, code: 'TEST-0000' };
+
+export async function agentEvents() {
+  const response = await fetch(`http://127.0.0.1:${AGENT.port}/__test/events`);
+  return response.json();
+}
+
+/** End any app session and clear what it recorded. */
+export async function resetAgent() {
+  await fetch(`http://127.0.0.1:${AGENT.port}/__test/reset`, { method: 'POST' });
+}
+
+/** In the sharer's page: pair with the test app from the Remote control dialog. */
+export async function pairAgent(page, code = AGENT.code) {
+  await page.locator('#control-host-btn').click();
+  await page.locator('#agent-port-input').fill(String(AGENT.port));
+  await page.locator('#agent-code-input').fill(code);
+  await page.locator('#agent-connect-btn').click();
+}
+
+/** Init script: pointer lock that always succeeds (headless browsers can't really lock). */
+export const STUB_POINTER_LOCK = () => {
+  let locked = null;
+  window.__pointerLockRequests = 0;
+  Object.defineProperty(Document.prototype, 'pointerLockElement', { get() { return locked; }, configurable: true });
+  Element.prototype.requestPointerLock = function requestPointerLock() {
+    window.__pointerLockRequests += 1;
+    locked = this;
+    setTimeout(() => document.dispatchEvent(new Event('pointerlockchange')), 0);
+    return Promise.resolve();
+  };
+  Document.prototype.exitPointerLock = function exitPointerLock() {
+    locked = null;
+    setTimeout(() => document.dispatchEvent(new Event('pointerlockchange')), 0);
+  };
+};
+
+/** Init script: one "standard" gamepad the test drives with `window.__pressPad(i, on)`. */
+export const MOCK_GAMEPAD = () => {
+  const pad = {
+    id: 'Test pad (STANDARD GAMEPAD)',
+    index: 0,
+    connected: true,
+    mapping: 'standard',
+    timestamp: 0,
+    axes: [0, 0, 0, 0],
+    buttons: Array.from({ length: 17 }, () => ({ pressed: false, touched: false, value: 0 })),
+  };
+  navigator.getGamepads = () => [pad, null, null, null];
+  window.__pressPad = (index, on) => {
+    pad.buttons[index] = { pressed: on, touched: on, value: on ? 1 : 0 };
+    pad.timestamp += 1;
+  };
+  window.__tiltPad = (axis, value) => {
+    pad.axes[axis] = value;
+    pad.timestamp += 1;
+  };
+};
