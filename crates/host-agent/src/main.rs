@@ -6,13 +6,18 @@ use host_agent::config::{built_in_origins, normalize_origins, AgentConfig};
 use host_agent::engine::Engine;
 use host_agent::inject::mock::Recorder;
 use host_agent::inject::{platform_injector, Injector};
-use host_agent::{monitors, router, start};
+use host_agent::engine::EngineHandle;
+use host_agent::{monitors, router, start, stop};
 use protocol::DEFAULT_AGENT_PORT;
 use std::io::IsTerminal;
 use std::net::SocketAddr;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
+
+/// For the panic hook: release everything held even if dchat-host crashes.
+static ENGINE: OnceLock<EngineHandle> = OnceLock::new();
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Let members you allow in dchat control this computer while you share your screen")]
@@ -52,6 +57,10 @@ struct Args {
     /// With --mock-injector: how many virtual controllers to pretend to have.
     #[arg(long, requires = "mock_injector", default_value_t = 4)]
     mock_pads: u8,
+
+    /// Don't register the global stop shortcut (Ctrl+Alt+Shift+Q).
+    #[arg(long)]
+    no_hotkey: bool,
 }
 
 #[tokio::main]
@@ -110,6 +119,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (status_tx, mut status_rx) = mpsc::unbounded_channel::<String>();
     let cfg = AgentConfig { port: args.port, allowed_origins: origins.clone(), test_api: args.mock_injector, ..AgentConfig::default() };
     let agent = start(cfg, engine, args.test_code.clone(), recording, status_tx);
+    let _ = ENGINE.set(agent.engine.clone());
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(engine) = ENGINE.get() {
+            engine.shutdown();
+        }
+        default_hook(info);
+    }));
     let caps = agent.state.caps.clone();
 
     println!("dchat-host {} · ws://{addr} · allowed: {}", env!("CARGO_PKG_VERSION"), origins.join(", "));
@@ -126,7 +143,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(err) => println!("Controllers: unavailable: {err}"),
     }
     let interactive = std::io::stdin().is_terminal();
-    println!("Stop remote control: {}Ctrl+C, or Stop in dchat", if interactive { "Enter here, " } else { "" });
+    let shortcut = if args.no_hotkey {
+        Err("turned off".to_string())
+    } else {
+        let state = agent.state.clone();
+        stop::watch(move || state.stop(&format!("{} pressed on this computer", stop::STOP_SHORTCUT)))
+    };
+    let mut ways = Vec::new();
+    if shortcut.is_ok() {
+        ways.push(format!("{} anywhere", stop::STOP_SHORTCUT));
+    }
+    if interactive {
+        ways.push("Enter here".to_string());
+    }
+    ways.push("Ctrl+C".to_string());
+    ways.push("Stop in dchat".to_string());
+    println!("Stop remote control: {}", ways.join(", "));
+    if let Err(why) = shortcut {
+        println!("({} shortcut: {why})", stop::STOP_SHORTCUT);
+    }
     if let Some(code) = agent.state.pairing_code() {
         println!("Pairing code: {code}");
     }
@@ -163,13 +198,35 @@ async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
+    // Also when the terminal is closed, or Windows closes the console or logs off.
     #[cfg(unix)]
     let terminate = async {
-        if let Ok(mut sig) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            sig.recv().await;
+        use tokio::signal::unix::{signal, SignalKind};
+        match (signal(SignalKind::terminate()), signal(SignalKind::hangup())) {
+            (Ok(mut term), Ok(mut hup)) => {
+                tokio::select! {
+                    _ = term.recv() => {},
+                    _ = hup.recv() => {},
+                }
+            }
+            _ => std::future::pending::<()>().await,
         }
     };
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let terminate = async {
+        use tokio::signal::windows::{ctrl_close, ctrl_logoff, ctrl_shutdown};
+        match (ctrl_close(), ctrl_logoff(), ctrl_shutdown()) {
+            (Ok(mut close), Ok(mut logoff), Ok(mut shutdown)) => {
+                tokio::select! {
+                    _ = close.recv() => {},
+                    _ = logoff.recv() => {},
+                    _ = shutdown.recv() => {},
+                }
+            }
+            _ => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(any(unix, windows)))]
     let terminate = std::future::pending::<()>();
     tokio::select! {
         _ = ctrl_c => {},

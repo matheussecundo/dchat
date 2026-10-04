@@ -70,7 +70,7 @@ Every agent modifying this codebase must enforce these non-negotiable security a
 9. **Remote Control (dchat-host)**:
    - **Only by the sharer's click**: `ControlRequest` waits in `ControlState` until the sharer allows it; nothing is ever granted automatically. One member holds mouse and keyboard at a time (granting moves it, `TakenOver`); controllers take slots P1–P4, limited to what the app reports it can create, and a pad with no update for 0.5 s goes back to neutral. Grants end with the share (or a share that isn't a whole monitor), the app pairing, the viewer's voice seat, the link, and the session (`set_available(false)`, `on_control_peer_lost`, `on_control_voice_state`).
    - **Input path**: viewer → sharer only over their direct link's `input-events` (reliable) and `input-state` (unordered, no retransmits) channels, sealed with the room key and an AAD binding lane, seq, sender and recipient (`seal_input`). Never relayed. The sharer's tab opens, budgets (`InputBudget`) and filters (`InputGate`: only what that member holds, pads mapped to their slot) before forwarding to the app, which checks roles again.
-   - **dchat-host**: listens on 127.0.0.1 only; Host header must be its own loopback port (DNS rebinding); Origin must be in a never-empty allow-list; pairing needs the one-time code printed in its terminal, proven by HMAC both ways (the tab sends nothing to an app that can't prove it), with lockout after 5 wrong codes; one connected session at a time (a disconnected one is replaced by a new pairing). It releases everything held on every exit path (revoke, `ReleaseAll`, socket loss, `Bye`, stop, watchdog after 1.5 s without input, Drop), never logs input, and writes no files.
+   - **dchat-host**: listens on 127.0.0.1 only; Host header must be its own loopback port (DNS rebinding); Origin must be in a never-empty allow-list; pairing needs the one-time code printed in its terminal, proven by HMAC both ways (the tab sends nothing to an app that can't prove it), with lockout after 5 wrong codes; one connected session at a time (a disconnected one is replaced by a new pairing). It releases everything held on every exit path (revoke, `ReleaseAll`, socket loss, `Bye`, stop shortcut, Enter, Ctrl+C, SIGTERM/SIGHUP or Windows console close/logoff/shutdown, watchdog after 1.5 s without input, panic hook, Drop), never logs input, and writes no files.
    - **Tab side**: the app link opens only when the user clicks Connect; the code and session token live in RAM. Mouse and keyboard can do anything the sharer can (including clicking Allow for others): the prompt says so.
    - **Versions**: the tab ↔ app messages have their own `AGENT_PROTOCOL_VERSION` and fingerprint test (`protocol/src/agent.rs`); room messages and input packets are in `PROTOCOL_VERSION`.
 
@@ -107,7 +107,7 @@ dchat/
 │   │   │   └── main.rs         # CLI / env config, graceful shutdown, IP-free logs
 │   │   └── tests/relay.rs      # Integration tests over real WebSockets
 │   ├── host-agent/             # dchat-host: remote-control companion app on the shared computer (lib + binary)
-│   │   ├── dist/               # 60-dchat-host.rules (udev: /dev/uinput for the seat user), uinput.conf
+│   │   ├── dist/               # 60-dchat-host.rules (udev: /dev/uinput for the seat user), uinput.conf, README.txt (shipped in releases)
 │   │   ├── src/
 │   │   │   ├── server.rs       # ws://127.0.0.1 only: Host + Origin checks, mutual pairing, one session, resume, limits
 │   │   │   ├── pairing.rs      # One-time codes, lockout, session token (pure, unit-tested)
@@ -117,6 +117,7 @@ dchat/
 │   │   │   ├── keymap.rs       # DomCode → evdev and Windows scan codes (exhaustive, unit-tested)
 │   │   │   ├── pad_map.rs      # Standard pad state → XInput report (ViGEm) and xpad evdev events (uinput), unit-tested
 │   │   │   ├── monitors/       # Monitor layout: X11 RandR (also through XWayland), Windows EnumDisplayMonitors (physical pixels)
+│   │   │   ├── stop.rs         # Global stop shortcut Ctrl+Alt+Shift+Q (Windows, X11; reported unavailable on Wayland)
 │   │   │   └── config.rs, status.rs, lib.rs, main.rs
 │   │   └── tests/              # agent.rs (WebSockets + recording injector), uinput.rs (real devices where /dev/uinput is writable)
 │   ├── server/                 # Axum dev server: static files + dev TLS + dchat-relay at /nostr
@@ -180,7 +181,8 @@ dchat/
 │   ├── pages.yml               # Deploy the site to GitHub Pages on push to main
 │   ├── cloudflare.yml          # Deploy to Cloudflare Workers (skips until CLOUDFLARE_* secrets exist)
 │   ├── relay-image.yml         # Publish ghcr.io/<owner>/dchat-relay when the relay changes
-│   └── host-agent.yml          # dchat-host tests and release build on Linux and Windows
+│   ├── host-agent.yml          # dchat-host tests and release build on Linux and Windows
+│   └── host-agent-release.yml  # Tag host-vX.Y.Z: static Linux (musl) and Windows downloads, README, SHA256SUMS, GitHub release
 ├── deploy/relay/               # docker-compose.yml + Caddyfile (automatic wss://), dchat-relay.service (systemd)
 ├── wrangler.jsonc              # Cloudflare Worker: static assets + worker/, ICE_LIMITER rate limit
 ├── worker/
@@ -254,11 +256,11 @@ dchat/
   - **8d Moderation & history (Completed)**: `AdminRekey { kicked, grants }` is gossiped and signed by an admin session (verified via its Hello admin proof); each grant (new room ID + key) is sealed with ECDH between the admin's and the member's session keys (`NostrBurnerKey::shared_key`, `SealedGrant`), so relays and the kicked member can't read it; recipients wait 1.5 s (relay flush), leave, rewrite the fragment and start a new session (chat kept, voice auto-rejoined, join notices muted for 5 s); the kicked member gets a removed screen. History: `Chat.shareable` from the author's own link, `HistoryBuffer` (200, signed originals) served to up to 2 neighbors on request in batches of 40 together with the authors' archived Hellos (names only, never roster); inserted by timestamp. Links stuck in `disconnected` for 10 s now count as lost so killed tabs leave promptly.
   - **8e Chat extras (Completed)**: `Typing` (throttled 3 s, expires after 4.5 s); `Reaction{target, emoji, on}` limited to `REACTIONS`, latest toggle per member wins (`Reactions`, unit-tested); `Edit`/`Delete` honored only from the original author (`message_authors`), and they drop the message from history; `Dm{sealed}` sealed with `seal_json` (ECDH session keys), sent only over the direct link when there is one, otherwise gossiped; it names no recipient (protocol v3): every member tries to open it, only the recipient can, and the recipient never relays it; `mentions()` with word boundaries on both sides; chime via Web Audio; `(n)` title badge while hidden; DM threads end when the peer leaves.
 
-- **Phase 9: Remote Control (in progress)**
+- **Phase 9: Remote Control (Completed)**
   - **9a Desktop control on Linux (Completed)**: protocol v4 (`ControlStatus`/`ControlRequest`/`ControlGrant`/`ControlRelease`, sealed input packets, `DomCode`); `dchat-host` (loopback WebSocket, mutual pairing, engine with release-on-exit and watchdog, uinput backend, X11/XWayland monitor layout); tab ↔ app link; permission prompts that follow fullscreen; desktop-mode mouse and keyboard with letterbox-aware positions; E2E against a recording dchat-host.
   - **9b Windows and game mode (Completed)**: `SendInput` backend (scan codes, `VIRTUALDESK` absolute positions, per-monitor DPI awareness, administrator note), Windows monitor layout, `win_input` records unit-tested on every platform, CI on Windows; viewer game mode (pointer lock with `unadjustedMovement`, relative moves, keyboard lock in fullscreen, losing the lock ends control), `Mode` switches the sharer's stream to `contentHint: motion` at 60 fps.
   - **9c Controllers (Completed)**: viewers send their first "standard" gamepad (`PadPoller`, `pad_state_from`, `PadSampler` heartbeat) while they hold a slot; `ControlStatus.controllers` advertises how many virtual pads the app can create (`ControlState::set_pad_slots`); dchat-host plugs a virtual Xbox 360 pad per slot (uinput copy of xpad `045e:028e` on Linux, ViGEm on Windows with an install hint when the driver is missing), neutralizes a pad after 0.5 s without updates, and unplugs it on revoke.
-  - **9d releases and polish**: planned.
+  - **9d Releases and polish (Completed)**: global stop shortcut (`global-hotkey`: Windows message loop, X11; Wayland reported unavailable, the GlobalShortcuts portal is left for later); panic hook and SIGHUP / Windows console-close, logoff and shutdown all release held input; release workflow (`host-v*` tags: static musl and MSVC `+crt-static` builds, packaged with the udev rule and README, `SHA256SUMS`, optional `DCHAT_HOST_ORIGINS` repository variable).
 
 ---
 

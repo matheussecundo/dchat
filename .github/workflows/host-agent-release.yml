@@ -1,0 +1,96 @@
+# Publish dchat-host downloads: push a tag like `host-v0.1.0` (or run manually with one).
+# Optional repository variable DCHAT_HOST_ORIGINS bakes your dchat site(s) into the
+# binaries, so users don't need --allow-origin.
+name: dchat-host release
+
+on:
+  push:
+    tags: ["host-v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create, e.g. host-v0.1.0"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  CARGO_PROFILE_RELEASE_STRIP: "true"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            name: linux-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test -p host-agent --locked
+
+      - name: Build (static)
+        env:
+          DCHAT_HOST_ORIGINS: ${{ vars.DCHAT_HOST_ORIGINS }}
+          RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-C target-feature=+crt-static' || '' }}
+        run: cargo build -p host-agent --release --locked --target ${{ matrix.target }}
+
+      - name: Package (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          dir="dchat-host-${TAG#host-v}-${{ matrix.name }}"
+          mkdir "$dir"
+          cp target/${{ matrix.target }}/release/dchat-host "$dir/"
+          cp crates/host-agent/dist/60-dchat-host.rules crates/host-agent/dist/uinput.conf crates/host-agent/dist/README.txt "$dir/"
+          tar -czf "$dir.tar.gz" "$dir"
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $dir = "dchat-host-$($env:TAG -replace '^host-v','')-${{ matrix.name }}"
+          New-Item -ItemType Directory $dir | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/dchat-host.exe $dir/
+          Copy-Item crates/host-agent/dist/README.txt $dir/
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            dchat-host-*.tar.gz
+            dchat-host-*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Checksums
+        run: sha256sum dchat-host-*.tar.gz dchat-host-*.zip > SHA256SUMS && cat SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$TAG" dchat-host-*.tar.gz dchat-host-*.zip SHA256SUMS \
+            --title "dchat-host ${TAG#host-v}" \
+            --notes "Companion app for dchat remote control. Download for your system, check it against SHA256SUMS, and see README.txt inside. Windows builds are not code-signed."

@@ -230,11 +230,18 @@ Any Nostr relay that forwards ephemeral events (kinds 20000–29999) works, for 
 
 ## 5. Remote control app (dchat-host)
 
-Remote control needs `dchat-host` on the computer being controlled (Linux or Windows). Build it with `cargo build -p host-agent --release` on that system; the binary is `target/release/dchat-host` (`dchat-host.exe` on Windows). Ready-made downloads come with a later release workflow.
+Remote control needs `dchat-host` on the computer being controlled (Linux or Windows). Users download it from your repository's Releases page, or build it with `cargo build -p host-agent --release` (the binary is `target/release/dchat-host`, `dchat-host.exe` on Windows).
 
 It only accepts your dchat site, so tell it the site's address:
 - at run time: `dchat-host --allow-origin https://chat.example.com` (repeatable, or `DCHAT_HOST_ALLOWED_ORIGINS=https://a,https://b`);
 - or bake it in at build time: `DCHAT_HOST_ORIGINS=https://chat.example.com cargo build -p host-agent --release`.
+
+### Publishing downloads
+1. Optional: set the repository variable `DCHAT_HOST_ORIGINS` (**Settings → Secrets and variables → Actions → Variables**) to your site's address, e.g. `https://chat.example.com`, so the downloads accept it without `--allow-origin`.
+2. Push a tag: `git tag host-v0.1.0 && git push origin host-v0.1.0` (or run **dchat-host release** from the Actions tab with a tag).
+3. `.github/workflows/host-agent-release.yml` runs the tests on Linux and Windows, builds a static Linux binary (musl) and a Windows `.exe` with the C runtime built in, packages each with `README.txt` (and the udev rule on Linux), and creates a GitHub release with `SHA256SUMS`.
+
+The Windows build is not code-signed, so SmartScreen warns on first run. To sign it, add a signing step before packaging, for example [Azure Trusted Signing](https://learn.microsoft.com/azure/trusted-signing/) or [SignPath](https://signpath.org/) (free for open-source projects). A self-signed certificate doesn't help: SmartScreen trusts neither.
 
 On a GitHub Pages site the origin is `https://<user>.github.io` for all of your repositories; the pairing code still protects the app, but a custom domain keeps it to dchat.
 

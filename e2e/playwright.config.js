@@ -30,7 +30,7 @@ export default defineConfig({
     },
     {
       // The remote-control companion app, recording instead of injecting.
-      command: 'cd .. && cargo run -p host-agent -- --mock-injector --test-code TEST-0000 --port 7499 --allow-origin http://127.0.0.1:3333',
+      command: 'cd .. && cargo run -p host-agent -- --mock-injector --test-code TEST-0000 --port 7499 --allow-origin http://127.0.0.1:3333 --no-hotkey',
       url: 'http://127.0.0.1:7499/health',
       reuseExistingServer: true,
       timeout: 180000,

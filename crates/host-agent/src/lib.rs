@@ -13,6 +13,7 @@ pub mod pad_map;
 pub mod pairing;
 pub mod server;
 pub mod status;
+pub mod stop;
 
 pub use config::AgentConfig;
 pub use server::{router, AgentState};
