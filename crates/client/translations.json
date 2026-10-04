@@ -153,7 +153,10 @@
     "relay_mode_both": "My relay + public Nostr relays (backup)",
     "relay_url_label": "Relay address",
     "relay_url_invalid": "Enter wss:// addresses, separated by commas.",
-    "relay_hint": "Everyone in the room uses these relays to find each other. Relays only see encrypted, short-lived handshake messages."
+    "relay_hint": "Everyone in the room uses these relays to find each other. Relays only see encrypted, short-lived handshake messages.",
+    "update_required": "Someone in this room is using a newer version of dchat. Reload to update and connect with them.",
+    "btn_reload": "Reload",
+    "toast_peer_outdated": "Someone on an older version of dchat can't connect until they reload."
   },
   "zh": {
     "scan_qr": "📱 扫描二维码",
@@ -309,7 +312,10 @@
     "relay_mode_both": "我的中继 + 公共 Nostr 中继（备用）",
     "relay_url_label": "中继地址",
     "relay_url_invalid": "请输入 wss:// 地址，多个地址用逗号分隔。",
-    "relay_hint": "房间内的所有人都通过这些中继找到彼此。中继只能看到经过加密、短暂存在的握手消息。"
+    "relay_hint": "房间内的所有人都通过这些中继找到彼此。中继只能看到经过加密、短暂存在的握手消息。",
+    "update_required": "此房间中有人正在使用较新版本的 dchat。请重新加载以更新并与对方连接。",
+    "btn_reload": "重新加载",
+    "toast_peer_outdated": "有人正在使用旧版本的 dchat，需重新加载后才能连接。"
   },
   "hi": {
     "scan_qr": "📱 क्यूआर स्कैन करें",
@@ -465,7 +471,10 @@
     "relay_mode_both": "मेरा रिले + सार्वजनिक Nostr रिले (बैकअप)",
     "relay_url_label": "रिले का पता",
     "relay_url_invalid": "कॉमा से अलग करके wss:// पते दर्ज करें।",
-    "relay_hint": "कमरे के सभी लोग एक-दूसरे को ढूंढने के लिए इन्हीं रिले का उपयोग करते हैं। रिले को केवल एन्क्रिप्टेड, अल्पकालिक हैंडशेक संदेश दिखते हैं।"
+    "relay_hint": "कमरे के सभी लोग एक-दूसरे को ढूंढने के लिए इन्हीं रिले का उपयोग करते हैं। रिले को केवल एन्क्रिप्टेड, अल्पकालिक हैंडशेक संदेश दिखते हैं।",
+    "update_required": "इस रूम में कोई dchat का नया संस्करण इस्तेमाल कर रहा है। अपडेट करने और उनसे जुड़ने के लिए पेज फिर से लोड करें।",
+    "btn_reload": "फिर से लोड करें",
+    "toast_peer_outdated": "dchat के पुराने संस्करण वाला कोई व्यक्ति पेज फिर से लोड करने तक नहीं जुड़ सकता।"
   },
   "es": {
     "scan_qr": "📱 Escanear QR",
@@ -621,7 +630,10 @@
     "relay_mode_both": "Mi relé + relés Nostr públicos (respaldo)",
     "relay_url_label": "Dirección del relé",
     "relay_url_invalid": "Introduce direcciones wss:// separadas por comas.",
-    "relay_hint": "Todos en la sala usan estos relés para encontrarse. Los relés solo ven mensajes de conexión cifrados y efímeros."
+    "relay_hint": "Todos en la sala usan estos relés para encontrarse. Los relés solo ven mensajes de conexión cifrados y efímeros.",
+    "update_required": "Alguien en esta sala usa una versión más reciente de dchat. Recarga para actualizar y conectarte.",
+    "btn_reload": "Recargar",
+    "toast_peer_outdated": "Alguien con una versión anterior de dchat no podrá conectarse hasta que recargue."
   },
   "fr": {
     "scan_qr": "📱 Scanner QR",
@@ -777,7 +789,10 @@
     "relay_mode_both": "Mon relais + relais Nostr publics (secours)",
     "relay_url_label": "Adresse du relais",
     "relay_url_invalid": "Saisissez des adresses wss:// séparées par des virgules.",
-    "relay_hint": "Tous les membres du salon utilisent ces relais pour se retrouver. Les relais ne voient que des messages de connexion chiffrés et éphémères."
+    "relay_hint": "Tous les membres du salon utilisent ces relais pour se retrouver. Les relais ne voient que des messages de connexion chiffrés et éphémères.",
+    "update_required": "Quelqu'un dans ce salon utilise une version plus récente de dchat. Rechargez pour mettre à jour et vous connecter.",
+    "btn_reload": "Recharger",
+    "toast_peer_outdated": "Une personne avec une version plus ancienne de dchat ne pourra se connecter qu'après avoir rechargé."
   },
   "ar": {
     "scan_qr": "📱 مسح رمز QR",
@@ -933,7 +948,10 @@
     "relay_mode_both": "المرحل الخاص بي + مرحلات Nostr العامة (احتياطي)",
     "relay_url_label": "عنوان المرحل",
     "relay_url_invalid": "أدخل عناوين wss:// مفصولة بفواصل.",
-    "relay_hint": "يستخدم كل من في الغرفة هذه المرحلات للعثور على بعضهم البعض. لا ترى المرحلات سوى رسائل مصافحة مشفرة وقصيرة العمر."
+    "relay_hint": "يستخدم كل من في الغرفة هذه المرحلات للعثور على بعضهم البعض. لا ترى المرحلات سوى رسائل مصافحة مشفرة وقصيرة العمر.",
+    "update_required": "يستخدم أحد الأعضاء في هذه الغرفة إصدارًا أحدث من dchat. أعد التحميل للتحديث والاتصال به.",
+    "btn_reload": "إعادة التحميل",
+    "toast_peer_outdated": "لا يمكن لعضو يستخدم إصدارًا أقدم من dchat الاتصال حتى يعيد التحميل."
   },
   "bn": {
     "scan_qr": "📱 কিউআর স্ক্যান",
@@ -1089,7 +1107,10 @@
     "relay_mode_both": "আমার রিলে + পাবলিক Nostr রিলে (ব্যাকআপ)",
     "relay_url_label": "রিলের ঠিকানা",
     "relay_url_invalid": "কমা দিয়ে আলাদা করে wss:// ঠিকানা লিখুন।",
-    "relay_hint": "রুমের সবাই একে অপরকে খুঁজে পেতে এই রিলেগুলো ব্যবহার করে। রিলে শুধু এনক্রিপ্ট করা, স্বল্পস্থায়ী হ্যান্ডশেক বার্তা দেখতে পায়।"
+    "relay_hint": "রুমের সবাই একে অপরকে খুঁজে পেতে এই রিলেগুলো ব্যবহার করে। রিলে শুধু এনক্রিপ্ট করা, স্বল্পস্থায়ী হ্যান্ডশেক বার্তা দেখতে পায়।",
+    "update_required": "এই রুমে কেউ dchat-এর নতুন সংস্করণ ব্যবহার করছেন। আপডেট করে তাঁদের সাথে যুক্ত হতে পেজটি আবার লোড করুন।",
+    "btn_reload": "আবার লোড করুন",
+    "toast_peer_outdated": "dchat-এর পুরনো সংস্করণ ব্যবহারকারী কেউ পেজ আবার লোড না করা পর্যন্ত যুক্ত হতে পারবেন না।"
   },
   "pt": {
     "scan_qr": "📱 Escanear QR",
@@ -1245,7 +1266,10 @@
     "relay_mode_both": "Meu relay + relays Nostr públicos (reserva)",
     "relay_url_label": "Endereço do relay",
     "relay_url_invalid": "Digite endereços wss:// separados por vírgulas.",
-    "relay_hint": "Todos na sala usam esses relays para se encontrar. Os relays só veem mensagens de conexão criptografadas e efêmeras."
+    "relay_hint": "Todos na sala usam esses relays para se encontrar. Os relays só veem mensagens de conexão criptografadas e efêmeras.",
+    "update_required": "Alguém nesta sala está usando uma versão mais recente do dchat. Recarregue para atualizar e se conectar.",
+    "btn_reload": "Recarregar",
+    "toast_peer_outdated": "Alguém com uma versão mais antiga do dchat só consegue se conectar depois de recarregar a página."
   },
   "ru": {
     "scan_qr": "📱 Сканировать QR",
@@ -1401,7 +1425,10 @@
     "relay_mode_both": "Мое реле + публичные реле Nostr (резерв)",
     "relay_url_label": "Адрес реле",
     "relay_url_invalid": "Введите адреса wss:// через запятую.",
-    "relay_hint": "Все участники комнаты находят друг друга через эти реле. Реле видят только зашифрованные кратковременные сообщения для установления соединения."
+    "relay_hint": "Все участники комнаты находят друг друга через эти реле. Реле видят только зашифрованные кратковременные сообщения для установления соединения.",
+    "update_required": "Кто-то в этой комнате использует более новую версию dchat. Перезагрузите страницу, чтобы обновиться и подключиться.",
+    "btn_reload": "Перезагрузить",
+    "toast_peer_outdated": "Участник со старой версией dchat не сможет подключиться, пока не перезагрузит страницу."
   },
   "de": {
     "scan_qr": "📱 QR scannen",
@@ -1557,6 +1584,9 @@
     "relay_mode_both": "Mein Relay + öffentliche Nostr-Relays (Reserve)",
     "relay_url_label": "Relay-Adresse",
     "relay_url_invalid": "Geben Sie wss://-Adressen durch Kommas getrennt ein.",
-    "relay_hint": "Alle im Raum finden sich über diese Relays. Relays sehen nur verschlüsselte, kurzlebige Verbindungsnachrichten."
+    "relay_hint": "Alle im Raum finden sich über diese Relays. Relays sehen nur verschlüsselte, kurzlebige Verbindungsnachrichten.",
+    "update_required": "Jemand in diesem Raum nutzt eine neuere Version von dchat. Lade die Seite neu, um zu aktualisieren und dich zu verbinden.",
+    "btn_reload": "Neu laden",
+    "toast_peer_outdated": "Jemand mit einer älteren dchat-Version kann sich erst nach dem Neuladen verbinden."
   }
 }

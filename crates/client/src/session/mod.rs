@@ -10,7 +10,7 @@ mod lounge;
 
 use crate::mesh::{LinkEvent, LinkEventHandler, PeerLink, SignalOut};
 use crate::names::pubkey_tag;
-use crate::nostr_pool::NostrRelayPool;
+use crate::nostr_pool::{protocol_version, NostrRelayPool, PoolEvents};
 use crate::state::{
     current_fragment, current_time_string, get_default_relays, ChatMessageUi, ConnectionStatus,
     DmUi, LinkUi, LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RekeyTarget,
@@ -76,6 +76,8 @@ pub struct SessionSignals {
     /// Private conversations by peer pubkey, and their unread counts.
     pub dms: WriteSignal<HashMap<String, Vec<DmUi>>>,
     pub dm_unread: WriteSignal<HashMap<String, usize>>,
+    /// A member runs a newer protocol version: reload to update and connect with them.
+    pub update_required: WriteSignal<bool>,
 }
 
 #[derive(Clone)]
@@ -129,6 +131,8 @@ struct Inner {
     message_authors: RefCell<HashMap<String, String>>,
     last_edit: RefCell<HashMap<String, u64>>,
     dm_peers: RefCell<HashSet<String>>,
+    /// Members already reported as running another protocol version.
+    other_versions: RefCell<HashSet<String>>,
 }
 
 impl RoomSession {
@@ -193,6 +197,7 @@ impl RoomSession {
                 message_authors: RefCell::new(HashMap::new()),
                 last_edit: RefCell::new(HashMap::new()),
                 dm_peers: RefCell::new(HashSet::new()),
+                other_versions: RefCell::new(HashSet::new()),
             }),
         };
         if migrated {
@@ -207,26 +212,25 @@ impl RoomSession {
         });
         session.publish_link_state();
 
-        let on_signal: Rc<dyn Fn(String, SignalPayload)> = {
-            let s = session.clone();
-            Rc::new(move |from, signal| s.on_signal(from, signal))
+        let events = PoolEvents {
+            on_signal: {
+                let s = session.clone();
+                Box::new(move |from, signal| s.on_signal(from, signal))
+            },
+            on_other_version: {
+                let s = session.clone();
+                Box::new(move |from, version| s.on_other_version(&from, version))
+            },
+            on_relay_connected: {
+                let s = session.clone();
+                Box::new(move |count| {
+                    s.inner.relays_connected.set(count);
+                    s.inner.signals.connected_relays.set(count);
+                    s.refresh_status();
+                })
+            },
         };
-        let on_relay_connected: Rc<dyn Fn(usize)> = {
-            let s = session.clone();
-            Rc::new(move |count| {
-                s.inner.relays_connected.set(count);
-                s.inner.signals.connected_relays.set(count);
-                s.refresh_status();
-            })
-        };
-        let pool = NostrRelayPool::new(
-            room_id,
-            key,
-            identity,
-            get_default_relays(),
-            on_signal,
-            on_relay_connected,
-        );
+        let pool = NostrRelayPool::new(room_id, key, identity, get_default_relays(), events);
         *session.inner.pool.borrow_mut() = Some(pool);
 
         session.start_ticker();
@@ -312,6 +316,22 @@ impl RoomSession {
         }
     }
 
+    /// A member on another protocol version: we never link. The older side is asked to
+    /// reload (which loads the newest build); the newer side is told once per member.
+    fn on_other_version(&self, from: &str, version: u32) {
+        if self.inner.closed.get() || !self.inner.other_versions.borrow_mut().insert(from.to_string()) {
+            return;
+        }
+        let own = protocol_version();
+        if version > own {
+            log::warn!("A member runs protocol version {version}, newer than ours ({own}): reload to update");
+            self.inner.signals.update_required.set(true);
+        } else {
+            log::warn!("A member runs older protocol version {version} (ours: {own}); it must reload to connect");
+            self.toast("toast_peer_outdated");
+        }
+    }
+
     /// A member announced itself. The lower pubkey of each pair dials; the higher one
     /// answers with its own presence so the lower one learns about it.
     fn on_presence(&self, from: &str) {
@@ -359,16 +379,13 @@ impl RoomSession {
         }
     }
 
-    /// Send a link's offer, answer or ICE to `remote`: over the link itself when it is
-    /// open and the remote handles that, otherwise through the relays (first handshake,
-    /// or a peer running an older version).
+    /// Send a link's offer, answer or ICE to `remote`: over the link itself once it is open,
+    /// otherwise (the first handshake) through the relays.
     fn send_link_signal(&self, remote: &str, signal: SignalPayload) {
         if self.inner.closed.get() {
             return;
         }
-        let in_band = self
-            .link(remote)
-            .is_some_and(|link| link.signals_over_link.get() && link.is_open());
+        let in_band = self.link(remote).is_some_and(|link| link.is_open());
         if in_band
             && self.send_direct(
                 remote,
@@ -394,13 +411,6 @@ impl RoomSession {
             LinkEvent::Open => {
                 log::info!("Direct link open with {}", pubkey_tag(remote));
                 self.inner.retry_after.borrow_mut().remove(remote);
-                self.send_direct(
-                    remote,
-                    RoomBody::LinkCapabilities {
-                        to: remote.to_string(),
-                        link_signaling: true,
-                    },
-                );
                 self.publish_link_state();
                 self.sync_to(remote);
                 self.maybe_request_history(remote);
@@ -611,11 +621,6 @@ impl RoomSession {
             RoomBody::AdminRekey { kicked, grants } => self.on_admin_rekey(author, kicked.as_deref(), grants),
             RoomBody::FileRequest { .. } | RoomBody::FileQueued { .. } | RoomBody::FileCancel { .. } => {
                 self.on_file_message(author, &envelope.body);
-            }
-            RoomBody::LinkCapabilities { link_signaling, .. } => {
-                if let Some(link) = self.link(author) {
-                    link.signals_over_link.set(*link_signaling);
-                }
             }
             RoomBody::LinkSignal { signal, .. } => {
                 // Only offers, answers and ICE addressed to us (presence and departures have

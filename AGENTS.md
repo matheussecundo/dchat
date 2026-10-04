@@ -37,7 +37,8 @@ Every agent modifying this codebase must enforce these non-negotiable security a
    - **Topology**: full mesh, one `RTCPeerConnection` (`mesh::PeerLink`) per member pair. No SFU or any other server ever handles messages or media.
    - **Addressed signaling**: `Offer`/`Answer`/`IceBatch` carry the recipient session pubkey in `to` (inside the encrypted payload); `NostrRelayPool` drops signals addressed to someone else. The lower pubkey of each pair dials; perfect negotiation (polite = higher pubkey) handles any later glare.
    - **Signed room messages**: every data-channel message is a `RoomEnvelope` signed by its author's session key (`sign_message`, domain-separated from Nostr event signatures) and encrypted with the room key. Receivers verify the signature **before** recording the message id for dedup, then relay it to neighbors without a direct link to the author (`Roster::forward_targets`). Attribution always comes from the verified `author`, never from a self-declared name.
-   - **Protocol evolution**: envelopes are verified by re-serializing their body, so an older client rejects any `RoomBody` variant that gained a field. Never add fields to an existing variant; add a new variant (older clients fail to decode it and drop it). Features that need the other side's support are announced per link, like `LinkCapabilities`.
+   - **Protocol version**: members link only with members on the same `PROTOCOL_VERSION` (`protocol/src/version.rs`), so nothing exchanged needs to stay compatible across versions. Every relay signal is `VersionedSignal { v, payload }` inside the room-key encryption; `decode_signal` reads `v` first and never parses another version's payload. The pool reports other versions instead of linking: the older side shows a reload banner (`#update-banner`), the newer side a one-time toast per member. Links form only through that check, so data-channel messages carry no version.
+   - **When to bump `PROTOCOL_VERSION`**: any change to how signals or room messages are encoded (the `wire_format_matches_protocol_version` test fails until you bump it and record the new fingerprint), signed-bytes formats, the file chunk layout, or a rule every member must apply alike (caps, gossip, history, rekey). UI-only changes don't bump it, so deploying them never splits a live room. The shape of `v` itself must never change.
    - **Admin secret**: `admsk` exists only in the creator's admin link. The invite link, the QR code and **🔗 Copy Link** always use `invite_url()`, which strips it.
    - **Deterministic caps**: every member evaluates `Roster::evicted` / `latest_beyond_cap` on the same data; a member who finds itself evicted (room, voice seat or video slot) backs off on its own. Caps are enforced by honest clients, not cryptographically.
    - **Rekey**: only admin-signed `AdminRekey` envelopes are honored; grants are ECDH-sealed per recipient session key. Members offline during a rekey are stranded and need a fresh invite.
@@ -53,7 +54,7 @@ Every agent modifying this codebase must enforce these non-negotiable security a
 
 7. **Relays (signaling only)**:
    - The room's relays are part of the room and travel in the link: `&relays=` lists them exactly (`nostr` = the public relays, `protocol::PUBLIC_RELAYS`); absent means public (or the dev server's own relay on localhost/LAN). The creator chooses at creation; joiners never change it, so every member can find the others.
-   - Relays carry only discovery (`Presence`, `PeerLeft`) and each link's first handshake. When a link's chat channel opens, each side sends a direct-only `LinkCapabilities { link_signaling: true }`; from then on that link's renegotiation (offer, answer, ICE, e.g. the first voice or camera track) goes over the link itself as a direct-only `LinkSignal` (`send_link_signal`). Peers that never announced it (older versions) still get it through the relays. Members already linked keep chatting, calling and starting video through a relay outage; only newcomers and reconnecting links wait.
+   - Relays carry only discovery (`Presence`, `PeerLeft`) and each link's first handshake. Once a link's chat channel is open, its renegotiation (offer, answer, ICE, e.g. the first voice or camera track) goes over the link itself as a direct-only `LinkSignal` (`send_link_signal`). Members already linked keep chatting, calling and starting video through a relay outage; only newcomers and reconnecting links wait.
    - `NostrRelayPool` reconnects each relay with backoff (1 s doubling to 30 s, jitter, reset after a stable minute), resubscribes and re-announces presence; it is closed when the session leaves (including rekey migration).
    - `dchat-relay` must stay RAM-only and dchat-only: ephemeral kinds only, signature and freshness checks, per-connection rate limits, per-IP connection caps, optional origin allow-list, no IPs/topics/content in logs. The dev server mounts the same code at `/nostr`, so E2E runs exercise it.
 
@@ -79,6 +80,7 @@ dchat/
 │   │       ├── nostr.rs        # NIP-01/16 types, BIP-340 Schnorr keys (k256), message signing, topic hashing
 │   │       ├── relays.rs       # Room relay list: &relays= parsing (exact, `nostr` = public), validation
 │   │       ├── room.rs         # Roster, link graph, gossip routing, member/voice/video cap eviction, RoomParams (pure, unit-tested)
+│   │       ├── version.rs      # PROTOCOL_VERSION, versioned relay signals, wire-format fingerprint test
 │   │       └── lib.rs
 │   ├── relay/                  # dchat-relay: RAM-only Nostr relay for dchat signaling (lib + binary)
 │   │   ├── Dockerfile          # Container image (build from the repo root)
@@ -132,6 +134,7 @@ dchat/
 │       ├── relay_choice.spec.js# Relay choice at room creation: public default, my relay only, my relay + public
 │       ├── relay_reconnect.spec.js # Dropped relay connection reconnects; newcomers still reach the member
 │       ├── link_renegotiation.spec.js # With every relay cut after linking, voice and video still negotiate over the link
+│       ├── protocol_version.spec.js # Different protocol versions never link; the older member gets a reload banner
 │       ├── audio_call.spec.js  # 2-member lounge audio, mic/speaker mute, leave (replaceTrack null) and rejoin
 │       ├── video_call.spec.js  # Camera tiles, camera flip keeps the mic, camera off, grid teardown
 │       ├── screen_share.spec.js# Screen share, switch to camera on the same sender, stop
@@ -276,8 +279,8 @@ When writing or reviewing code, check off every item:
 - [ ] `dchat-relay` stores nothing and logs no IP addresses, room topics or content; it only accepts signed, fresh, ephemeral dchat events.
 - [ ] Relay URLs from links or the create form pass `is_relay_url` (no `&`, `#`, `,` or whitespace), and HTTPS pages only use `wss://`.
 - [ ] The Cloudflare TURN API token exists only as a Worker secret; `/ice-servers` responses are short-lived, `no-store` and never cached by the Service Worker; the client request carries no room data.
-- [ ] `e2e-hooks` code (`window.__dchat.selfPubkey/blockPeer/throttleUploads`) stays behind `#[cfg(feature = "e2e-hooks")]` and out of `make build-client` output.
-- [ ] New room message fields go into new `RoomBody` variants, never into existing ones (older clients verify by re-serializing).
+- [ ] `e2e-hooks` code (`window.__dchat.selfPubkey/blockPeer/throttleUploads`, and reading `window.__dchatProtocolVersion`) stays behind `#[cfg(feature = "e2e-hooks")]` and out of `make build-client` output.
+- [ ] Wire or shared-rule changes bump `PROTOCOL_VERSION` and record the new fingerprint; signals from other versions are reported, never parsed or linked.
 - [ ] `LinkSignal` is applied only from the link's own remote (direct-only), and only for offers, answers and ICE addressed to us.
 - [ ] Direct-only room messages (`RoomBody::recipient()` is `Some`) are applied only when `to` is us and the envelope came straight from its author; they are never relayed.
 - [ ] File chunks are accepted only from the offer's author over that author's own link, strictly in order; anything else aborts or is dropped.

@@ -156,10 +156,6 @@ pub enum RoomBody {
     /// A private message to `to`, sealed with the two members' session keys (ECDH).
     /// Relayable like any message, but only `to` can open it and `to` never relays it.
     Dm { to: String, sealed: EncryptedPayload },
-    /// The author handles `LinkSignal` (sent once to each neighbor when their link opens).
-    /// A separate message rather than a new field: an older client would reject a changed
-    /// Hello, because envelopes are verified by re-serializing their body.
-    LinkCapabilities { to: String, link_signaling: bool },
     /// WebRTC renegotiation (offer, answer, ICE) for the link between author and `to`, sent
     /// over that link itself once it is open, so Nostr relays only carry the first handshake.
     LinkSignal { to: String, signal: SignalPayload },
@@ -178,7 +174,6 @@ impl RoomBody {
             | RoomBody::FileQueued { to, .. }
             | RoomBody::HistoryRequest { to }
             | RoomBody::HistoryChunk { to, .. }
-            | RoomBody::LinkCapabilities { to, .. }
             | RoomBody::LinkSignal { to, .. } => Some(to),
             RoomBody::FileCancel { to, .. } => to.as_deref(),
             _ => None,
@@ -217,7 +212,7 @@ impl RoomEnvelope {
             .unwrap_or(false)
     }
 
-    fn signed_bytes(id: &str, author: &str, ts: u64, body: &RoomBody) -> Result<Vec<u8>, NostrError> {
+    pub(crate) fn signed_bytes(id: &str, author: &str, ts: u64, body: &RoomBody) -> Result<Vec<u8>, NostrError> {
         Ok(serde_json::to_vec(&("dchat:envelope:v1", id, author, ts, body))?)
     }
 }
@@ -339,8 +334,6 @@ mod tests {
         let offer = SignalPayload::Offer { to: "b".into(), sdp: "v=0".into() };
         let body = RoomBody::LinkSignal { to: "b".into(), signal: offer.clone() };
         assert_eq!(body.recipient(), Some("b"));
-        let caps = RoomBody::LinkCapabilities { to: "b".into(), link_signaling: true };
-        assert_eq!(caps.recipient(), Some("b"));
 
         let key = NostrBurnerKey::generate().unwrap();
         let env = RoomEnvelope::sign(&key, 1, body).unwrap();
@@ -351,8 +344,8 @@ mod tests {
 
     #[test]
     fn test_old_clients_cannot_verify_bodies_with_added_fields() {
-        // Why new capabilities are new variants: a verifier that drops an unknown field
-        // re-serializes different bytes, so the signature no longer matches.
+        // One reason members link only on the same PROTOCOL_VERSION: a verifier that drops
+        // an unknown field re-serializes different bytes, so the signature no longer matches.
         let key = NostrBurnerKey::generate().unwrap();
         let env = RoomEnvelope::sign(&key, 1, RoomBody::Chat { text: "hi".into(), shareable: true }).unwrap();
         let mut json: serde_json::Value = serde_json::to_value(&env).unwrap();

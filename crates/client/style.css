@@ -1440,6 +1440,20 @@ select.lobby-input {
   flex-shrink: 0;
 }
 
+/* Another member runs a newer protocol version: we cannot link until this tab reloads. */
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 6px 16px;
+  font-size: 0.85rem;
+  background-color: rgba(245, 158, 11, 0.14);
+  border-bottom: 1px solid rgba(245, 158, 11, 0.4);
+  flex-shrink: 0;
+}
+
 /* The stage has a fixed height; tile sizes and columns are computed to fit it exactly
    (see layout.rs), so it never scrolls. Keep `gap` in sync with GRID_GAP_PX. */
 .video-grid {
