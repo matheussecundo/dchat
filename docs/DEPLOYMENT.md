@@ -142,6 +142,8 @@ Create a new TURN key, update the two Worker secrets (step 5), then delete the o
 
 Members find each other through Nostr relays. Relays only pass along encrypted, signed, short-lived handshake messages tagged with a hash of the room ID; they never see room IDs, keys or chat content. They do see members' IP addresses and timing.
 
+Relays are needed only to find members and to open each direct link. Once two members are linked, everything else between them goes over that link, including setting up voice and video. A relay outage doesn't affect members who are already connected; it only delays newcomers and links that need to reconnect.
+
 By default rooms use the public relays `wss://relay.damus.io`, `wss://nos.lol` and `wss://relay.primal.net`. Running your own relay removes that dependency and keeps the metadata with you.
 
 ### Choosing relays per room
