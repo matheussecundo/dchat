@@ -138,12 +138,81 @@ Create a new TURN key, update the two Worker secrets (step 5), then delete the o
 
 ---
 
-## 4. Nostr relays
+## 4. Nostr relays: public or your own
 
-Wherever it's hosted, the app signals through public Nostr relays (`wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.primal.net`). Relays see only encrypted, signed, short-lived events tagged with a hash of the room ID. If you see joins hanging at **Connecting to Relay**, or want independence from public relays, run your own relay (for example [strfry](https://github.com/hoytech/strfry) or nostr-rs-relay) and add it to room links:
+Members find each other through Nostr relays. Relays only pass along encrypted, signed, short-lived handshake messages tagged with a hash of the room ID; they never see room IDs, keys or chat content. They do see members' IP addresses and timing.
+
+By default rooms use the public relays `wss://relay.damus.io`, `wss://nos.lol` and `wss://relay.primal.net`. Running your own relay removes that dependency and keeps the metadata with you.
+
+### Choosing relays per room
+When creating a room, **Signaling relays** offers:
+- **Public Nostr relays (default)**: nothing is added to the link.
+- **My relay**: only the addresses you enter (`wss://…`, comma-separated). The link gets `&relays=wss://relay.example.com`.
+- **My relay + public Nostr relays (backup)**: both. The link gets `&relays=wss://relay.example.com,nostr`, where `nostr` stands for the public relays.
+
+Everyone who joins uses the room's relays (they come with the link), so all members can find each other. The **⚡ Nostr** badge shows which relays the room uses. If a relay connection drops, the app reconnects on its own (after 1 s, then backing off up to 30 s).
+
+To pre-fill **My relay** for everyone creating rooms on your site, set a repository variable **Settings → Secrets and variables → Actions → Variables → `DCHAT_RELAY_URL`** (e.g. `wss://relay.example.com`). The deploy workflows build it into the app. Public relays stay the default choice.
+
+### Running dchat-relay
+`dchat-relay` (`crates/relay`) is a small relay made for dchat:
+- **RAM only:** it forwards ephemeral events and stores nothing. Its logs contain no IP addresses, room topics or content.
+- **dchat only:** it accepts only dchat's signaling events (kind 20001) with a room topic, a valid signature and a fresh timestamp (at most 5 minutes old). It is not a general-purpose Nostr relay.
+- **Abuse limits:** 128 KiB per message, 8 subscriptions per connection, 300 events burst then 30 per second per connection, 64 connections per IP.
+- **Optional origin lock:** accept only your dchat site (`--allowed-origin https://chat.example.com`), so other sites can't use your relay.
+- Publishes its limits as a standard NIP-11 information document.
+
+It needs a server with a public IP address and a DNS name pointing at it (e.g. `relay.example.com`), with ports 80 and 443 open. Browsers on an HTTPS site can only use `wss://`, so it runs behind [Caddy](https://caddyserver.com/), which gets and renews the TLS certificate automatically. The files are in `deploy/relay/`.
+
+#### With Docker (recommended)
+On the server, with Docker installed:
+```bash
+git clone https://github.com/<user>/<repo>.git dchat && cd dchat/deploy/relay
+RELAY_DOMAIN=relay.example.com ALLOWED_ORIGINS=https://chat.example.com docker compose up -d --build
 ```
-…#room=…&key=…&relays=wss://relay.example.com
+Leave out `ALLOWED_ORIGINS` to accept any site. The first start builds the image (a few minutes); Caddy then obtains the certificate.
+
+Prefer a prebuilt image? `.github/workflows/relay-image.yml` publishes `ghcr.io/<user>/dchat-relay:latest` whenever the relay changes on `main` (make the package public under **Packages** if your server pulls it without logging in). Then:
+```bash
+RELAY_DOMAIN=relay.example.com RELAY_IMAGE=ghcr.io/<user>/dchat-relay:latest docker compose up -d --no-build
 ```
+
+Update: `git pull && docker compose up -d --build` (or `docker compose pull && docker compose up -d` with the prebuilt image). Members reconnect automatically; rooms carry on, because established member links are direct.
+
+#### Without Docker
+```bash
+cargo build -p relay --release --locked          # or: make build-relay
+sudo install -m 0755 target/release/dchat-relay /usr/local/bin/
+sudo cp deploy/relay/dchat-relay.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now dchat-relay
+```
+The unit runs it on `127.0.0.1:7447` with systemd sandboxing. Add to `/etc/caddy/Caddyfile`:
+```
+relay.example.com {
+	reverse_proxy 127.0.0.1:7447
+}
+```
+and reload Caddy (`sudo systemctl reload caddy`).
+
+#### Options
+| Flag | Environment variable | Default |
+|---|---|---|
+| `--listen` | `DCHAT_RELAY_LISTEN` | `127.0.0.1:7447` (Docker image: `0.0.0.0:7447`) |
+| `--allowed-origin` (repeatable) | `DCHAT_RELAY_ALLOWED_ORIGINS` (comma-separated) | any origin |
+| `--trust-proxy` | `DCHAT_RELAY_TRUST_PROXY` | off (on in `docker-compose.yml`: client IPs come from Caddy's `X-Forwarded-For`) |
+| `--max-connections-per-ip` | `DCHAT_RELAY_MAX_CONNECTIONS_PER_IP` | `64` |
+| `--name` | `DCHAT_RELAY_NAME` | `dchat-relay` |
+
+Only turn on `--trust-proxy` behind a proxy you control: otherwise clients could fake their IP to get around per-IP limits.
+
+#### Check it works
+```bash
+curl -H "Accept: application/nostr+json" https://relay.example.com/
+```
+returns the relay's information (`"software":"dchat-relay"`). Then create a room with **My relay** → `wss://relay.example.com`, join from a second device, and check the **⚡ Nostr** badge shows `(1 active)` on both.
+
+#### Other relay software
+Any Nostr relay that forwards ephemeral events (kinds 20000–29999) works, for example [strfry](https://github.com/hoytech/strfry) or nostr-rs-relay. They are general-purpose relays, so restrict them to kind 20001 if you only want dchat traffic.
 
 ---
 
@@ -158,4 +227,5 @@ Wherever it's hosted, the app signals through public Nostr relays (`wss://relay.
 | An old version keeps showing after a deploy | The service worker updates in the background: reload once more, or close and reopen the tab. |
 | Camera or microphone is blocked | The site must be served over HTTPS (both hosts do this; enable **Enforce HTTPS** for a GitHub custom domain). |
 | Members show `via <name>` and can't hear each other | No direct path between them. Use the Cloudflare setup or add `&turn=…` (section 2). |
-| Stuck at "Connecting to Relay" | The public relays are unreachable or rate-limiting. Retry, or add your own relay with `&relays=` (section 4). |
+| Stuck at "Connecting to Relay" | The room's relays are unreachable or rate-limiting. With public relays: retry, or create rooms with your own relay (section 4). With your own relay: check `curl -H "Accept: application/nostr+json" https://relay.example.com/` and that the site's origin is in `--allowed-origin`. |
+| Create Room stays disabled with "My relay" | The address must be `wss://…` (comma-separate several). `ws://` only works when the dchat page itself is plain `http://`. |

@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 protocol = { path = "../protocol" }
+relay = { path = "../relay" }
 axum = { version = "0.7", features = ["ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio = { version = "1.38", features = ["full"] }

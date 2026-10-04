@@ -15,11 +15,15 @@ use i18n::{
 };
 use leptos::*;
 use names::{pubkey_tag, random_name, sanitize_name, MAX_NAME_CHARS};
-use protocol::{parse_cap, VideoKind, DEFAULT_MEMBER_CAP, DEFAULT_VIDEO_CAP, DEFAULT_VOICE_CAP, REACTIONS};
+use protocol::{
+    format_relay_list, parse_cap, split_relay_input, VideoKind, DEFAULT_MEMBER_CAP, DEFAULT_VIDEO_CAP,
+    DEFAULT_VOICE_CAP, REACTIONS,
+};
 use qr::generate_qr_svg;
 use session::{RoomSession, SessionSignals};
 use state::{
-    admin_url, create_room, format_file_size, invite_url, read_credentials, AudioSettings,
+    admin_url, create_room, format_file_size, fragment_relay_choice, invite_url, read_credentials,
+    AudioSettings, RelayMode,
     ChatMessageUi, ConnectionStatus, DmUi, FileOfferInfo, FileTransferStatus, LinkUi,
     LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RekeyTarget, RoomCaps,
 };
@@ -60,6 +64,24 @@ fn App() -> impl IntoView {
     let (voice_cap_input, set_voice_cap_input) = create_signal(DEFAULT_VOICE_CAP.to_string());
     let (video_cap_input, set_video_cap_input) = create_signal(DEFAULT_VIDEO_CAP.to_string());
     let (history_input, set_history_input) = create_signal(false);
+    // Relay choice: what the link already says, else public; a deployment can pre-fill its
+    // own relay address at build time (DCHAT_RELAY_URL).
+    let initial_relays = fragment_relay_choice();
+    let (relay_mode, set_relay_mode) = create_signal(initial_relays.as_ref().map_or(RelayMode::Public, |c| c.0));
+    let (relay_input, set_relay_input) = create_signal(
+        initial_relays
+            .map(|c| c.1)
+            .unwrap_or_else(|| option_env!("DCHAT_RELAY_URL").unwrap_or_default().to_string()),
+    );
+    // The custom relay URLs, or `None` while what was typed isn't usable.
+    let custom_relays = create_memo(move |_| {
+        let (valid, invalid) = split_relay_input(&relay_input.get());
+        let page_is_https = window().and_then(|w| w.location().protocol().ok()).as_deref() == Some("https:");
+        // An HTTPS page can only open encrypted (wss://) connections.
+        let secure_ok = !page_is_https || valid.iter().all(|u| u.starts_with("wss://"));
+        (!valid.is_empty() && invalid.is_empty() && secure_ok).then_some(valid)
+    });
+    let relay_choice_valid = move || relay_mode.get() == RelayMode::Public || custom_relays.get().is_some();
 
     let (status, set_status) = create_signal(ConnectionStatus::Idle);
     let (messages, set_messages) = create_signal(Vec::<ChatMessageUi>::new());
@@ -180,6 +202,11 @@ fn App() -> impl IntoView {
             voice: parse_cap(Some(&voice_cap_input.get_untracked()), DEFAULT_VOICE_CAP),
             video: parse_cap(Some(&video_cap_input.get_untracked()), DEFAULT_VIDEO_CAP),
             history: history_input.get_untracked(),
+            relays: match (relay_mode.get_untracked(), custom_relays.get_untracked()) {
+                (RelayMode::Public, _) => None,
+                (mode, Some(urls)) => Some(format_relay_list(&urls, mode == RelayMode::CustomWithPublic)),
+                (_, None) => return,
+            },
         };
         match create_room(caps) {
             Ok(()) => enter_room(),
@@ -583,6 +610,46 @@ fn App() -> impl IntoView {
                             />
                         </div>
                     </div>
+                    <label class="lobby-label" for="relay-mode">{move || t(lang.get(), "relay_mode_label")}</label>
+                    <select
+                        id="relay-mode"
+                        class="lobby-input"
+                        on:change=move |ev| {
+                            set_relay_mode.set(match event_target_value(&ev).as_str() {
+                                "custom" => RelayMode::Custom,
+                                "both" => RelayMode::CustomWithPublic,
+                                _ => RelayMode::Public,
+                            });
+                        }
+                    >
+                        <option value="public" selected=move || relay_mode.get() == RelayMode::Public>
+                            {move || t(lang.get(), "relay_mode_public")}
+                        </option>
+                        <option value="custom" selected=move || relay_mode.get() == RelayMode::Custom>
+                            {move || t(lang.get(), "relay_mode_custom")}
+                        </option>
+                        <option value="both" selected=move || relay_mode.get() == RelayMode::CustomWithPublic>
+                            {move || t(lang.get(), "relay_mode_both")}
+                        </option>
+                    </select>
+                    {move || (relay_mode.get() != RelayMode::Public).then(|| view! {
+                        <label class="lobby-label" for="relay-url">{move || t(lang.get(), "relay_url_label")}</label>
+                        <input
+                            id="relay-url"
+                            class="lobby-input"
+                            type="text"
+                            inputmode="url"
+                            autocapitalize="off"
+                            spellcheck="false"
+                            placeholder="wss://relay.example.com"
+                            prop:value=move || relay_input.get()
+                            on:input=move |ev| set_relay_input.set(event_target_value(&ev))
+                        />
+                        {move || (!relay_input.get().trim().is_empty() && custom_relays.get().is_none()).then(|| view! {
+                            <p class="lobby-warning relay-invalid">{move || t(lang.get(), "relay_url_invalid")}</p>
+                        })}
+                    })}
+                    <p class="lobby-hint">{move || t(lang.get(), "relay_hint")}</p>
                     <label class="lobby-check" for="history-checkbox">
                         <input
                             type="checkbox"
@@ -595,7 +662,7 @@ fn App() -> impl IntoView {
                     {move || cap_is_large().then(|| view! {
                         <p class="lobby-warning">{move || t(lang.get(), "cap_warning")}</p>
                     })}
-                    <button id="create-room-btn" type="submit" class="btn btn-primary lobby-submit" disabled=move || entering.get()>
+                    <button id="create-room-btn" type="submit" class="btn btn-primary lobby-submit" disabled=move || entering.get() || !relay_choice_valid()>
                         {move || t(lang.get(), "btn_create_room")}
                     </button>
                 </form>

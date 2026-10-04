@@ -1,4 +1,4 @@
-.PHONY: all build build-client build-client-e2e build-server test test-rust test-worker test-e2e serve serve-http deploy-cloudflare clean
+.PHONY: all build build-client build-client-e2e build-server build-relay relay-image test test-rust test-worker test-e2e serve serve-http deploy-cloudflare clean
 
 all: build test
 
@@ -19,6 +19,14 @@ build-server:
 test-rust:
 	@echo "==> Running Rust unit and integration tests..."
 	cargo test --workspace
+
+build-relay:
+	@echo "==> Building dchat-relay (release)..."
+	cargo build -p relay --release --locked
+
+relay-image:
+	@echo "==> Building the dchat-relay container image..."
+	docker build -f crates/relay/Dockerfile -t dchat-relay .
 
 test-worker:
 	@echo "==> Running Cloudflare Worker unit tests..."

@@ -138,7 +138,7 @@ Everything after `#` stays in the browser and is never sent to any server.
 | `maxa` | `maxa=4` | Voice limit: members in the lounge at once; default 8, `0` = unlimited |
 | `maxv` | `maxv=2` | Video limit: cameras/screens on at once; default 6, `0` = unlimited |
 | `hist` | `hist=1` | Late joiners may see the last 200 shareable messages (off when absent) |
-| `relays` | `relays=wss://a,wss://b` | Custom Nostr relays |
+| `relays` | `relays=wss://a,nostr` | The room's Nostr relays, exactly; `nostr` stands for the public relays (default when absent) |
 | `turn` | `turn=turns:turn.example.com:5349` | Optional TURN server(s), comma-separated |
 | `turnuser`, `turnpass` | `turnuser=me&turnpass=s3cret` | TURN credentials (percent-encode special characters) |
 
@@ -221,17 +221,20 @@ TURN pricing: $0.05 per GB the TURN server sends to clients, after a free tier o
 
 Once hosted, rooms use the public Nostr relays below instead of the local mock relay. For dependable voice and video across mobile networks, add TURN: deploy on Cloudflare (below), or add your own TURN server to room links (see "When Members Can't Connect Directly (NAT)").
 
-### 2. Custom Nostr Relays
-By default, `dchat` connects to a resilient pool of public Nostr relays:
+### 2. Nostr Relays: Public or Your Own
+By default, rooms use a pool of public Nostr relays:
 - `wss://relay.damus.io`
 - `wss://nos.lol`
 - `wss://relay.primal.net`
 
-You can customize which relays to use directly via the URL fragment parameter `relays`:
+When creating a room, **Signaling relays** lets you choose: the public relays (default), **My relay**, or **My relay + public Nostr relays (backup)**. The choice goes into the room link, so every member uses the same relays:
 ```
-https://your-domain.com/#room=room123&key=SECRET_KEY&relays=wss://my-relay.org,wss://nostr.land
+https://your-domain.com/#room=…&key=…&relays=wss://relay.example.com            # only your relay
+https://your-domain.com/#room=…&key=…&relays=wss://relay.example.com,nostr      # yours + public (nostr = the public relays)
 ```
-You can also view connected relays and their live status by clicking the **⚡ Nostr** badge in the header.
+Click the **⚡ Nostr** badge to see the room's relays and how many are connected. Dropped relay connections reconnect automatically.
+
+To run your own relay, this repository includes **`dchat-relay`** (`crates/relay`): a small RAM-only relay that forwards only dchat's ephemeral signaling events, with signature, freshness and rate checks and an optional origin lock. It ships as a Docker image with a Caddy setup for automatic `wss://`. See [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) section 4.
 
 ### 3. Local Development Runner (Optional Axum Dev Server)
 For local development, testing without internet access, and mobile testing on local Wi-Fi:

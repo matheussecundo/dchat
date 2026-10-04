@@ -1,7 +1,7 @@
 use protocol::{
-    format_cap, generate_key, generate_room_id, invite_fragment, key_from_base64, key_to_base64,
-    FragmentParams, NostrBurnerKey, VideoKind, DEFAULT_MEMBER_CAP, DEFAULT_VIDEO_CAP,
-    DEFAULT_VOICE_CAP, KEY_LENGTH,
+    format_cap, generate_key, generate_room_id, invite_fragment, is_relay_url, key_from_base64,
+    key_to_base64, parse_relay_list, FragmentParams, NostrBurnerKey, VideoKind, DEFAULT_MEMBER_CAP,
+    DEFAULT_VIDEO_CAP, DEFAULT_VOICE_CAP, KEY_LENGTH, PUBLIC_RELAYS, PUBLIC_RELAYS_KEYWORD,
 };
 use wasm_bindgen::JsValue;
 use web_sys::window;
@@ -108,13 +108,15 @@ pub struct MyVoiceUi {
     pub video: VideoKind,
 }
 
-/// Room settings chosen at creation: caps (`None` = unlimited) and history for late joiners.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Room settings chosen at creation: caps (`None` = unlimited), history for late joiners and
+/// the `&relays=` value (`None` = the public relays).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomCaps {
     pub members: Option<usize>,
     pub voice: Option<usize>,
     pub video: Option<usize>,
     pub history: bool,
+    pub relays: Option<String>,
 }
 
 /// A file card's state, as seen by this tab.
@@ -266,6 +268,10 @@ pub fn create_room(caps: RoomCaps) -> Result<(), String> {
     } else {
         params.remove("hist");
     }
+    match &caps.relays {
+        Some(relays) => params.set("relays", relays),
+        None => params.remove("relays"),
+    }
     replace_fragment(&params);
     Ok(())
 }
@@ -302,61 +308,66 @@ pub fn current_time_string() -> String {
     format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
 }
 
-/// Retrieve the list of Nostr relays to connect to.
-/// Resolves custom relays from the URL fragment (&relays=...),
-/// auto-detects localhost mock relay in dev/test mode,
-/// and defaults to curated reliable public relays.
+/// The relays this room uses. With `&relays=` in the link: exactly those (`nostr` stands for
+/// the public relays). Without it: the public relays; on a local or LAN dev server, its own
+/// relay at `/nostr` instead (localhost) or as well (LAN).
 pub fn get_default_relays() -> Vec<String> {
-    let mut relays = Vec::new();
-
-    if let Some(val) = current_fragment().get("relays") {
-        relays.extend(
-            val.split(',')
-                .map(str::trim)
-                .filter(|r| !r.is_empty())
-                .map(str::to_string),
-        );
+    if let Some(chosen) = current_fragment()
+        .get("relays")
+        .map(parse_relay_list)
+        .filter(|list| !list.is_empty())
+    {
+        return chosen;
     }
-
-    if let Some(win) = window() {
-        if let Ok(hostname) = win.location().hostname() {
-            let is_local = hostname == "localhost" || hostname == "127.0.0.1";
-            let is_lan = hostname.starts_with("192.168.")
-                || hostname.starts_with("10.")
-                || hostname.ends_with(".local")
-                || (hostname.starts_with("172.") && {
-                    let parts: Vec<&str> = hostname.split('.').collect();
-                    parts.get(1).and_then(|p| p.parse::<u8>().ok()).map_or(false, |b| (16..=31).contains(&b))
-                });
-
-            if is_local || is_lan {
-                if let (Ok(protocol), Ok(host)) = (win.location().protocol(), win.location().host()) {
-                    let ws_proto = if protocol == "https:" { "wss:" } else { "ws:" };
-                    let local_relay = format!("{}//{}/nostr", ws_proto, host);
-                    if !relays.contains(&local_relay) {
-                        relays.push(local_relay);
-                    }
-                }
-            }
-
-            // If on LAN or a public domain (not isolated localhost test runner),
-            // also ensure public Nostr relays are available
-            if !is_local && relays.len() <= 1 {
-                for r in &["wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net"] {
-                    let r_str = r.to_string();
-                    if !relays.contains(&r_str) {
-                        relays.push(r_str);
-                    }
-                }
-            }
-        }
+    let public = || PUBLIC_RELAYS.iter().map(|r| r.to_string()).collect::<Vec<_>>();
+    let Some(location) = window().map(|w| w.location()) else {
+        return public();
+    };
+    let hostname = location.hostname().unwrap_or_default();
+    let is_local = hostname == "localhost" || hostname == "127.0.0.1";
+    let is_lan = hostname.starts_with("192.168.")
+        || hostname.starts_with("10.")
+        || hostname.ends_with(".local")
+        || (hostname.starts_with("172.")
+            && hostname
+                .split('.')
+                .nth(1)
+                .and_then(|p| p.parse::<u8>().ok())
+                .is_some_and(|b| (16..=31).contains(&b)));
+    if !(is_local || is_lan) {
+        return public();
     }
-
-    if relays.is_empty() {
-        relays.push("wss://relay.damus.io".into());
-        relays.push("wss://nos.lol".into());
-        relays.push("wss://relay.primal.net".into());
+    let ws_proto = if location.protocol().as_deref() == Ok("https:") { "wss:" } else { "ws:" };
+    let local_relay = format!("{}//{}/nostr", ws_proto, location.host().unwrap_or_default());
+    if is_local {
+        // The isolated dev / test setup: no outside traffic.
+        vec![local_relay]
+    } else {
+        std::iter::once(local_relay).chain(public()).collect()
     }
+}
 
-    relays
+/// How the creator picks the room's relays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelayMode {
+    /// The public Nostr relays (no `&relays=`).
+    Public,
+    /// Only the creator's relay(s).
+    Custom,
+    /// The creator's relay(s), with the public relays as backup.
+    CustomWithPublic,
+}
+
+/// The relay choice already in the link (e.g. a `#relays=…` opened before creating a room):
+/// the mode and the custom relay addresses, for pre-filling the create form.
+pub fn fragment_relay_choice() -> Option<(RelayMode, String)> {
+    let value = current_fragment().get("relays")?.to_string();
+    let entries: Vec<&str> = value.split(',').map(str::trim).filter(|e| !e.is_empty()).collect();
+    let with_public = entries.iter().any(|e| e.eq_ignore_ascii_case(PUBLIC_RELAYS_KEYWORD));
+    let custom: Vec<&str> = entries.into_iter().filter(|e| is_relay_url(e)).collect();
+    if custom.is_empty() {
+        return None;
+    }
+    let mode = if with_public { RelayMode::CustomWithPublic } else { RelayMode::Custom };
+    Some((mode, custom.join(", ")))
 }

@@ -894,6 +894,16 @@ header {
   border-color: var(--accent-cyan);
 }
 
+.lobby-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+select.lobby-input {
+  cursor: pointer;
+}
+
 .lobby-warning {
   font-size: 0.8rem;
   color: #fbbf24;

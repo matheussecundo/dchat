@@ -1,4 +1,3 @@
-mod nostr_relay;
 mod signaling;
 mod tls;
 
@@ -7,7 +6,6 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use clap::Parser;
-use nostr_relay::{handle_nostr_websocket, NostrRelayState};
 use qrcode::render::unicode;
 use qrcode::QrCode;
 use signaling::{handle_websocket, AppState};
@@ -21,7 +19,6 @@ use tracing_subscriber::FmtSubscriber;
 #[derive(Clone, Default)]
 pub struct ServerState {
     pub signaling: AppState,
-    pub nostr: NostrRelayState,
 }
 
 #[derive(Parser, Debug)]
@@ -68,7 +65,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
-        .route("/nostr", get(nostr_ws_handler))
+        // The production relay code (crates/relay), so dev and E2E runs exercise it.
+        .nest_service(
+            "/nostr",
+            relay::router(relay::RelayConfig {
+                name: "dchat dev relay".into(),
+                ..relay::RelayConfig::default()
+            }),
+        )
         .route("/health", get(|| async { "OK" }))
         .fallback_service(serve_dir)
         .layer(CorsLayer::permissive())
@@ -111,12 +115,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.http {
         let listener = tokio::net::TcpListener::bind(socket_addr).await?;
         info!("Listening on HTTP at {}", socket_addr);
-        axum::serve(listener, app).await?;
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     } else {
         let rustls_config = tls::generate_self_signed_config(lan_ip).await?;
         info!("Listening on HTTPS at {}", socket_addr);
         axum_server::bind_rustls(socket_addr, rustls_config)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await?;
     }
 
@@ -130,9 +134,3 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| handle_websocket(socket, state.signaling))
 }
 
-async fn nostr_ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<ServerState>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_nostr_websocket(socket, state.nostr))
-}
