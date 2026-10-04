@@ -45,6 +45,9 @@ jobs:
         env:
           # Optional repository variable: pre-fills "My relay" in the create-room form.
           DCHAT_RELAY_URL: ${{ vars.DCHAT_RELAY_URL }}
+          # Optional: where the "Remote control" dialog sends people for dchat-host
+          # (default: this repository's latest release).
+          DCHAT_HOST_DOWNLOAD_URL: ${{ vars.DCHAT_HOST_DOWNLOAD_URL }}
         run: trunk build --release --locked
 
       - name: Check no test hooks shipped

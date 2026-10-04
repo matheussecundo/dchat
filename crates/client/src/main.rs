@@ -28,7 +28,7 @@ use remote_input::{InputCapture, InputSink, PadPoller};
 use std::rc::Rc;
 use session::{RoomSession, SessionSignals};
 use state::{
-    admin_url, create_room, current_fragment, format_file_size, fragment_relay_choice, invite_url, read_credentials,
+    admin_url, create_room, current_fragment, format_file_size, host_download_url, fragment_relay_choice, invite_url, read_credentials,
     AudioSettings, RelayMode,
     ChatMessageUi, ConnectionStatus, DmUi, FileOfferInfo, FileTransferStatus, LinkUi,
     LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RekeyTarget, RoomCaps, ControlUi, ControlPromptUi,
@@ -1684,6 +1684,20 @@ fn App() -> impl IntoView {
                             <button class="btn btn-secondary" on:click=move |_| set_show_control_host.set(false)>"✕"</button>
                         </div>
                         <p class="modal-subtext">{move || t(lang.get(), "control_host_desc")}</p>
+                        {move || (!agent_status.with(AgentStatus::is_paired)).then(|| view! {
+                            <p class="lobby-hint agent-download">
+                                {match host_download_url() {
+                                    Some(url) => view! {
+                                        <a id="agent-download-link" href=url target="_blank" rel="noopener noreferrer">
+                                            {move || t(lang.get(), "agent_download_link")}
+                                        </a>
+                                        " · "
+                                        <span>{move || t(lang.get(), "agent_download_hint")}</span>
+                                    }.into_view(),
+                                    None => view! { <span>{move || t(lang.get(), "agent_download_ask")}</span> }.into_view(),
+                                }}
+                            </p>
+                        })}
                         <p id="agent-status" class="agent-status" data-status=move || agent_status.with(|s| s.key())>
                             {move || t(lang.get(), agent_status_key(&agent_status.get()))}
                         </p>

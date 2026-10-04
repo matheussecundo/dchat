@@ -55,6 +55,7 @@ jobs:
           mkdir "$dir"
           cp target/${{ matrix.target }}/release/dchat-host "$dir/"
           cp crates/host-agent/dist/60-dchat-host.rules crates/host-agent/dist/uinput.conf crates/host-agent/dist/README.txt "$dir/"
+          install -m 0755 crates/host-agent/dist/install.sh "$dir/install.sh"
           tar -czf "$dir.tar.gz" "$dir"
 
       - name: Package (Windows)

@@ -232,9 +232,11 @@ Any Nostr relay that forwards ephemeral events (kinds 20000–29999) works, for 
 
 Remote control needs `dchat-host` on the computer being controlled (Linux or Windows). Users download it from your repository's Releases page, or build it with `cargo build -p host-agent --release` (the binary is `target/release/dchat-host`, `dchat-host.exe` on Windows).
 
-It only accepts your dchat site, so tell it the site's address:
-- at run time: `dchat-host --allow-origin https://chat.example.com` (repeatable, or `DCHAT_HOST_ALLOWED_ORIGINS=https://a,https://b`);
-- or bake it in at build time: `DCHAT_HOST_ORIGINS=https://chat.example.com cargo build -p host-agent --release`.
+It only accepts your dchat site. Without one built in or given, it asks at start (type the site's address; a double-click on Windows lands here). To skip the question:
+- bake it in at build time: `DCHAT_HOST_ORIGINS=https://chat.example.com cargo build -p host-agent --release` (the release workflow does this from a repository variable, below);
+- or give it at run time: `dchat-host --allow-origin https://chat.example.com` (repeatable, or `DCHAT_HOST_ALLOWED_ORIGINS=https://a,https://b`).
+
+The site's **🖱️ Remote control** dialog links to the download: by default the latest release of the repository that built the site (GitHub Actions), or set the repository variable `DCHAT_HOST_DOWNLOAD_URL` to point elsewhere.
 
 ### Publishing downloads
 1. Optional: set the repository variable `DCHAT_HOST_ORIGINS` (**Settings → Secrets and variables → Actions → Variables**) to your site's address, e.g. `https://chat.example.com`, so the downloads accept it without `--allow-origin`.
@@ -245,7 +247,7 @@ The Windows build is not code-signed, so SmartScreen warns on first run. To sign
 
 On a GitHub Pages site the origin is `https://<user>.github.io` for all of your repositories; the pairing code still protects the app, but a custom domain keeps it to dchat.
 
-On Linux, install `crates/host-agent/dist/60-dchat-host.rules` (see the README) so it can use `/dev/uinput` without root. On Windows, mouse and keyboard need nothing extra; game controllers need the [ViGEmBus driver](https://github.com/nefarius/ViGEmBus/releases) (dchat-host says so at start when it's missing). To control windows of apps running as administrator, run dchat-host as administrator too. It listens on `127.0.0.1:7448` (`--port` to change; the same port goes in dchat's dialog), never on the network.
+On Linux, `install.sh` (shipped in the download, also in `crates/host-agent/dist/`) installs the udev rule so it can use `/dev/uinput` without root. On Windows, mouse and keyboard need nothing extra; game controllers need the [ViGEmBus driver](https://github.com/nefarius/ViGEmBus/releases) (dchat-host says so at start when it's missing). To control windows of apps running as administrator, run dchat-host as administrator too. It listens on `127.0.0.1:7448` (`--port` to change; the same port goes in dchat's dialog), never on the network.
 
 ---
 
