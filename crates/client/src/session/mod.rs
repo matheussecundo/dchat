@@ -8,7 +8,7 @@ mod files;
 mod history;
 mod lounge;
 
-use crate::mesh::{LinkEvent, LinkEventHandler, PeerLink};
+use crate::mesh::{LinkEvent, LinkEventHandler, PeerLink, SignalOut};
 use crate::names::pubkey_tag;
 use crate::nostr_pool::NostrRelayPool;
 use crate::state::{
@@ -336,12 +336,17 @@ impl RoomSession {
         if remote == self.inner.me || self.inner.blocked.borrow().contains(remote) {
             return None;
         }
-        let pool = self.pool()?;
+        // No links before the session joined the relays, or after it left.
+        self.pool()?;
         let handler: LinkEventHandler = {
             let s = self.clone();
             Rc::new(move |remote, id, event| s.on_link_event(remote, id, event))
         };
-        match PeerLink::new(&self.inner.me, remote, &self.inner.rtc_config, pool, handler, initiator) {
+        let signal_out: SignalOut = {
+            let s = self.clone();
+            Rc::new(move |remote, signal| s.send_link_signal(remote, signal))
+        };
+        match PeerLink::new(&self.inner.me, remote, &self.inner.rtc_config, signal_out, handler, initiator) {
             Ok(link) => {
                 self.inner.links.borrow_mut().insert(remote.to_string(), link.clone());
                 self.recompute();
@@ -354,6 +359,32 @@ impl RoomSession {
         }
     }
 
+    /// Send a link's offer, answer or ICE to `remote`: over the link itself when it is
+    /// open and the remote handles that, otherwise through the relays (first handshake,
+    /// or a peer running an older version).
+    fn send_link_signal(&self, remote: &str, signal: SignalPayload) {
+        if self.inner.closed.get() {
+            return;
+        }
+        let in_band = self
+            .link(remote)
+            .is_some_and(|link| link.signals_over_link.get() && link.is_open());
+        if in_band
+            && self.send_direct(
+                remote,
+                RoomBody::LinkSignal {
+                    to: remote.to_string(),
+                    signal: signal.clone(),
+                },
+            )
+        {
+            return;
+        }
+        if let Some(pool) = self.pool() {
+            pool.broadcast_signal(&signal);
+        }
+    }
+
     fn on_link_event(&self, remote: &str, id: u64, event: LinkEvent) {
         let is_current = self.inner.links.borrow().get(remote).map(|l| l.id) == Some(id);
         if !is_current || self.inner.closed.get() {
@@ -363,6 +394,13 @@ impl RoomSession {
             LinkEvent::Open => {
                 log::info!("Direct link open with {}", pubkey_tag(remote));
                 self.inner.retry_after.borrow_mut().remove(remote);
+                self.send_direct(
+                    remote,
+                    RoomBody::LinkCapabilities {
+                        to: remote.to_string(),
+                        link_signaling: true,
+                    },
+                );
                 self.publish_link_state();
                 self.sync_to(remote);
                 self.maybe_request_history(remote);
@@ -573,6 +611,18 @@ impl RoomSession {
             RoomBody::AdminRekey { kicked, grants } => self.on_admin_rekey(author, kicked.as_deref(), grants),
             RoomBody::FileRequest { .. } | RoomBody::FileQueued { .. } | RoomBody::FileCancel { .. } => {
                 self.on_file_message(author, &envelope.body);
+            }
+            RoomBody::LinkCapabilities { link_signaling, .. } => {
+                if let Some(link) = self.link(author) {
+                    link.signals_over_link.set(*link_signaling);
+                }
+            }
+            RoomBody::LinkSignal { signal, .. } => {
+                // Only offers, answers and ICE addressed to us (presence and departures have
+                // no recipient and stay on the relays).
+                if signal.recipient() == Some(self.inner.me.as_str()) {
+                    self.on_signal(author.to_string(), signal.clone());
+                }
             }
             RoomBody::Leave => {
                 if author != self.inner.me {

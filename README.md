@@ -234,6 +234,8 @@ https://your-domain.com/#room=…&key=…&relays=wss://relay.example.com,nostr  
 ```
 Click the **⚡ Nostr** badge to see the room's relays and how many are connected. Dropped relay connections reconnect automatically.
 
+Relays are used only to find members and set up each direct link. Once two members are linked, everything else, including starting voice, camera or screen share, travels over their own link. If the relays go down, members already connected keep chatting and calling; only newcomers (and links that need to reconnect) wait for a relay.
+
 To run your own relay, this repository includes **`dchat-relay`** (`crates/relay`): a small RAM-only relay that forwards only dchat's ephemeral signaling events, with signature, freshness and rate checks and an optional origin lock. It ships as a Docker image with a Caddy setup for automatic `wss://`. See [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) section 4.
 
 ### 3. Local Development Runner (Optional Axum Dev Server)

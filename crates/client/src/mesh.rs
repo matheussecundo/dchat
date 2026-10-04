@@ -1,7 +1,6 @@
 //! One WebRTC link per remote room member, using the "perfect negotiation" pattern
 //! so either side can (re)negotiate at any time without signaling glare.
 
-use crate::nostr_pool::NostrRelayPool;
 use protocol::{IceCandidateData, SignalPayload};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -40,6 +39,10 @@ pub enum LinkEvent {
 /// events apart from the current link's.
 pub type LinkEventHandler = Rc<dyn Fn(&str, u64, LinkEvent)>;
 
+/// Delivers this link's signaling (offer, answer, ICE) to `remote`: over the link itself
+/// once it is open, otherwise through the Nostr relays (the session decides).
+pub type SignalOut = Rc<dyn Fn(&str, SignalPayload)>;
+
 pub struct PeerLink {
     pub remote: String,
     pub id: u64,
@@ -55,7 +58,9 @@ pub struct PeerLink {
     /// Candidates that arrived before the remote description (relays can reorder).
     pending_ice: RefCell<Vec<IceCandidateData>>,
     closed: Rc<Cell<bool>>,
-    pool: Rc<NostrRelayPool>,
+    signal_out: SignalOut,
+    /// The remote said it handles renegotiation sent over this link (`LinkCapabilities`).
+    pub signals_over_link: Cell<bool>,
 }
 
 thread_local! {
@@ -69,7 +74,7 @@ impl PeerLink {
         self_pubkey: &str,
         remote: &str,
         config: &RtcConfiguration,
-        pool: Rc<NostrRelayPool>,
+        signal_out: SignalOut,
         on_event: LinkEventHandler,
         initiator: bool,
     ) -> Result<Rc<Self>, JsValue> {
@@ -91,7 +96,8 @@ impl PeerLink {
             files: Rc::new(RefCell::new(None)),
             pending_ice: RefCell::new(Vec::new()),
             closed: Rc::new(Cell::new(false)),
-            pool,
+            signal_out,
+            signals_over_link: Cell::new(false),
         });
 
         let notify_closed = link.closed_notifier(on_event.clone());
@@ -217,10 +223,13 @@ impl PeerLink {
                 return;
             }
             if let Some(local) = self.pc.local_description() {
-                self.pool.broadcast_signal(&SignalPayload::Answer {
-                    to: self.remote.clone(),
-                    sdp: local.sdp(),
-                });
+                (self.signal_out)(
+                    &self.remote,
+                    SignalPayload::Answer {
+                        to: self.remote.clone(),
+                        sdp: local.sdp(),
+                    },
+                );
             }
         }
     }
@@ -313,7 +322,7 @@ impl PeerLink {
         let pc = self.pc.clone();
         let making_offer = self.making_offer.clone();
         let closed = self.closed.clone();
-        let pool = self.pool.clone();
+        let signal_out = self.signal_out.clone();
         let remote = self.remote.clone();
         let on_needed = Closure::wrap(Box::new(move || {
             if closed.get() {
@@ -321,17 +330,20 @@ impl PeerLink {
             }
             let pc = pc.clone();
             let making_offer = making_offer.clone();
-            let pool = pool.clone();
+            let signal_out = signal_out.clone();
             let remote = remote.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 making_offer.set(true);
                 match set_local_description_implicit(&pc).await {
                     Ok(()) => {
                         if let Some(local) = pc.local_description() {
-                            pool.broadcast_signal(&SignalPayload::Offer {
-                                to: remote,
-                                sdp: local.sdp(),
-                            });
+                            signal_out(
+                                &remote,
+                                SignalPayload::Offer {
+                                    to: remote.clone(),
+                                    sdp: local.sdp(),
+                                },
+                            );
                         }
                     }
                     Err(err) => log::warn!("Failed to create offer: {:?}", err),
@@ -345,7 +357,7 @@ impl PeerLink {
 
     /// Batch local ICE candidates (100 ms or 10 candidates) to stay under relay rate limits.
     fn install_ice_batching(&self) {
-        let pool = self.pool.clone();
+        let signal_out = self.signal_out.clone();
         let remote = self.remote.clone();
         let batch = Rc::new(RefCell::new(Vec::<IceCandidateData>::new()));
         let timer = Rc::new(Cell::new(None::<i32>));
@@ -355,10 +367,13 @@ impl PeerLink {
             Rc::new(move || {
                 let candidates = std::mem::take(&mut *batch.borrow_mut());
                 if !candidates.is_empty() {
-                    pool.broadcast_signal(&SignalPayload::IceBatch {
-                        to: remote.clone(),
-                        candidates,
-                    });
+                    signal_out(
+                        &remote,
+                        SignalPayload::IceBatch {
+                            to: remote.clone(),
+                            candidates,
+                        },
+                    );
                 }
             })
         };

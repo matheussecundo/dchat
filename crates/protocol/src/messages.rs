@@ -156,6 +156,13 @@ pub enum RoomBody {
     /// A private message to `to`, sealed with the two members' session keys (ECDH).
     /// Relayable like any message, but only `to` can open it and `to` never relays it.
     Dm { to: String, sealed: EncryptedPayload },
+    /// The author handles `LinkSignal` (sent once to each neighbor when their link opens).
+    /// A separate message rather than a new field: an older client would reject a changed
+    /// Hello, because envelopes are verified by re-serializing their body.
+    LinkCapabilities { to: String, link_signaling: bool },
+    /// WebRTC renegotiation (offer, answer, ICE) for the link between author and `to`, sent
+    /// over that link itself once it is open, so Nostr relays only carry the first handshake.
+    LinkSignal { to: String, signal: SignalPayload },
     /// Admin only: move the room to a new ID and key. Each remaining member gets its own
     /// grant sealed to its session key; `kicked` (if any) gets none.
     AdminRekey { kicked: Option<String>, grants: Vec<SealedGrant> },
@@ -170,7 +177,9 @@ impl RoomBody {
             RoomBody::FileRequest { to, .. }
             | RoomBody::FileQueued { to, .. }
             | RoomBody::HistoryRequest { to }
-            | RoomBody::HistoryChunk { to, .. } => Some(to),
+            | RoomBody::HistoryChunk { to, .. }
+            | RoomBody::LinkCapabilities { to, .. }
+            | RoomBody::LinkSignal { to, .. } => Some(to),
             RoomBody::FileCancel { to, .. } => to.as_deref(),
             _ => None,
         }
@@ -323,6 +332,33 @@ mod tests {
         assert_eq!(sealed.open(&bo, admin.pubkey()), Some(grant));
         assert_eq!(sealed.open(&cy, admin.pubkey()), None, "another member cannot open it");
         assert_eq!(sealed.open(&bo, cy.pubkey()), None, "wrong sender key fails");
+    }
+
+    #[test]
+    fn test_link_signals_are_direct_only() {
+        let offer = SignalPayload::Offer { to: "b".into(), sdp: "v=0".into() };
+        let body = RoomBody::LinkSignal { to: "b".into(), signal: offer.clone() };
+        assert_eq!(body.recipient(), Some("b"));
+        let caps = RoomBody::LinkCapabilities { to: "b".into(), link_signaling: true };
+        assert_eq!(caps.recipient(), Some("b"));
+
+        let key = NostrBurnerKey::generate().unwrap();
+        let env = RoomEnvelope::sign(&key, 1, body).unwrap();
+        let parsed: RoomEnvelope = serde_json::from_str(&serde_json::to_string(&env).unwrap()).unwrap();
+        assert!(parsed.verify());
+        assert_eq!(parsed.body, RoomBody::LinkSignal { to: "b".into(), signal: offer });
+    }
+
+    #[test]
+    fn test_old_clients_cannot_verify_bodies_with_added_fields() {
+        // Why new capabilities are new variants: a verifier that drops an unknown field
+        // re-serializes different bytes, so the signature no longer matches.
+        let key = NostrBurnerKey::generate().unwrap();
+        let env = RoomEnvelope::sign(&key, 1, RoomBody::Chat { text: "hi".into(), shareable: true }).unwrap();
+        let mut json: serde_json::Value = serde_json::to_value(&env).unwrap();
+        json["body"]["data"].as_object_mut().unwrap().remove("shareable");
+        let as_old_client_sees_it: RoomEnvelope = serde_json::from_value(json).unwrap();
+        assert!(!as_old_client_sees_it.verify());
     }
 
     #[test]
