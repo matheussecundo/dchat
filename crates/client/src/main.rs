@@ -98,6 +98,7 @@ fn App() -> impl IntoView {
     let (copied, set_copied) = create_signal(false);
     let (room_id_sig, set_room_id_sig) = create_signal(String::new());
     let (toast, set_toast) = create_signal(Option::<&'static str>::None);
+    let (update_required, set_update_required) = create_signal(false);
 
     // Voice lounge
     let (lounge, set_lounge) = create_signal(Vec::<LoungeMemberUi>::new());
@@ -146,6 +147,7 @@ fn App() -> impl IntoView {
             mention: set_mention_count,
             dms: set_dms,
             dm_unread: set_dm_unread,
+            update_required: set_update_required,
         };
         set_room_id_sig.set(room_id.clone());
         match RoomSession::start(room_id, key, my_name.get_value(), signals, migrated, host_ice.get_value()) {
@@ -989,6 +991,23 @@ fn App() -> impl IntoView {
                     </button>
                 </div>
             </div>
+
+            {move || update_required.get().then(|| view! {
+                <div id="update-banner" class="update-banner" role="alert">
+                    <span>{move || t(lang.get(), "update_required")}</span>
+                    <button
+                        id="reload-btn"
+                        class="btn btn-call btn-sm"
+                        on:click=move |_| {
+                            if let Some(win) = web_sys::window() {
+                                let _ = win.location().reload();
+                            }
+                        }
+                    >
+                        {move || t(lang.get(), "btn_reload")}
+                    </button>
+                </div>
+            })}
 
             {move || voice_prompt.get().filter(|_| !my_voice.get().in_voice).map(|name| view! {
                 <div id="voice-prompt" class="voice-prompt">

@@ -227,6 +227,7 @@ Any Nostr relay that forwards ephemeral events (kinds 20000–29999) works, for 
 | Wrangler says it needs Node.js 22 | Wrangler 4 requires Node.js 22+. CI already uses 22; update Node locally. |
 | The page is blank and the console shows 404s for `.js`/`.wasm` files | The build isn't using relative paths. Build from `crates/client` so `Trunk.toml` (`public_url = "./"`) applies. |
 | An old version keeps showing after a deploy | The service worker updates in the background: reload once more, or close and reopen the tab. |
+| After a deploy, some members can't connect and one side sees "newer version" | The deploy changed the protocol version (`PROTOCOL_VERSION`): tabs opened before it only link with each other. The banner's **Reload** fixes it. Deploys that don't change the protocol never split a room. |
 | Camera or microphone is blocked | The site must be served over HTTPS (both hosts do this; enable **Enforce HTTPS** for a GitHub custom domain). |
 | Members show `via <name>` and can't hear each other | No direct path between them. Use the Cloudflare setup or add `&turn=…` (section 2). |
 | Stuck at "Connecting to Relay" | The room's relays are unreachable or rate-limiting. With public relays: retry, or create rooms with your own relay (section 4). With your own relay: check `curl -H "Accept: application/nostr+json" https://relay.example.com/` and that the site's origin is in `--allowed-origin`. |

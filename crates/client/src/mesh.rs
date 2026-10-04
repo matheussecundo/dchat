@@ -40,7 +40,7 @@ pub enum LinkEvent {
 pub type LinkEventHandler = Rc<dyn Fn(&str, u64, LinkEvent)>;
 
 /// Delivers this link's signaling (offer, answer, ICE) to `remote`: over the link itself
-/// once it is open, otherwise through the Nostr relays (the session decides).
+/// once it is open, otherwise through the Nostr relays.
 pub type SignalOut = Rc<dyn Fn(&str, SignalPayload)>;
 
 pub struct PeerLink {
@@ -59,8 +59,6 @@ pub struct PeerLink {
     pending_ice: RefCell<Vec<IceCandidateData>>,
     closed: Rc<Cell<bool>>,
     signal_out: SignalOut,
-    /// The remote said it handles renegotiation sent over this link (`LinkCapabilities`).
-    pub signals_over_link: Cell<bool>,
 }
 
 thread_local! {
@@ -97,7 +95,6 @@ impl PeerLink {
             pending_ice: RefCell::new(Vec::new()),
             closed: Rc::new(Cell::new(false)),
             signal_out,
-            signals_over_link: Cell::new(false),
         });
 
         let notify_closed = link.closed_notifier(on_event.clone());

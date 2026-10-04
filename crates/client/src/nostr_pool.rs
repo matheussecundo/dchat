@@ -2,10 +2,11 @@ use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 use gloo_net::websocket::futures::WebSocket;
 use gloo_net::websocket::Message;
-use protocol::crypto::{decrypt_json, encrypt_json, EncryptedPayload};
+use protocol::crypto::{decrypt_bytes, encrypt_bytes, EncryptedPayload};
 use protocol::{
-    hash_room_topic, verify_event, ClientRelayMessage, GossipDedup, NostrBurnerKey, NostrFilter,
-    RelayClientMessage, SignalPayload, KIND_EPHEMERAL_SIGNAL, KEY_LENGTH,
+    decode_signal, encode_signal, hash_room_topic, verify_event, ClientRelayMessage, DecodedSignal, GossipDedup,
+    NostrBurnerKey, NostrFilter, RelayClientMessage, SignalPayload, KIND_EPHEMERAL_SIGNAL, KEY_LENGTH,
+    PROTOCOL_VERSION,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -17,12 +18,39 @@ const RECONNECT_MAX_MS: f64 = 30_000.0;
 const STABLE_CONNECTION_MS: f64 = 60_000.0;
 const SEEN_EVENTS_CAPACITY: usize = 4096;
 
+/// The protocol version this tab speaks. E2E builds can pretend to be another version
+/// (`window.__dchatProtocolVersion`, set before the app loads).
+pub fn protocol_version() -> u32 {
+    #[cfg(feature = "e2e-hooks")]
+    {
+        let forced = web_sys::window()
+            .and_then(|w| js_sys::Reflect::get(&w, &"__dchatProtocolVersion".into()).ok())
+            .and_then(|v| v.as_f64());
+        if let Some(version) = forced {
+            return version as u32;
+        }
+    }
+    PROTOCOL_VERSION
+}
+
+/// What the pool reports to the session.
+pub struct PoolEvents {
+    /// A signal from the member `pubkey`, addressed to us or to everyone.
+    pub on_signal: Box<dyn Fn(String, SignalPayload)>,
+    /// The member `pubkey` speaks another protocol version; its signals are dropped.
+    pub on_other_version: Box<dyn Fn(String, u32)>,
+    /// How many relays are connected now.
+    pub on_relay_connected: Box<dyn Fn(usize)>,
+}
+
 /// Connections to the room's relays. Each relay runs its own loop that keeps the
 /// subscription alive and reconnects with backoff until the pool is closed.
 pub struct NostrRelayPool {
     pub burner_key: Rc<NostrBurnerKey>,
     pub key: [u8; KEY_LENGTH],
     pub topic: String,
+    /// Signals carry it; members on another version are reported, never linked.
+    pub version: u32,
     /// Outgoing queue of each relay that currently has an open connection.
     senders: RefCell<HashMap<usize, mpsc::UnboundedSender<String>>>,
     seen_event_ids: RefCell<GossipDedup>,
@@ -38,13 +66,14 @@ impl NostrRelayPool {
         key: [u8; KEY_LENGTH],
         burner_key: Rc<NostrBurnerKey>,
         relays: Vec<String>,
-        on_signal: Rc<dyn Fn(String, SignalPayload)>,
-        on_relay_connected: Rc<dyn Fn(usize)>,
+        events: PoolEvents,
     ) -> Rc<Self> {
+        let events = Rc::new(events);
         let pool = Rc::new(Self {
             burner_key,
             key,
             topic: hash_room_topic(&room_id),
+            version: protocol_version(),
             senders: RefCell::new(HashMap::new()),
             seen_event_ids: RefCell::new(GossipDedup::new(SEEN_EVENTS_CAPACITY)),
             connected_count: Cell::new(0),
@@ -53,10 +82,9 @@ impl NostrRelayPool {
         log::info!("Initializing Nostr relay pool with {} relays", relays.len());
         for (index, url) in relays.into_iter().enumerate() {
             let pool = pool.clone();
-            let on_signal = on_signal.clone();
-            let on_relay_connected = on_relay_connected.clone();
+            let events = events.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                pool.run_relay(index, url, on_signal, on_relay_connected).await;
+                pool.run_relay(index, url, events).await;
             });
         }
         pool
@@ -69,18 +97,12 @@ impl NostrRelayPool {
         self.senders.borrow_mut().clear();
     }
 
-    async fn run_relay(
-        self: Rc<Self>,
-        index: usize,
-        url: String,
-        on_signal: Rc<dyn Fn(String, SignalPayload)>,
-        on_relay_connected: Rc<dyn Fn(usize)>,
-    ) {
+    async fn run_relay(self: Rc<Self>, index: usize, url: String, events: Rc<PoolEvents>) {
         let mut backoff = RECONNECT_INITIAL_MS;
         while !self.closed.get() {
             let started = js_sys::Date::now();
             match WebSocket::open(&url) {
-                Ok(ws) => self.serve_connection(index, &url, ws, &on_signal, &on_relay_connected).await,
+                Ok(ws) => self.serve_connection(index, &url, ws, &events).await,
                 Err(err) => log::warn!("Cannot open Nostr relay {}: {:?}", url, err),
             }
             if self.closed.get() {
@@ -98,14 +120,7 @@ impl NostrRelayPool {
     }
 
     /// Subscribe, announce presence and route incoming events until the connection ends.
-    async fn serve_connection(
-        &self,
-        index: usize,
-        url: &str,
-        ws: WebSocket,
-        on_signal: &Rc<dyn Fn(String, SignalPayload)>,
-        on_relay_connected: &Rc<dyn Fn(usize)>,
-    ) {
+    async fn serve_connection(&self, index: usize, url: &str, ws: WebSocket, events: &PoolEvents) {
         let (mut ws_sink, mut ws_stream) = ws.split();
         let (tx, mut rx) = mpsc::unbounded::<String>();
         wasm_bindgen_futures::spawn_local(async move {
@@ -148,11 +163,11 @@ impl NostrRelayPool {
             if !counted {
                 counted = true;
                 self.connected_count.set(self.connected_count.get() + 1);
-                on_relay_connected(self.connected_count.get());
+                (events.on_relay_connected)(self.connected_count.get());
                 log::info!("Connected to Nostr relay {}", url);
             }
             if let Ok(Some(RelayClientMessage::Event { event, .. })) = RelayClientMessage::from_json(&text) {
-                self.handle_event(event, on_signal);
+                self.handle_event(event, events);
             }
         }
 
@@ -164,12 +179,12 @@ impl NostrRelayPool {
         drop(senders);
         if counted {
             self.connected_count.set(self.connected_count.get().saturating_sub(1));
-            on_relay_connected(self.connected_count.get());
+            (events.on_relay_connected)(self.connected_count.get());
         }
         log::warn!("Disconnected from Nostr relay {}", url);
     }
 
-    fn handle_event(&self, event: protocol::NostrEvent, on_signal: &Rc<dyn Fn(String, SignalPayload)>) {
+    fn handle_event(&self, event: protocol::NostrEvent, events: &PoolEvents) {
         // 1. Our own events echo back from some relays.
         if event.pubkey == self.burner_key.pubkey() {
             return;
@@ -183,24 +198,31 @@ impl NostrRelayPool {
             log::warn!("Received Nostr event with invalid signature, dropping");
             return;
         }
-        // 4. Decrypt with the room key; signals addressed to other members are dropped.
+        // 4. Decrypt with the room key.
         let Ok(encrypted) = serde_json::from_str::<EncryptedPayload>(&event.content) else {
             return;
         };
-        match decrypt_json::<SignalPayload>(&self.key, &encrypted) {
-            Ok(signal) => {
+        let Ok(plaintext) = decrypt_bytes(&self.key, &encrypted) else {
+            log::warn!("Failed to decrypt incoming Nostr signal payload with room key");
+            return;
+        };
+        // 5. Same protocol version only; signals addressed to other members are dropped.
+        match decode_signal(&plaintext, self.version) {
+            DecodedSignal::Signal(signal) => {
                 if signal.recipient().is_some_and(|to| to != self.burner_key.pubkey()) {
                     return;
                 }
-                on_signal(event.pubkey, signal);
+                (events.on_signal)(event.pubkey, signal);
             }
-            Err(_) => log::warn!("Failed to decrypt incoming Nostr signal payload with room key"),
+            DecodedSignal::OtherVersion(version) => (events.on_other_version)(event.pubkey, version),
+            DecodedSignal::Invalid => log::warn!("Dropping an unreadable signal"),
         }
     }
 
     /// Encrypt, sign and serialize `signal` as an EVENT message.
     fn signed_event_json(&self, signal: &SignalPayload) -> Option<String> {
-        let encrypted = encrypt_json(&self.key, signal)
+        let plaintext = encode_signal(signal, self.version).ok()?;
+        let encrypted = encrypt_bytes(&self.key, &plaintext)
             .map_err(|e| log::error!("Failed to encrypt signaling payload: {:?}", e))
             .ok()?;
         let content = serde_json::to_string(&encrypted).ok()?;
