@@ -21,21 +21,28 @@
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
 }
 
+/* `100vh` on phones is the height with the browser toolbars hidden, which pushes the
+   message bar under them; `100dvh` is the height actually visible. */
 body {
   background-color: var(--bg-primary);
   color: var(--text-primary);
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
+/* When the bars and video don't leave room for the chat (short phones, keyboard open),
+   the app scrolls instead of clipping; the message bar stays pinned at the bottom. */
 #app {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  height: 100dvh;
   width: 100%;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   background-color: var(--bg-primary);
 }
 
@@ -282,6 +289,9 @@ header {
 }
 
 .input-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
   background-color: var(--bg-card);
   padding: 12px 24px;
   border-top: 1px solid var(--border);
@@ -294,6 +304,7 @@ header {
 
 .input-bar input {
   flex: 1;
+  min-width: 0;
   background-color: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -898,7 +909,7 @@ header {
 .room-body {
   flex: 1;
   display: flex;
-  min-height: 0;
+  min-height: 120px;
   position: relative;
 }
 
@@ -1576,7 +1587,25 @@ header {
   }
   .video-grid {
     padding: 6px 12px;
-    height: clamp(160px, 34vh, 360px);
+    height: clamp(160px, 34dvh, 360px);
+    /* On short screens the stage gives way, so the message bar stays on screen. */
+    flex-shrink: 1;
+    min-height: 96px;
+  }
+  .input-bar {
+    gap: 8px;
+  }
+  .lounge-controls {
+    gap: 4px;
+  }
+  .lounge-controls .btn {
+    padding: 5px 8px;
+  }
+  /* 16px stops iOS Safari from zooming the page when a text box gets focus. */
+  .input-bar input,
+  .lobby-input,
+  .dm-input-row input {
+    font-size: 16px;
   }
   .lobby-row {
     flex-direction: column;
