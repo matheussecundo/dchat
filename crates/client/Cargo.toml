@@ -88,4 +88,8 @@ features = [
   "GainNode",
   "AudioParam",
   "AudioDestinationNode",
+  "ResizeObserver",
+  "ResizeObserverEntry",
+  "DomRectReadOnly",
+  "KeyboardEvent",
 ]

@@ -1,4 +1,5 @@
 mod i18n;
+mod layout;
 mod media;
 mod mesh;
 mod names;
@@ -24,6 +25,9 @@ use state::{
 use std::collections::{HashMap, HashSet};
 use wasm_bindgen::JsCast;
 use web_sys::{window, HtmlInputElement};
+
+/// Space between video tiles (keep in sync with `.video-grid { gap }`).
+const GRID_GAP_PX: f64 = 8.0;
 
 /// Without direct-to-disk streaming, downloads above this size are buffered in RAM: warn first.
 const LARGE_FILE_BYTES: u64 = 250 * 1024 * 1024;
@@ -264,11 +268,52 @@ fn App() -> impl IntoView {
         }
         set_show_audio_settings.set(true);
     };
-    let enter_fullscreen = move |_| {
-        if let Some(el) = window().and_then(|w| w.document()).and_then(|d| d.get_element_by_id("video-grid")) {
-            let _ = el.request_fullscreen();
+    // Fullscreen for the whole video grid or a single tile. Browsers without element
+    // fullscreen (iPhone Safari) get the grid expanded over the page instead.
+    let (grid_expanded, set_grid_expanded) = create_signal(false);
+    let (fullscreen_on, set_fullscreen_on) = create_signal(false);
+    let toggle_fullscreen = move |tile_pubkey: Option<String>| {
+        let Some(doc) = window().and_then(|w| w.document()) else {
+            return;
+        };
+        if doc.fullscreen_element().is_some() {
+            doc.exit_fullscreen();
+            return;
+        }
+        if grid_expanded.get_untracked() {
+            set_grid_expanded.set(false);
+            return;
+        }
+        let target_id = tile_pubkey.map_or_else(|| "video-grid".to_string(), |pk| format!("tile-{pk}"));
+        let Some(target) = doc.get_element_by_id(&target_id) else {
+            return;
+        };
+        if doc.fullscreen_enabled() {
+            let _ = target.request_fullscreen();
+        } else {
+            set_grid_expanded.set(true);
         }
     };
+    {
+        let on_change = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
+            let active = window().and_then(|w| w.document()).is_some_and(|d| d.fullscreen_element().is_some());
+            set_fullscreen_on.set(active);
+        }) as Box<dyn FnMut()>);
+        let on_key = wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::KeyboardEvent| {
+            if ev.key() == "Escape" && grid_expanded.get_untracked() {
+                set_grid_expanded.set(false);
+            }
+        }) as Box<dyn FnMut(web_sys::KeyboardEvent)>);
+        if let Some(doc) = window().and_then(|w| w.document()) {
+            let _ = doc.add_event_listener_with_callback("fullscreenchange", on_change.as_ref().unchecked_ref());
+            let _ = doc.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
+        }
+        on_change.forget();
+        on_key.forget();
+    }
+    // The grid's content box, measured live so tiles always fit (resizes, fullscreen).
+    let (grid_box, set_grid_box) = create_signal((0.0_f64, 0.0_f64));
+    let grid_observer = store_value(None::<web_sys::ResizeObserver>);
     let voice_cap = move || session_ref.with_value(|s| s.as_ref().and_then(|s| s.voice_cap()));
     let video_cap = move || session_ref.with_value(|s| s.as_ref().and_then(|s| s.video_cap()));
     let voice_full = move || {
@@ -285,12 +330,47 @@ fn App() -> impl IntoView {
     let show_video_grid = create_memo(move |_| {
         my_voice.get().in_voice && lounge.with(|l| l.iter().any(|m| m.video != VideoKind::None))
     });
-    // Video elements are recreated when the grid appears: point them at their streams.
+    // Video elements are recreated when the grid appears: point them at their streams,
+    // and start measuring the new grid element.
     create_effect(move |_| {
-        if show_video_grid.get() {
-            with_session(&|s| s.attach_lounge_media());
+        if !show_video_grid.get() {
+            set_grid_expanded.set(false);
+            return;
         }
+        with_session(&|s| s.attach_lounge_media());
+        wasm_bindgen_futures::spawn_local(async move {
+            for _ in 0..20 {
+                if let Some(grid) = window().and_then(|w| w.document()).and_then(|d| d.get_element_by_id("video-grid")) {
+                    let on_resize = wasm_bindgen::closure::Closure::wrap(Box::new(move |entries: js_sys::Array| {
+                        if let Ok(entry) = entries.get(0).dyn_into::<web_sys::ResizeObserverEntry>() {
+                            let rect = entry.content_rect();
+                            set_grid_box.set((rect.width(), rect.height()));
+                        }
+                    }) as Box<dyn FnMut(js_sys::Array)>);
+                    if let Ok(observer) = web_sys::ResizeObserver::new(on_resize.as_ref().unchecked_ref()) {
+                        observer.observe(&grid);
+                        if let Some(old) = grid_observer.get_value() {
+                            old.disconnect();
+                        }
+                        grid_observer.set_value(Some(observer));
+                    }
+                    on_resize.forget();
+                    return;
+                }
+                media::sleep_ms(30).await;
+            }
+        });
     });
+    let grid_style = move || {
+        let count = lounge.with(|l| l.iter().filter(|m| m.video != VideoKind::None).count());
+        let (width, height) = grid_box.get();
+        let fit = layout::fit_grid(count, width, height, GRID_GAP_PX);
+        format!(
+            "grid-template-columns: repeat({}, {}px); grid-auto-rows: {}px;",
+            fit.cols, fit.tile_w, fit.tile_h
+        )
+    };
+    let grid_fullscreen_active = move || fullscreen_on.get() || grid_expanded.get();
     create_effect(move |_| {
         if let Some(name) = voice_prompt.get() {
             set_timeout(
@@ -799,6 +879,16 @@ fn App() -> impl IntoView {
                             >
                                 "🖥️"
                             </button>
+                            {move || show_video_grid.get().then(|| view! {
+                                <button
+                                    id="fullscreen-btn"
+                                    class="btn btn-secondary"
+                                    on:click=move |_| toggle_fullscreen(None)
+                                    title=move || t(lang.get(), "title_fullscreen")
+                                >
+                                    "⛶"
+                                </button>
+                            })}
                             <button
                                 id="leave-voice-btn"
                                 class="btn btn-danger"
@@ -837,14 +927,22 @@ fn App() -> impl IntoView {
             })}
 
             {move || show_video_grid.get().then(|| view! {
-                <div id="video-grid" class="video-grid">
+                <div
+                    id="video-grid"
+                    class=move || if grid_expanded.get() { "video-grid expanded" } else { "video-grid" }
+                    style=grid_style
+                >
                     <For
                         each=video_members
                         key=|m| (m.pubkey.clone(), m.video)
-                        children=move |m| video_tile(lang, m, lounge, speaking)
+                        children=move |m| video_tile(lang, m, lounge, speaking, toggle_fullscreen)
                     />
-                    <button class="btn btn-secondary grid-fullscreen" on:click=enter_fullscreen title=move || t(lang.get(), "title_fullscreen")>
-                        "⛶"
+                    <button
+                        class="btn btn-secondary grid-fullscreen"
+                        on:click=move |_| toggle_fullscreen(None)
+                        title=move || if grid_fullscreen_active() { t(lang.get(), "title_exit_fullscreen") } else { t(lang.get(), "title_fullscreen") }
+                    >
+                        {move || if grid_fullscreen_active() { "✕" } else { "⛶" }}
                     </button>
                 </div>
             })}
@@ -1356,17 +1454,29 @@ fn video_tile(
     member: LoungeMemberUi,
     lounge: ReadSignal<Vec<LoungeMemberUi>>,
     speaking: ReadSignal<HashSet<String>>,
+    on_fullscreen: impl Fn(Option<String>) + Copy + 'static,
 ) -> impl IntoView {
     let pk_speaking = member.pubkey.clone();
     let pk_mic = member.pubkey.clone();
+    let pk_dbl = member.pubkey.clone();
+    let pk_btn = member.pubkey.clone();
     let is_self = member.is_self;
     view! {
         <div
+            id=format!("tile-{}", member.pubkey)
             class="tile"
             class:speaking=move || speaking.with(|s| s.contains(&pk_speaking))
             data-pubkey=member.pubkey.clone()
+            on:dblclick=move |_| on_fullscreen(Some(pk_dbl.clone()))
         >
             <video id=format!("tile-video-{}", member.pubkey) autoplay playsinline muted></video>
+            <button
+                class="tile-fullscreen"
+                title=move || t(lang.get(), "title_fullscreen")
+                on:click=move |_| on_fullscreen(Some(pk_btn.clone()))
+            >
+                "⛶"
+            </button>
             <span class="tile-label">
                 <span dir="auto">{member.name}</span>
                 {move || is_self.then(|| format!(" {}", t(lang.get(), "you_suffix")))}

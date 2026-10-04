@@ -145,7 +145,8 @@
     "dm_placeholder": "Private message to {name}…",
     "dm_empty": "Only you and {name} can read these messages. They vanish when either of you leaves.",
     "dm_peer_left": "{name} left: this conversation has ended.",
-    "title_close": "Close"
+    "title_close": "Close",
+    "title_exit_fullscreen": "Exit fullscreen"
   },
   "zh": {
     "scan_qr": "📱 扫描二维码",
@@ -293,7 +294,8 @@
     "dm_placeholder": "发给 {name} 的私信…",
     "dm_empty": "只有您和 {name} 能看到这些消息。任何一方离开后，这些消息即会消失。",
     "dm_peer_left": "{name} 已离开：此对话已结束。",
-    "title_close": "关闭"
+    "title_close": "关闭",
+    "title_exit_fullscreen": "退出全屏"
   },
   "hi": {
     "scan_qr": "📱 क्यूआर स्कैन करें",
@@ -441,7 +443,8 @@
     "dm_placeholder": "{name} को निजी संदेश…",
     "dm_empty": "ये संदेश सिर्फ़ आप और {name} पढ़ सकते हैं। आप दोनों में से किसी के भी जाते ही ये मिट जाएंगे।",
     "dm_peer_left": "{name} चले गए: यह बातचीत समाप्त हो गई है।",
-    "title_close": "बंद करें"
+    "title_close": "बंद करें",
+    "title_exit_fullscreen": "फ़ुलस्क्रीन से बाहर निकलें"
   },
   "es": {
     "scan_qr": "📱 Escanear QR",
@@ -589,7 +592,8 @@
     "dm_placeholder": "Mensaje privado para {name}…",
     "dm_empty": "Solo tú y {name} pueden leer estos mensajes. Desaparecen en cuanto uno de los dos sale.",
     "dm_peer_left": "{name} salió: esta conversación terminó.",
-    "title_close": "Cerrar"
+    "title_close": "Cerrar",
+    "title_exit_fullscreen": "Salir de pantalla completa"
   },
   "fr": {
     "scan_qr": "📱 Scanner QR",
@@ -737,7 +741,8 @@
     "dm_placeholder": "Message privé à {name}…",
     "dm_empty": "Ces messages ne sont lisibles que par vous et {name}. Ils disparaissent dès que l'un de vous deux quitte le salon.",
     "dm_peer_left": "{name} a quitté le salon : cette conversation est terminée.",
-    "title_close": "Fermer"
+    "title_close": "Fermer",
+    "title_exit_fullscreen": "Quitter le plein écran"
   },
   "ar": {
     "scan_qr": "📱 مسح رمز QR",
@@ -885,7 +890,8 @@
     "dm_placeholder": "رسالة خاصة إلى {name}…",
     "dm_empty": "لا يمكن لأحد قراءة هذه الرسائل سواك أنت و{name}. وتختفي بمجرد مغادرة أي منكما.",
     "dm_peer_left": "غادر {name}: انتهت هذه المحادثة.",
-    "title_close": "إغلاق"
+    "title_close": "إغلاق",
+    "title_exit_fullscreen": "الخروج من ملء الشاشة"
   },
   "bn": {
     "scan_qr": "📱 কিউআর স্ক্যান",
@@ -1033,7 +1039,8 @@
     "dm_placeholder": "{name}-কে ব্যক্তিগত বার্তা…",
     "dm_empty": "শুধু আপনি এবং {name} এই বার্তাগুলো পড়তে পারবেন। আপনাদের যেকোনো একজন চলে গেলেই এগুলো মুছে যাবে।",
     "dm_peer_left": "{name} চলে গেছেন: এই কথোপকথন শেষ হয়েছে।",
-    "title_close": "বন্ধ করুন"
+    "title_close": "বন্ধ করুন",
+    "title_exit_fullscreen": "ফুলস্ক্রিন থেকে বের হন"
   },
   "pt": {
     "scan_qr": "📱 Escanear QR",
@@ -1181,7 +1188,8 @@
     "dm_placeholder": "Mensagem privada para {name}…",
     "dm_empty": "Só você e {name} podem ler estas mensagens. Elas somem quando qualquer um de vocês sair.",
     "dm_peer_left": "{name} saiu: esta conversa foi encerrada.",
-    "title_close": "Fechar"
+    "title_close": "Fechar",
+    "title_exit_fullscreen": "Sair da tela cheia"
   },
   "ru": {
     "scan_qr": "📱 Сканировать QR",
@@ -1329,7 +1337,8 @@
     "dm_placeholder": "Личное сообщение для {name}…",
     "dm_empty": "Эти сообщения можете читать только вы и {name}. Они исчезнут, как только кто-то из вас выйдет.",
     "dm_peer_left": "{name} больше не в комнате: разговор завершен.",
-    "title_close": "Закрыть"
+    "title_close": "Закрыть",
+    "title_exit_fullscreen": "Выйти из полноэкранного режима"
   },
   "de": {
     "scan_qr": "📱 QR scannen",
@@ -1477,6 +1486,7 @@
     "dm_placeholder": "Private Nachricht an {name}…",
     "dm_empty": "Nur Sie und {name} können diese Nachrichten lesen. Die Nachrichten verschwinden, sobald einer von Ihnen beiden geht.",
     "dm_peer_left": "{name} hat den Raum verlassen: Diese Unterhaltung ist beendet.",
-    "title_close": "Schließen"
+    "title_close": "Schließen",
+    "title_exit_fullscreen": "Vollbild beenden"
   }
 }

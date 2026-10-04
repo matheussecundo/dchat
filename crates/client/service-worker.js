@@ -1,4 +1,4 @@
-const CACHE_NAME = "dchat-static-v1";
+const CACHE_NAME = "dchat-static-v2";
 const STATIC_ASSETS = [
   "./",
   "./index.html",
@@ -37,6 +37,24 @@ self.addEventListener("fetch", (event) => {
 
   // Bypass WebSocket and non-GET requests entirely
   if (event.request.method !== "GET" || url.pathname === "/ws" || url.pathname === "/health") {
+    return;
+  }
+
+  // Pages (index.html) go network-first so a new build reaches returning visitors; the
+  // cached copy is only an offline fallback. Hashed .wasm/.js/.css stay cache-first.
+  const isPage = event.request.mode === "navigate" || url.pathname === "/" || url.pathname.endsWith(".html");
+  if (isPage) {
+    event.respondWith(
+      fetch(event.request)
+        .then((networkResponse) => {
+          if (networkResponse.status === 200) {
+            const responseToCache = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(url.pathname, responseToCache));
+          }
+          return networkResponse;
+        })
+        .catch(() => caches.match(url.pathname).then((cached) => cached || caches.match("./")))
+    );
     return;
   }
 
