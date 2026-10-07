@@ -31,8 +31,12 @@ pub enum LinkEvent {
     Closed,
     /// A text frame arrived on the chat channel.
     Message(String),
-    /// The member started sending a media track (with its stream, when announced).
-    Track(MediaStreamTrack, Option<MediaStream>),
+    /// The member started sending a media track (with its stream, when announced, and the
+    /// `RTCRtpReceiver` that receives it).
+    Track(MediaStreamTrack, Option<MediaStream>, JsValue),
+    /// An offer/answer exchange completed (an answer was applied): the negotiated codecs are
+    /// known now, so per-sender parameters can pick one. Never fired on a rollback.
+    Negotiated,
     /// A binary packet arrived on the file-transfer channel.
     Chunk(Vec<u8>),
     /// A remote-control input packet arrived on one of the input channels.
@@ -67,6 +71,7 @@ pub struct PeerLink {
     pending_ice: RefCell<Vec<IceCandidateData>>,
     closed: Rc<Cell<bool>>,
     signal_out: SignalOut,
+    on_event: LinkEventHandler,
 }
 
 thread_local! {
@@ -105,6 +110,7 @@ impl PeerLink {
             pending_ice: RefCell::new(Vec::new()),
             closed: Rc::new(Cell::new(false)),
             signal_out,
+            on_event: on_event.clone(),
         });
 
         let notify_closed = link.closed_notifier(on_event.clone());
@@ -221,6 +227,11 @@ impl PeerLink {
         self.pc.add_track_0(track, stream)
     }
 
+    /// `getStats()` of the whole connection.
+    pub fn stats(&self) -> js_sys::Promise {
+        self.pc.get_stats()
+    }
+
     pub fn close(&self) {
         self.closed.set(true);
         for channel in [&self.chat, &self.files, &self.input_events, &self.input_state] {
@@ -259,6 +270,9 @@ impl PeerLink {
             log::warn!("Failed to apply remote description from {}: {:?}", self.remote, err);
             return;
         }
+        if !is_offer {
+            self.notify_negotiated();
+        }
         self.flush_pending_ice().await;
 
         if is_offer {
@@ -266,6 +280,7 @@ impl PeerLink {
                 log::warn!("Failed to create answer for {}: {:?}", self.remote, err);
                 return;
             }
+            self.notify_negotiated();
             if let Some(local) = self.pc.local_description() {
                 (self.signal_out)(
                     &self.remote,
@@ -275,6 +290,12 @@ impl PeerLink {
                     },
                 );
             }
+        }
+    }
+
+    fn notify_negotiated(&self) {
+        if !self.closed.get() {
+            (self.on_event)(&self.remote, self.id, LinkEvent::Negotiated);
         }
     }
 
@@ -327,7 +348,8 @@ impl PeerLink {
         let on_track = Closure::wrap(Box::new(move |ev: RtcTrackEvent| {
             let streams = ev.streams();
             let stream = (streams.length() > 0).then(|| streams.get(0).unchecked_into::<MediaStream>());
-            on_event(&remote, id, LinkEvent::Track(ev.track(), stream));
+            let receiver = js_sys::Reflect::get(&ev, &"receiver".into()).unwrap_or(JsValue::UNDEFINED);
+            on_event(&remote, id, LinkEvent::Track(ev.track(), stream, receiver));
         }) as Box<dyn FnMut(RtcTrackEvent)>);
         self.pc.set_ontrack(Some(on_track.as_ref().unchecked_ref()));
         on_track.forget();

@@ -5,13 +5,19 @@
 //! `addTrack` the first time media is needed and switched with `replaceTrack` afterwards
 //! (including `None` when the camera goes off or someone leaves voice), so toggles do not
 //! renegotiate or grow the SDP.
+//!
+//! Video goes under its own msid (`video_msid`), never the mic's stream, so receivers never
+//! hold video back for lip sync; `quality.rs` re-syncs camera tiles on the viewer's side and
+//! applies the sharer's quality presets to the capture and to every video sender.
 
+use super::quality::VideoQuality;
 use super::RoomSession;
 use crate::media::{self, SpeakingMeter};
 use crate::mesh::PeerLink;
 use crate::names::pubkey_tag;
-use crate::state::{AudioSettings, LoungeMemberUi, MyVoiceUi};
+use crate::state::{next_device, selectable_devices, AudioSettings, DeviceChoice, LoungeMemberUi, MyVoiceUi, CAMERA_KIND};
 use leptos::*;
+use protocol::video::VideoPresets;
 use protocol::{latest_beyond_cap, RoomBody, RoomEnvelope, VideoKind};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -35,23 +41,51 @@ pub(super) struct VoiceInfo {
 }
 
 #[derive(Default)]
-struct LinkSenders {
-    audio: Option<RtcRtpSender>,
-    video: Option<RtcRtpSender>,
+pub(super) struct LinkSenders {
+    pub audio: Option<RtcRtpSender>,
+    pub video: Option<RtcRtpSender>,
+}
+
+/// Which chosen capture device a fallback concerns.
+#[derive(Clone, Copy)]
+enum DeviceSlot {
+    Mic,
+    Camera,
+}
+
+/// What `reconcile_sender` did to a sender.
+enum SenderChange {
+    Unchanged,
+    /// `addTrack`: a new sender (negotiation follows).
+    Added,
+    /// `replaceTrack`, settled when the promise is.
+    Replaced(js_sys::Promise),
 }
 
 pub(super) struct Lounge {
     joining: Cell<bool>,
     speaker_muted: Cell<bool>,
-    front_camera: Cell<bool>,
-    /// The mic (and video) tracks this tab sends, in one stream so peers get them together.
+    pub(super) front_camera: Cell<bool>,
+    /// Every local track (mic and video): the self-view tile and `local_track` read it.
+    /// Only the audio sender is announced under this stream's id.
     local_stream: RefCell<Option<MediaStream>>,
+    /// An empty stream that only gives the video sender an msid of its own: browsers pair
+    /// audio and video for lip sync by stream id, and video must never wait for the voice.
+    video_msid: Option<MediaStream>,
+    /// The sharer's quality choice for camera and screen (RAM only, see `quality.rs`).
+    pub(super) video_presets: Cell<VideoPresets>,
+    pub(super) quality: VideoQuality,
     audio_settings: Cell<AudioSettings>,
+    /// Microphone, speaker and camera (RAM only, kept in step with the settings).
+    pub(super) devices: RefCell<DeviceChoice>,
     recapture_in_flight: Cell<bool>,
-    pending_settings: Cell<Option<AudioSettings>>,
-    senders: RefCell<HashMap<String, LinkSenders>>,
+    /// The mic settings or device changed during a swap: swap once more (latest wins).
+    recapture_pending: Cell<bool>,
+    /// Camera captures in flight: only the newest is used.
+    camera_gen: Cell<u64>,
+    pub(super) senders: RefCell<HashMap<String, LinkSenders>>,
     remote_streams: RefCell<HashMap<String, MediaStream>>,
-    states: RefCell<HashMap<String, VoiceInfo>>,
+    pub(super) states: RefCell<HashMap<String, VoiceInfo>>,
     /// Latest signed `VoiceState` per member, replayed to new neighbors.
     pub envelopes: RefCell<HashMap<String, RoomEnvelope>>,
     seq: Cell<u64>,
@@ -69,9 +103,14 @@ impl Default for Lounge {
             speaker_muted: Cell::new(false),
             front_camera: Cell::new(true),
             local_stream: RefCell::new(None),
+            video_msid: MediaStream::new().ok(),
+            video_presets: Cell::new(VideoPresets::default()),
+            quality: VideoQuality::default(),
             audio_settings: Cell::new(AudioSettings::default()),
+            devices: RefCell::new(DeviceChoice::default()),
             recapture_in_flight: Cell::new(false),
-            pending_settings: Cell::new(None),
+            recapture_pending: Cell::new(false),
+            camera_gen: Cell::new(0),
             senders: RefCell::new(HashMap::new()),
             remote_streams: RefCell::new(HashMap::new()),
             states: RefCell::new(HashMap::new()),
@@ -111,16 +150,18 @@ impl RoomSession {
                 Err(err) => log::warn!("Speaking meter unavailable: {:?}", err),
             }
         }
+        self.start_quality_timer();
 
         let s = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let settings = s.inner.lounge.audio_settings.get();
-            let captured = media::capture_microphone(&settings).await;
+            let device = s.inner.lounge.devices.borrow().mic.clone();
+            let captured = media::capture_microphone(&settings, device.as_deref()).await;
             s.inner.lounge.joining.set(false);
-            let track = match captured {
-                Ok(track) if !s.inner.closed.get() => track,
-                Ok(track) => {
-                    track.stop();
+            let (track, fell_back) = match captured {
+                Ok(captured) if !s.inner.closed.get() => (captured.track, captured.fell_back),
+                Ok(captured) => {
+                    captured.track.stop();
                     return;
                 }
                 Err(err) => {
@@ -136,6 +177,9 @@ impl RoomSession {
             };
             stream.add_track(&track);
             *s.inner.lounge.local_stream.borrow_mut() = Some(stream);
+            if fell_back {
+                s.device_fell_back(DeviceSlot::Mic, device.as_deref());
+            }
             s.watch_local_mic();
             let now = js_sys::Date::now() as u64;
             s.publish_voice(|v| {
@@ -145,6 +189,13 @@ impl RoomSession {
                 v.video = VideoKind::None;
                 v.video_ts = 0;
             });
+            // Settings or device changed while the mic was opening: open it again.
+            let opened = if fell_back { None } else { device };
+            let lounge = &s.inner.lounge;
+            let device_now = lounge.devices.borrow().mic.clone();
+            if lounge.audio_settings.get() != settings || device_now != opened {
+                s.recapture_mic();
+            }
         });
     }
 
@@ -207,10 +258,29 @@ impl RoomSession {
             return;
         }
         let s = self.clone();
-        let front = self.inner.lounge.front_camera.get();
+        let lounge = &self.inner.lounge;
+        let front = lounge.front_camera.get();
+        let device = lounge.devices.borrow().camera.clone();
+        let Some(target) = self.target_for(VideoKind::Camera) else {
+            return;
+        };
+        // Any camera switch still in flight is now stale.
+        lounge.camera_gen.set(lounge.camera_gen.get() + 1);
         wasm_bindgen_futures::spawn_local(async move {
-            match media::capture_camera(front).await {
-                Ok(track) => s.set_video_track(track, VideoKind::Camera),
+            match media::capture_camera(front, device.as_deref(), &target.capture).await {
+                Ok(captured) => {
+                    if captured.fell_back {
+                        s.device_fell_back(DeviceSlot::Camera, device.as_deref());
+                    }
+                    let opened = if captured.fell_back { None } else { device };
+                    s.prepare_video_track(&captured.track, VideoKind::Camera).await;
+                    s.set_video_track(captured.track, VideoKind::Camera);
+                    // Another camera was chosen while this one was opening.
+                    let device_now = s.inner.lounge.devices.borrow().camera.clone();
+                    if device_now != opened && s.my_voice().video == VideoKind::Camera {
+                        s.recapture_camera();
+                    }
+                }
                 Err(err) => {
                     log::error!("Camera capture failed: {:?}", err);
                     s.toast("toast_camera_denied");
@@ -233,10 +303,21 @@ impl RoomSession {
             return;
         }
         let s = self.clone();
+        let Some(target) = self.target_for(VideoKind::Screen) else {
+            return;
+        };
         wasm_bindgen_futures::spawn_local(async move {
-            match media::capture_screen().await {
+            match media::capture_screen(target.capture.fps).await {
                 Ok((track, info)) => {
+                    // The source's own size: dchat-host matches it against its monitors.
                     s.set_screen_info(Some(info));
+                    s.prepare_video_track(&track, VideoKind::Screen).await;
+                    if js_sys::Reflect::get(&track, &"readyState".into()).ok().and_then(|v| v.as_string()).as_deref()
+                        == Some("ended")
+                    {
+                        // Stopped from the browser while it was being prepared.
+                        return;
+                    }
                     // Stopping from the browser's own "Stop sharing" control ends the share.
                     let s_end = s.clone();
                     let track_id = track.id();
@@ -257,19 +338,67 @@ impl RoomSession {
         });
     }
 
-    /// Switch between front and rear camera; peers keep their sender (no renegotiation).
+    /// 🔄: with a camera chosen in the settings, move to the next camera the browser lists
+    /// (and choose it); otherwise switch between front and rear. Peers keep their sender
+    /// (no renegotiation).
     pub fn flip_camera(&self) {
         if self.my_voice().video != VideoKind::Camera {
             return;
         }
         let lounge = &self.inner.lounge;
-        let front = !lounge.front_camera.get();
-        lounge.front_camera.set(front);
+        let chosen = lounge.devices.borrow().camera.clone();
+        let Some(current) = chosen else {
+            lounge.front_camera.set(!lounge.front_camera.get());
+            self.recapture_camera();
+            return;
+        };
         let s = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            match media::capture_camera(front).await {
-                Ok(track) => {
-                    if s.my_voice().video != VideoKind::Camera || !s.replace_local_track("video", &track) {
+            let listed = media::enumerate_devices().await.unwrap_or_default();
+            let Some(next) = next_device(&selectable_devices(&listed, CAMERA_KIND), Some(&current)) else {
+                return;
+            };
+            let devices = s.inner.lounge.devices.borrow().clone();
+            // Chosen again in the settings meanwhile: that choice stands.
+            if devices.camera.as_deref() != Some(current.as_str()) {
+                return;
+            }
+            s.inner.signals.devices.update(|d| d.camera = Some(next.clone()));
+            s.set_devices(DeviceChoice { camera: Some(next), ..devices });
+        });
+    }
+
+    /// Capture the camera again (the other side, or another device) and swap it in on every
+    /// link: the hint goes on before it is attached, the senders switch with `replaceTrack`
+    /// in `sync_media_all`, and their parameters follow once it settles. The newest request
+    /// wins.
+    fn recapture_camera(&self) {
+        let lounge = &self.inner.lounge;
+        let Some(target) = self.target_for(VideoKind::Camera) else {
+            return;
+        };
+        let generation = lounge.camera_gen.get() + 1;
+        lounge.camera_gen.set(generation);
+        let front = lounge.front_camera.get();
+        let device = lounge.devices.borrow().camera.clone();
+        let s = self.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let captured = media::capture_camera(front, device.as_deref(), &target.capture).await;
+            let current = s.inner.lounge.camera_gen.get() == generation && !s.inner.closed.get();
+            match captured {
+                Ok(captured) => {
+                    let track = captured.track;
+                    if !current || s.my_voice().video != VideoKind::Camera {
+                        track.stop();
+                        return;
+                    }
+                    if captured.fell_back {
+                        s.device_fell_back(DeviceSlot::Camera, device.as_deref());
+                    }
+                    if let Some(now) = s.target_for(VideoKind::Camera) {
+                        media::set_content_hint(&track, now.hint.as_str());
+                    }
+                    if !s.replace_local_track("video", &track) {
                         track.stop();
                         return;
                     }
@@ -277,20 +406,69 @@ impl RoomSession {
                     s.attach_lounge_media();
                 }
                 Err(err) => {
-                    log::error!("Camera flip failed: {:?}", err);
-                    s.toast("toast_camera_switch_failed");
+                    log::error!("Camera switch failed: {:?}", err);
+                    if current {
+                        s.toast("toast_camera_switch_failed");
+                    }
                 }
             }
         });
     }
 
-    /// Store new mic processing settings and, in voice, swap in a freshly captured mic
-    /// track. Changes arriving mid-swap collapse into one follow-up swap (latest wins).
+    /// Store new mic processing settings and, in voice, swap in a freshly captured mic.
     pub fn set_audio_settings(&self, settings: AudioSettings) {
+        self.inner.lounge.audio_settings.set(settings);
+        self.recapture_mic();
+    }
+
+    /// Microphone, speaker and camera (`None`: the system default). In voice a new mic is
+    /// swapped in (keeping the mute), a live camera is replaced, and every member's audio
+    /// moves to the new speaker at once.
+    pub fn set_devices(&self, devices: DeviceChoice) {
         let lounge = &self.inner.lounge;
-        lounge.audio_settings.set(settings);
+        let old = lounge.devices.replace(devices.clone());
+        if old.speaker != devices.speaker {
+            media::set_remote_audio_sink(devices.speaker.as_deref().unwrap_or_default());
+        }
+        if old.mic != devices.mic {
+            self.recapture_mic();
+        }
+        if old.camera != devices.camera && self.my_voice().video == VideoKind::Camera {
+            self.recapture_camera();
+        }
+    }
+
+    /// The chosen `device` was missing and the system default stood in: forget the choice
+    /// (here and in the settings) unless another was made meanwhile, and say so.
+    fn device_fell_back(&self, slot: DeviceSlot, device: Option<&str>) {
+        let forget = |devices: &mut DeviceChoice| {
+            let chosen = match slot {
+                DeviceSlot::Mic => &mut devices.mic,
+                DeviceSlot::Camera => &mut devices.camera,
+            };
+            let still_chosen = chosen.as_deref() == device;
+            if still_chosen {
+                *chosen = None;
+            }
+            still_chosen
+        };
+        if forget(&mut self.inner.lounge.devices.borrow_mut()) {
+            self.inner.signals.devices.update(|d| {
+                forget(d);
+            });
+        }
+        self.toast(match slot {
+            DeviceSlot::Mic => "toast_mic_device_missing",
+            DeviceSlot::Camera => "toast_camera_device_missing",
+        });
+    }
+
+    /// In voice, swap in a freshly captured mic with the current settings and device.
+    /// Changes arriving mid-swap collapse into one follow-up swap (latest wins).
+    fn recapture_mic(&self) {
+        let lounge = &self.inner.lounge;
         if lounge.recapture_in_flight.get() {
-            lounge.pending_settings.set(Some(settings));
+            lounge.recapture_pending.set(true);
             return;
         }
         if self.local_track("audio").is_none() {
@@ -299,13 +477,14 @@ impl RoomSession {
         lounge.recapture_in_flight.set(true);
         let s = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let mut next = Some(settings);
-            while let Some(settings) = next {
-                if let Err(err) = s.swap_mic(&settings).await {
-                    log::error!("Audio settings re-capture error: {:?}", err);
+            loop {
+                if let Err(err) = s.swap_mic().await {
+                    log::error!("Microphone re-capture error: {:?}", err);
                     s.toast("toast_audio_settings_failed");
                 }
-                next = s.inner.lounge.pending_settings.take();
+                if !s.inner.lounge.recapture_pending.replace(false) {
+                    break;
+                }
             }
             s.inner.lounge.recapture_in_flight.set(false);
         });
@@ -325,7 +504,7 @@ impl RoomSession {
         self.voice_of(&self.inner.me)
     }
 
-    fn voice_of(&self, pubkey: &str) -> VoiceInfo {
+    pub(super) fn voice_of(&self, pubkey: &str) -> VoiceInfo {
         self.inner.lounge.states.borrow().get(pubkey).copied().unwrap_or_default()
     }
 
@@ -500,7 +679,7 @@ impl RoomSession {
         });
     }
 
-    async fn swap_mic(&self, settings: &AudioSettings) -> Result<(), wasm_bindgen::JsValue> {
+    async fn swap_mic(&self) -> Result<(), wasm_bindgen::JsValue> {
         let Some(old) = self.local_track("audio") else {
             // Left voice while a previous swap was in flight.
             return Ok(());
@@ -509,7 +688,14 @@ impl RoomSession {
         // Chrome hands a new capture the processing of an already-open mic source,
         // so the old track must be stopped first; peers hear a short gap.
         old.stop();
-        let new_track = media::capture_microphone(settings).await?;
+        let lounge = &self.inner.lounge;
+        let settings = lounge.audio_settings.get();
+        let device = lounge.devices.borrow().mic.clone();
+        let captured = media::capture_microphone(&settings, device.as_deref()).await?;
+        if captured.fell_back {
+            self.device_fell_back(DeviceSlot::Mic, device.as_deref());
+        }
+        let new_track = captured.track;
         new_track.set_enabled(was_enabled);
         if !self.replace_local_track("audio", &new_track) {
             new_track.stop();
@@ -548,30 +734,69 @@ impl RoomSession {
             ),
             _ => (None, None),
         };
-        let mut senders = self.inner.lounge.senders.borrow_mut();
-        let entry = senders.entry(remote.to_string()).or_default();
-        entry.audio = reconcile_sender(link, entry.audio.take(), audio, stream.as_ref());
-        entry.video = reconcile_sender(link, entry.video.take(), video, stream.as_ref());
+        // Video under its own msid, so the viewer never syncs it to the voice.
+        let video_stream = self.inner.lounge.video_msid.clone().or_else(|| stream.clone());
+        let has_video = video.is_some();
+        let (audio_change, video_change) = {
+            let mut senders = self.inner.lounge.senders.borrow_mut();
+            let entry = senders.entry(remote.to_string()).or_default();
+            (
+                reconcile_sender(link, &mut entry.audio, audio, stream.as_ref()),
+                reconcile_sender(link, &mut entry.video, video, video_stream.as_ref()),
+            )
+        };
+        // `senders` is released: applying parameters reads lounge state again.
+        if let SenderChange::Replaced(promise) = audio_change {
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Err(err) = JsFuture::from(promise).await {
+                    log::warn!("replaceTrack failed: {:?}", err);
+                }
+            });
+        }
+        match video_change {
+            SenderChange::Unchanged => {}
+            SenderChange::Added => self.apply_video_params(remote),
+            SenderChange::Replaced(promise) => {
+                let s = self.clone();
+                let remote = remote.to_string();
+                wasm_bindgen_futures::spawn_local(async move {
+                    if let Err(err) = JsFuture::from(promise).await {
+                        log::warn!("replaceTrack failed: {:?}", err);
+                        return;
+                    }
+                    if has_video {
+                        s.apply_video_params(&remote);
+                    }
+                });
+            }
+        }
     }
 
-    pub(super) fn on_remote_track(&self, remote: &str, track: MediaStreamTrack, stream: Option<MediaStream>) {
+    /// A member's track arrived. It joins that member's own stream, made here: never the
+    /// browser's msid stream (their audio and video come under different msids, and
+    /// re-tagging could pull tracks out of elements already playing them).
+    pub(super) fn on_remote_track(&self, remote: &str, track: MediaStreamTrack, receiver: wasm_bindgen::JsValue) {
         let lounge = &self.inner.lounge;
+        self.record_receiver(remote, &track.kind(), receiver);
         let target = {
             let mut streams = lounge.remote_streams.borrow_mut();
             if !streams.contains_key(remote) {
-                let Some(fresh) = stream.or_else(|| MediaStream::new().ok()) else {
+                let Ok(fresh) = MediaStream::new() else {
                     return;
                 };
                 streams.insert(remote.to_string(), fresh);
             }
-            streams[remote].clone()
+            // The handle, not `MediaStream::clone` (a JS `clone()`: a new stream whose
+            // copied tracks would never reach the tiles).
+            Clone::clone(&streams[remote])
         };
         let known = target.get_tracks().iter().any(|t| t.unchecked_into::<MediaStreamTrack>().id() == track.id());
         if !known {
             target.add_track(&track);
         }
         if track.kind() == "audio" {
-            if let Some(promise) = media::play_remote_audio(remote, &target, lounge.speaker_muted.get()) {
+            let sink = lounge.devices.borrow().speaker.clone().unwrap_or_default();
+            if let Some(promise) = media::play_remote_audio(remote, &target, lounge.speaker_muted.get(), &sink) {
                 let s = self.clone();
                 wasm_bindgen_futures::spawn_local(async move {
                     if JsFuture::from(promise).await.is_err() {
@@ -592,6 +817,7 @@ impl RoomSession {
         let lounge = &self.inner.lounge;
         lounge.senders.borrow_mut().remove(remote);
         lounge.remote_streams.borrow_mut().remove(remote);
+        self.forget_member_quality(remote);
         media::remove_remote_audio(remote);
         if let Some(meter) = lounge.meter.borrow_mut().as_mut() {
             meter.unwatch(remote);
@@ -709,26 +935,29 @@ impl RoomSession {
 }
 
 /// Bring one sender in line with the wanted track: add it the first time (renegotiates),
-/// then only `replaceTrack` (no renegotiation), including `None` to stop sending.
+/// then only `replaceTrack` (no renegotiation), including `None` to stop sending. Says what
+/// it did, so the caller can apply parameters once the borrow of `senders` is released.
 fn reconcile_sender(
     link: &PeerLink,
-    sender: Option<RtcRtpSender>,
+    sender: &mut Option<RtcRtpSender>,
     track: Option<MediaStreamTrack>,
     stream: Option<&MediaStream>,
-) -> Option<RtcRtpSender> {
-    match (sender, track) {
-        (None, None) => None,
-        (None, Some(track)) => stream.map(|stream| link.add_track(&track, stream)),
-        (Some(sender), track) => {
-            if sender.track().map(|t| t.id()) != track.as_ref().map(|t| t.id()) {
-                let promise = sender.replace_track(track.as_ref());
-                wasm_bindgen_futures::spawn_local(async move {
-                    if let Err(err) = JsFuture::from(promise).await {
-                        log::warn!("replaceTrack failed: {:?}", err);
-                    }
-                });
+) -> SenderChange {
+    match (sender.as_ref(), track) {
+        (None, None) => SenderChange::Unchanged,
+        (None, Some(track)) => match stream {
+            Some(stream) => {
+                *sender = Some(link.add_track(&track, stream));
+                SenderChange::Added
             }
-            Some(sender)
+            None => SenderChange::Unchanged,
+        },
+        (Some(current), track) => {
+            if current.track().map(|t| t.id()) != track.as_ref().map(|t| t.id()) {
+                SenderChange::Replaced(current.replace_track(track.as_ref()))
+            } else {
+                SenderChange::Unchanged
+            }
         }
     }
 }

@@ -4,6 +4,7 @@
 //! to this page. Dropping the capture removes everything and releases all held input.
 
 use crate::layout::{contain_rect, picture_fraction};
+use protocol::pacing::MoveSpacer;
 use protocol::{
     is_release_chord, normalize_position, pad_state_from, DomCode, InputEvent, MouseButton, PadSampler, PadState,
     PointerMode, RelAccumulator, WheelAccumulator,
@@ -19,8 +20,6 @@ use web_sys::{
 
 pub type InputSink = Rc<dyn Fn(Vec<InputEvent>)>;
 
-/// Pointer moves are sent at most this often (coalesced).
-const MOVE_FLUSH_MS: i32 = 16;
 /// Tells the host we are still here, so it can release input if we vanish.
 const HEARTBEAT_MS: i32 = 500;
 
@@ -36,6 +35,107 @@ pub struct InputCapture {
     intervals: Vec<(i32, Closure<dyn FnMut()>)>,
     sink: InputSink,
     mode: PointerMode,
+    moves: Rc<Moves>,
+}
+
+/// Pointer moves, sent as they happen but at most one every `MOVE_MIN_GAP_MS`
+/// (`MoveSpacer`); a move inside the gap waits for one trailing flush. Desktop mode keeps
+/// the newest absolute position, game mode sums relative movement.
+struct Moves {
+    game: bool,
+    sink: InputSink,
+    /// Cleared when the capture ends: nothing is sent after that, above all no move after
+    /// `ReleaseAll`.
+    alive: Cell<bool>,
+    spacer: RefCell<MoveSpacer>,
+    abs: Cell<Option<(u16, u16)>>,
+    rel: RefCell<RelAccumulator>,
+    /// A move arrived since the last send.
+    dirty: Cell<bool>,
+    /// The trailing flush: its timeout and its callback (kept here so it outlives the timer).
+    trailing: Cell<Option<i32>>,
+    trailing_cb: RefCell<Option<Closure<dyn FnMut()>>>,
+}
+
+impl Moves {
+    fn new(game: bool, sink: InputSink) -> Rc<Self> {
+        let moves = Rc::new(Self {
+            game,
+            sink,
+            alive: Cell::new(true),
+            spacer: RefCell::new(MoveSpacer::default()),
+            abs: Cell::new(None),
+            rel: RefCell::new(RelAccumulator::default()),
+            dirty: Cell::new(false),
+            trailing: Cell::new(None),
+            trailing_cb: RefCell::new(None),
+        });
+        let weak = Rc::downgrade(&moves);
+        let flush = Closure::wrap(Box::new(move || {
+            if let Some(moves) = weak.upgrade() {
+                moves.trailing.set(None);
+                moves.try_send();
+            }
+        }) as Box<dyn FnMut()>);
+        *moves.trailing_cb.borrow_mut() = Some(flush);
+        moves
+    }
+
+    /// The viewer moved: send now if the gap allows, otherwise once it ends.
+    fn moved(&self) {
+        self.dirty.set(true);
+        self.try_send();
+    }
+
+    fn try_send(&self) {
+        if !self.alive.get() || !self.dirty.get() {
+            return;
+        }
+        match self.spacer.borrow_mut().try_send(js_sys::Date::now()) {
+            Ok(()) => {
+                let events = self.take();
+                if !events.is_empty() {
+                    (self.sink)(events);
+                }
+            }
+            Err(wait_ms) => self.schedule(wait_ms),
+        }
+    }
+
+    /// What is waiting, as events (whole pixels only in game mode; fractions stay).
+    fn take(&self) -> Vec<InputEvent> {
+        self.dirty.set(false);
+        if self.game {
+            let mut rel = self.rel.borrow_mut();
+            std::iter::from_fn(|| rel.take()).map(|(dx, dy)| InputEvent::PointerRel { dx, dy }).collect()
+        } else {
+            self.abs.take().map(|(x, y)| InputEvent::PointerAbs { x, y }).into_iter().collect()
+        }
+    }
+
+    fn schedule(&self, wait_ms: f64) {
+        if self.trailing.get().is_some() {
+            return;
+        }
+        let (Some(win), Some(cb)) = (window(), self.trailing_cb.borrow().as_ref().map(|cb| cb.as_ref().clone())) else {
+            return;
+        };
+        let ms = wait_ms.ceil().clamp(1.0, 1000.0) as i32;
+        if let Ok(handle) = win.set_timeout_with_callback_and_timeout_and_arguments_0(cb.unchecked_ref(), ms) {
+            self.trailing.set(Some(handle));
+        }
+    }
+
+    /// Stop for good: cancel the trailing flush and forget what waits.
+    fn shut(&self) {
+        self.alive.set(false);
+        if let (Some(handle), Some(win)) = (self.trailing.take(), window()) {
+            win.clear_timeout_with_handle(handle);
+        }
+        self.dirty.set(false);
+        self.abs.set(None);
+        *self.rel.borrow_mut() = RelAccumulator::default();
+    }
 }
 
 impl InputCapture {
@@ -54,7 +154,8 @@ impl InputCapture {
         let win = window().ok_or("no window")?;
         let doc = win.document().ok_or("no document")?;
         let game = mode == PointerMode::Game;
-        let mut capture = Self { listeners: Vec::new(), intervals: Vec::new(), sink: sink.clone(), mode };
+        let moves = Moves::new(game, sink.clone());
+        let mut capture = Self { listeners: Vec::new(), intervals: Vec::new(), sink: sink.clone(), mode, moves: moves.clone() };
 
         let position: Rc<dyn Fn(&MouseEvent) -> (u16, u16)> = {
             let (surface, video) = (surface.clone(), video.clone());
@@ -65,7 +166,6 @@ impl InputCapture {
                 normalize_position(fx, fy)
             })
         };
-        let pending_move: Rc<Cell<Option<(u16, u16)>>> = Rc::new(Cell::new(None));
         let release = {
             let on_release = on_release.clone();
             // Never tear the capture down from inside one of its own listeners.
@@ -75,23 +175,24 @@ impl InputCapture {
             })
         };
 
-        // Game mode: movement while the pointer is locked, summed between sends.
-        let pending_rel = Rc::new(RefCell::new(RelAccumulator::default()));
+        // Desktop mode: the newest position over the picture. Game mode: movement while the
+        // pointer is locked, summed between sends.
         let target: EventTarget = surface.clone().into();
         {
-            let (position, pending, rel) = (position.clone(), pending_move.clone(), pending_rel.clone());
+            let (position, moves) = (position.clone(), moves.clone());
             capture.listen(&target, "pointermove", false, move |ev| {
                 if let Some(ev) = ev.dyn_ref::<MouseEvent>() {
                     if game {
-                        rel.borrow_mut().add(ev.movement_x() as f64, ev.movement_y() as f64);
+                        moves.rel.borrow_mut().add(ev.movement_x() as f64, ev.movement_y() as f64);
                     } else {
-                        pending.set(Some(position(ev)));
+                        moves.abs.set(Some(position(ev)));
                     }
+                    moves.moved();
                 }
             })?;
         }
         for (kind, down) in [("pointerdown", true), ("pointerup", false)] {
-            let (position, pending, sink, surface) = (position.clone(), pending_move.clone(), sink.clone(), surface.clone());
+            let (position, moves, sink, surface) = (position.clone(), moves.clone(), sink.clone(), surface.clone());
             capture.listen(&target, kind, false, move |ev| {
                 ev.prevent_default();
                 let Some(mouse) = ev.dyn_ref::<MouseEvent>() else {
@@ -103,13 +204,19 @@ impl InputCapture {
                 let Some(button) = MouseButton::from_dom(mouse.button()) else {
                     return;
                 };
-                pending.set(None);
+                // Desktop: the click carries its own position, so a waiting move is moot.
+                // Game: movement so far goes first, so the click lands where the viewer aimed.
+                let mut events = moves.take();
+                if !game {
+                    events.clear();
+                }
                 let at = (!game).then(|| position(mouse));
-                sink(vec![InputEvent::Button { button, down, at }]);
+                events.push(InputEvent::Button { button, down, at });
+                sink(events);
             })?;
         }
         {
-            let (position, sink) = (position.clone(), sink.clone());
+            let (position, sink, moves) = (position.clone(), sink.clone(), moves.clone());
             let wheel = Rc::new(RefCell::new(WheelAccumulator::default()));
             capture.listen(&target, "wheel", false, move |ev| {
                 ev.prevent_default();
@@ -120,7 +227,10 @@ impl InputCapture {
                 acc.push(wheel_ev.delta_x(), wheel_ev.delta_y(), wheel_ev.delta_mode());
                 if let Some((dx, dy)) = acc.take() {
                     let at = (!game).then(|| position(wheel_ev));
-                    sink(vec![InputEvent::Wheel { dx, dy, at }]);
+                    // Game: movement so far goes first, as for clicks.
+                    let mut events = if game { moves.take() } else { Vec::new() };
+                    events.push(InputEvent::Wheel { dx, dy, at });
+                    sink(events);
                 }
             })?;
         }
@@ -168,21 +278,6 @@ impl InputCapture {
         // Closing the tab mid-control would leave the host's keys to the watchdog: ask first.
         capture.listen(&win_target, "beforeunload", false, |ev| ev.prevent_default())?;
 
-        {
-            let (pending, rel, sink) = (pending_move.clone(), pending_rel.clone(), sink.clone());
-            capture.every(MOVE_FLUSH_MS, move || {
-                if let Some((x, y)) = pending.take() {
-                    sink(vec![InputEvent::PointerAbs { x, y }]);
-                }
-                let mut moves = Vec::new();
-                while let Some((dx, dy)) = rel.borrow_mut().take() {
-                    moves.push(InputEvent::PointerRel { dx, dy });
-                }
-                if !moves.is_empty() {
-                    sink(moves);
-                }
-            })?;
-        }
         if game {
             // Losing the lock (Esc, switching windows) ends control, like in a game.
             let surface_el: web_sys::Element = surface.clone().into();
@@ -237,6 +332,8 @@ impl InputCapture {
 
 impl Drop for InputCapture {
     fn drop(&mut self) {
+        // First: no move may follow the `ReleaseAll` below.
+        self.moves.shut();
         for l in self.listeners.drain(..) {
             let _ = l.target.remove_event_listener_with_callback_and_bool(l.kind, l.callback.as_ref().unchecked_ref(), l.capture);
         }

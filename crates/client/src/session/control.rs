@@ -4,13 +4,19 @@
 //! `InputGate` drops anything a member has no right to, and what passes goes to the local
 //! `dchat-host` app. Viewer side: requests, grants and sealed input packets over the two
 //! input channels of the direct link. Nothing is relayed and nothing is stored.
+//!
+//! What passes the gate goes through an `AgentPacer` on its way to the app: positions and
+//! controller states are coalesced to stay within dchat-host's message budget, while
+//! clicks and keys go at once. Control never changes the shared video: its quality is the
+//! sharer's preset (`quality.rs`).
 
 use super::RoomSession;
 use leptos::{SignalSet, SignalUpdate};
 use crate::agent::{AgentEvent, AgentLink};
-use crate::media::{self, ScreenInfo};
+use crate::media::ScreenInfo;
 use crate::names::pubkey_tag;
 use crate::state::{ControlOfferUi, ControlPromptUi, ControlUi, MyControlUi};
+use protocol::pacing::{AgentFrame, AgentPacer};
 use protocol::{
     open_input, seal_input, ControlEnd, ControlRights, ControlState, ControlWants, InputBudget, InputEvent, InputGate,
     InputLane, PointerMode, RightsChange, RoomBody, RoomEnvelope, TabToAgent, VideoKind, MAX_EVENTS_PER_PACKET,
@@ -19,6 +25,8 @@ use protocol::{
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
 
 #[derive(Default)]
 pub(super) struct Control {
@@ -35,6 +43,10 @@ pub(super) struct Control {
     who: RefCell<HashMap<String, u32>>,
     next_who: Cell<u32>,
     modes: RefCell<HashMap<String, PointerMode>>,
+    /// Keeps what goes to the app within its message budget.
+    pacer: RefCell<AgentPacer>,
+    /// The pacer's next poll is scheduled.
+    pacer_timer: Cell<bool>,
     // Everyone.
     /// Latest `ControlStatus` of each sharer, replayed to new neighbors.
     pub(super) envelopes: RefCell<HashMap<String, RoomEnvelope>>,
@@ -211,6 +223,8 @@ impl RoomSession {
             if !change.rights.any() {
                 control.gate.borrow_mut().forget(&change.member);
                 control.budgets.borrow_mut().remove(&change.member);
+                let who = self.who_of(&change.member);
+                control.pacer.borrow_mut().forget(who);
             }
         }
         self.publish_control_status();
@@ -281,18 +295,60 @@ impl RoomSession {
         let admitted = control.gate.borrow_mut().admit(from, lane, seq, events, &control.state.borrow());
         for ev in &admitted {
             if let InputEvent::Mode { mode } = ev {
+                // dchat-host needs the mode; the video stays on the sharer's preset.
                 control.modes.borrow_mut().insert(from.to_string(), *mode);
                 let rights = control.state.borrow().rights_of(from);
                 self.send_agent_control(from, rights);
-                if let Some(track) = self.local_track("video") {
-                    let game = *mode == PointerMode::Game;
-                    media::set_content_hint(&track, if game { "motion" } else { "detail" });
-                    media::set_frame_rate(&track, if game { 60 } else { 30 });
-                }
             }
         }
+        if admitted.is_empty() {
+            return;
+        }
+        // Without the app there is nowhere to send input: drop it, as the app would.
+        if self.agent().is_none() {
+            return;
+        }
+        let who = self.who_of(from);
+        let frames = control.pacer.borrow_mut().push(who, admitted, now);
+        self.send_agent_frames(frames);
+        self.schedule_pacer_poll();
+    }
+
+    fn send_agent_frames(&self, frames: Vec<AgentFrame>) {
+        if frames.is_empty() {
+            return;
+        }
         if let Some(agent) = self.agent() {
-            agent.send_input(self.who_of(from), admitted);
+            for (who, events) in frames {
+                agent.send_input(who, events);
+            }
+        }
+    }
+
+    /// One timer at a time sends what the pacer held back, as soon as its budget allows.
+    fn schedule_pacer_poll(&self) {
+        let control = &self.inner.control;
+        if control.pacer_timer.get() || self.inner.closed.get() {
+            return;
+        }
+        let Some(wait_ms) = control.pacer.borrow().next_poll_in(js_sys::Date::now()) else {
+            return;
+        };
+        let Some(win) = web_sys::window() else {
+            return;
+        };
+        let s = self.clone();
+        // Dropped by wasm-bindgen once it has run: the timeout is never cleared.
+        let poll = Closure::once_into_js(move || {
+            let control = &s.inner.control;
+            control.pacer_timer.set(false);
+            let frames = control.pacer.borrow_mut().poll(js_sys::Date::now());
+            s.send_agent_frames(frames);
+            s.schedule_pacer_poll();
+        });
+        let ms = wait_ms.ceil().clamp(0.0, 1000.0) as i32;
+        if win.set_timeout_with_callback_and_timeout_and_arguments_0(poll.unchecked_ref(), ms).is_ok() {
+            control.pacer_timer.set(true);
         }
     }
 
@@ -437,8 +493,16 @@ impl RoomSession {
         let Some(link) = self.link(sharer).filter(|l| l.is_open()) else {
             return;
         };
-        let (events_lane, state_lane): (Vec<_>, Vec<_>) = events.into_iter().partition(|ev| ev.lane() == InputLane::Events);
-        for (lane, batch) in [(InputLane::Events, events_lane), (InputLane::State, state_lane)] {
+        // Consecutive events of one lane share packets, and the runs go out in order: a move
+        // sent before a click leaves first.
+        let mut runs: Vec<(InputLane, Vec<InputEvent>)> = Vec::new();
+        for ev in events {
+            match runs.last_mut() {
+                Some((lane, run)) if *lane == ev.lane() => run.push(ev),
+                _ => runs.push((ev.lane(), vec![ev])),
+            }
+        }
+        for (lane, batch) in runs {
             for chunk in batch.chunks(MAX_EVENTS_PER_PACKET) {
                 let seq = {
                     let mut seqs = self.inner.control.seqs.borrow_mut();

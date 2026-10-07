@@ -6,11 +6,15 @@ pub mod input;
 pub mod keycodes;
 pub mod messages;
 pub mod nostr;
+pub mod pacing;
 pub mod password;
 pub mod relays;
 pub mod room;
 pub mod version;
+pub mod video;
 
+// `pacing` and `video` are used by path (`protocol::video::Hint`): names like `Hint` and
+// `Degradation` are too generic to export at the crate root.
 pub use agent::*;
 pub use control::*;
 pub use crypto::*;

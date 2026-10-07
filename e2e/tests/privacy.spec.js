@@ -159,9 +159,14 @@ test('nothing typed is kept by the browser, and spell checking can be turned off
   await ana.page.goto('/');
   // Form autofill would save names and relay addresses to disk.
   await expect(ana.page.locator('form.lobby-card')).toHaveAttribute('autocomplete', 'off');
-  for (const id of ['#name-input', '#password-input', '#cap-input']) {
+  for (const id of ['#name-input', '#cap-input']) {
     await expect(ana.page.locator(id)).toHaveAttribute('autocomplete', 'off');
   }
+  // Chromium ignores "off" on password boxes: the opt-in box asks for a new password, which
+  // browsers never fill with a saved one.
+  await expect(ana.page.locator('#password-input')).toHaveCount(0);
+  await ana.page.locator('#password-checkbox').check();
+  await expect(ana.page.locator('#password-input')).toHaveAttribute('autocomplete', 'new-password');
 
   const invite = inviteFrom(await createRoom(ana.page, { name: 'Ana' }));
   await joinRoom(bo.page, invite, 'Bo');

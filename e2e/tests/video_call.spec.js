@@ -1,5 +1,7 @@
 import { test, expect } from '@playwright/test';
-import { expectVideoFrames, joinVoice, sentTracks, twoMembers, videoTile, voiceChip } from './helpers.js';
+import {
+  expectVideoFrames, joinVoice, sentTracks, twoMembers, videoSenderParams, videoTile, voiceChip,
+} from './helpers.js';
 
 /** The video grid never scrolls and every tile lies inside it. */
 async function expectGridFits(page) {
@@ -63,6 +65,31 @@ test('lounge video: camera tiles, camera flip keeps the mic, camera off, leave h
   await bo.page.locator('#leave-voice-btn').click();
   await expect(bo.page.locator('#video-grid')).toHaveCount(0);
   await expect(ana.page.locator('#video-grid')).toHaveCount(0, { timeout: 10000 });
+
+  await ana.context.close();
+  await bo.context.close();
+});
+
+test('camera HD: flipping the camera keeps 1280×720 and the HD encoder settings', async ({ browser }) => {
+  test.setTimeout(90000);
+  const [ana, bo] = await twoMembers(browser);
+  await ana.page.locator('#audio-settings-btn').click();
+  await ana.page.locator('#camera-preset-hd').check();
+  await ana.page.locator('.modal-content button:has-text("Close")').click();
+  await joinVoice(ana.page);
+  await joinVoice(bo.page);
+
+  await ana.page.locator('#camera-btn').click();
+  await expectVideoFrames(bo.page, 'Ana');
+  const hd = (p) => p && { width: p.width, height: p.height, maxFramerate: p.maxFramerate, degradationPreference: p.degradationPreference };
+  const expected = { width: 1280, height: 720, maxFramerate: 30, degradationPreference: 'balanced' };
+  await expect.poll(async () => (await videoSenderParams(ana.page)).map(hd), { timeout: 15000 }).toEqual([expected]);
+
+  const before = (await sentTracks(ana.page, 'video'))[0];
+  await ana.page.locator('#flip-camera-btn').click();
+  await expect.poll(async () => (await sentTracks(ana.page, 'video'))[0]?.id, { timeout: 10000 }).not.toBe(before.id);
+  await expect.poll(async () => (await videoSenderParams(ana.page)).map(hd), { timeout: 15000 }).toEqual([expected]);
+  await expectVideoFrames(bo.page, 'Ana');
 
   await ana.context.close();
   await bo.context.close();

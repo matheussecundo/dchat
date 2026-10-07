@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { inboundAudioBytes, joinVoice, twoMembers } from './helpers.js';
+import { inboundAudioBytes, joinVoice, twoMembers, waitForSenderAudio } from './helpers.js';
 
 // The mic track Ana currently sends on her only link.
 const senderAudio = (page) => page.evaluate(() => {
@@ -9,14 +9,6 @@ const senderAudio = (page) => page.evaluate(() => {
   const { noiseSuppression, echoCancellation, autoGainControl } = track.getSettings();
   return { id: track.id, enabled: track.enabled, readyState: track.readyState, noiseSuppression, echoCancellation, autoGainControl };
 });
-
-const waitForSenderAudio = (page, expected) => page.waitForFunction((exp) => {
-  const pc = window.__pcs.find((p) => p.connectionState === 'connected');
-  const track = pc?.getSenders().find((s) => s.track?.kind === 'audio')?.track;
-  if (!track || track.readyState !== 'live') return false;
-  const settings = track.getSettings();
-  return Object.entries(exp).every(([k, v]) => settings[k] === v);
-}, expected, { timeout: 10000 });
 
 test('audio processing checkboxes default on, apply live in voice, carry over, and reset on reload', async ({ browser }) => {
   test.setTimeout(90000);

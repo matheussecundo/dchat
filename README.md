@@ -87,6 +87,9 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 9. **Phase 9: Remote Control (Completed)**
    - Members you allow can control your mouse and keyboard (one at a time, desktop or game mode) and play with game controllers (up to four) while you share your screen, through the `dchat-host` companion app for Linux and Windows. Downloads are published per release with checksums.
 
+10. **Phase 10: Low-Latency Video with Quality Presets (Completed)**
+   - Pick how your camera and screen share look to everyone: from **Fastest** (720p, 60 fps, lowest latency) to **Text** (full resolution, 15 fps, crisp and light). Video no longer waits for voice lip sync, pointer moves are sent at once, and an ⓘ panel on each tile shows what the connection is doing.
+
 ---
 
 ## Group Rooms
@@ -100,7 +103,7 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 
 Every room message is signed with its author's session key, so a member relaying it cannot alter it or forge messages from someone else.
 
-**Room passwords**: optionally set a password when creating a room. Joining then needs the link *and* the password (share it separately, for example by voice), so a leaked link alone doesn't open the room. The link only carries a salt (`pw=`), never the password. A wrong password shows no error: you just find nobody. The room shows 🔒 *Password*.
+**Room passwords**: optionally set a password when creating a room: tick **Protect with a password** first (it is off by default, and the box asks for a new password, so the browser never fills in one it saved). Joining then needs the link *and* the password (share it separately, for example by voice), so a leaked link alone doesn't open the room. The link only carries a salt (`pw=`), never the password. A wrong password shows no error: you just find nobody. The room shows 🔒 *Password*.
 
 **Privacy**: tick *Hide members' IP addresses from each other* when creating a room and every member connects through a TURN server, so nobody in the room learns anyone's IP address (the room shows 🛡️ *IPs hidden*). It needs a TURN server from the host or the link. [`docs/PRIVACY.md`](./docs/PRIVACY.md) explains what members, relays and servers can see, and lists possible improvements.
 
@@ -120,10 +123,24 @@ Every room message is signed with its author's session key, so a member relaying
 
 Each room has one drop-in voice lounge. Nobody is rung:
 - Tap **🔊 Join Voice** to enter. Members outside voice see a short *"Ana joined voice"* prompt with a **Join** button.
-- Inside, the controls are 🎙️ mic mute, 🔊 speaker mute (local only), 📹 camera (🔄 flips front/rear), 🖥️ screen share, ⚙️ audio processing and **📴 Leave**.
+- Inside, the controls are 🎙️ mic mute, 🔊 speaker mute (local only), 📹 camera (🔄 flips front/rear, or moves to the next camera once you picked one), 🖥️ screen share, ⚙️ settings and **📴 Leave**.
+- **Devices**: ⚙️ settings → *Devices* picks the microphone, speaker and camera (default: the system's), in or out of voice; a change applies at once. Choices stay in memory only. Device names show once the browser may use the microphone or camera; Safari can't choose speakers, and Firefox offers its own *Choose speaker…* dialog.
 - Camera and screen share are one video source at a time; switching between them reuses the same connection.
 - Members with video appear in a grid (⛶ for fullscreen). Whoever is talking gets a green ring, measured locally from the audio level.
 - Audio and video only flow between members who are in the lounge, directly peer-to-peer (DTLS-SRTP). A member you only reach `via` someone else is shown with ⚠: you can't hear or see each other without a direct link (see NAT below).
+- **Video quality**: ⚙️ settings, or the **▾** next to 📹 and 🖥️, picks one preset for the camera and one for screen sharing. Everyone watching gets the same quality; you can change it while sending.
+
+  | Screen share | | Camera | |
+  |---|---|---|---|
+  | **Fastest** | 720p, 60 fps: lowest latency, softens under load | **Smooth 60** | 720p, 60 fps (30 if the camera can't) |
+  | **Smooth** | 1080p, 60 fps: keeps 60 fps, softens under load | **Balanced** (default) | 480p, 30 fps |
+  | **Balanced** (default) | 1080p, 30 fps: crisp, lighter than Sharp | **HD** | 720p, 30 fps |
+  | **Sharp** | full resolution, 30 fps: crisp text, fps may drop | **Full HD** | 1080p, 30 fps |
+  | **Text** | full resolution, 15 fps: lowest bandwidth | **Data saver** | 360p, 15 fps |
+
+  For games and remote control pick **Fastest** or **Smooth**; for code and documents **Sharp** or **Text**. Each viewer gets their own copy (every link has its own encoder), so higher presets cost upload and CPU per viewer; dchat uses a hardware encoder when the browser reports one. Settings live in memory only and reset on reload.
+- **ⓘ on a video tile** shows live connection stats: resolution, frame rate, bitrate, round trip, buffering, decoding and an estimated latency (a lower bound: capture and display time aren't measurable). On your own tile it lists what each viewer gets and what limits it (CPU or bandwidth). Nothing is stored and no addresses are shown.
+- Video is not held back to match the voice's buffer (that would delay screen shares); camera tiles are re-aligned with the voice on the viewer's side.
 - **Voice limit** (default 8) and **video limit** (default 6) are set when creating the room. When the lounge is full, **Join Voice** is disabled; if two people race for the last seat, the one who joined last is moved out, using the same rule as the member limit. The limits apply to admins too.
 
 ### Sharing Files
@@ -146,7 +163,7 @@ While you share your **entire screen** in the lounge, you can let someone else u
 3. **Others ask, you decide**: members watching your screen see **🖱️ Request control** on your tile. You get a prompt with **Allow** / **Deny**. One person at a time has mouse and keyboard; allowing someone new takes it from the previous one.
 4. **Controlling**: click the shared screen to start. Your pointer, clicks, wheel and keys go to the shared computer (keys by position, so the shared computer's keyboard layout applies). **Ctrl+Alt+Shift+Q**, leaving the tab or **Stop controlling** gives control back.
    - **Desktop mode** (default): you click where you point.
-   - **Game mode** (the 🎮 button on the tile): your mouse is captured and moves the view, as games expect, and the shared video favours smooth motion. Press Esc (or Ctrl+Alt+Shift+Q) to get your mouse back. In fullscreen, Chrome also passes keys like Esc and Alt+Tab to the shared computer; hold Esc to leave.
+   - **Game mode** (the 🎮 button on the tile): your mouse is captured and moves the view, as games expect. The video quality stays whatever the sharer picked: for games, the sharer should choose **Fastest** or **Smooth**. Press Esc (or Ctrl+Alt+Shift+Q) to get your mouse back. In fullscreen, Chrome also passes keys like Esc and Alt+Tab to the shared computer; hold Esc to leave.
 5. **Controllers**: members can also tap **🎮 Request controller**. Each person you allow gets their own virtual Xbox 360 controller on your computer, P1 to P4, so up to four can play at once (one of them may also have mouse and keyboard). Their browser sends whatever "standard" controller they have connected; if nothing happens, they press a button on it once (browsers only show a controller after that). No rumble yet.
 6. **Stopping**: **Ctrl+Alt+Shift+Q** anywhere on the shared computer (Windows and X11 desktops), **⛔ Stop control** in the lounge bar, the **✕** next to a member, or Enter / Ctrl+C in dchat-host's terminal. Control also ends when you stop sharing, leave voice, or the app disconnects, and everything held down is released.
 

@@ -30,7 +30,11 @@ export async function createRoom(page, { name, max, voiceCap, videoCap, hideIp, 
   await page.locator('#create-room-btn').waitFor();
   if (name !== undefined) await page.locator('#name-input').fill(name);
   if (hideIp) await page.locator('#hide-ip-checkbox').check();
-  if (password !== undefined) await page.locator('#password-input').fill(password);
+  if (password !== undefined) {
+    // Password rooms are opt-in: the box appears once this is ticked.
+    await page.locator('#password-checkbox').check();
+    await page.locator('#password-input').fill(password);
+  }
   if (max !== undefined) await page.locator('#cap-input').fill(String(max));
   if (voiceCap !== undefined) await page.locator('#voice-cap-input').fill(String(voiceCap));
   if (videoCap !== undefined) await page.locator('#video-cap-input').fill(String(videoCap));
@@ -127,6 +131,277 @@ export async function expectVideoFrames(page, name) {
   await expect.poll(() => tile.locator('video').evaluate((v) => v.videoWidth), { timeout: 15000 }).toBeGreaterThan(0);
 }
 
+/** Wait until the mic track `page` sends on its first open link has the `expected` settings. */
+export const waitForSenderAudio = (page, expected) => page.waitForFunction((exp) => {
+  const pc = window.__pcs.find((p) => p.connectionState === 'connected');
+  const track = pc?.getSenders().find((s) => s.track?.kind === 'audio')?.track;
+  if (!track || track.readyState !== 'live') return false;
+  const settings = track.getSettings();
+  return Object.entries(exp).every(([k, v]) => settings[k] === v);
+}, expected, { timeout: 10000 });
+
+/**
+ * The video sender of every open link of `page`: its first encoding, the top-level
+ * `degradationPreference`, the codec chosen in `encodings[0].codec` and the track's hint and
+ * size. Keys the page left to the browser read `null`. The sender may have no track (video
+ * stopped): it is found through its transceiver, whose receiver is always a video one.
+ */
+export async function videoSenderParams(page) {
+  return page.evaluate(() => window.__pcs
+    .filter((pc) => pc.connectionState === 'connected')
+    .map((pc) => {
+      const video = pc.getTransceivers()
+        .filter((t) => !t.stopped && t.receiver.track?.kind === 'video' && /send/.test(t.direction));
+      const transceiver = video.find((t) => t.sender.track) || video[0];
+      if (!transceiver) return null;
+      const params = transceiver.sender.getParameters();
+      const encoding = params.encodings?.[0] || {};
+      const track = transceiver.sender.track;
+      const settings = track ? track.getSettings() : {};
+      return {
+        hasTrack: Boolean(track),
+        maxBitrate: encoding.maxBitrate ?? null,
+        maxFramerate: encoding.maxFramerate ?? null,
+        scaleResolutionDownBy: encoding.scaleResolutionDownBy ?? null,
+        codec: encoding.codec?.mimeType ?? null,
+        degradationPreference: params.degradationPreference ?? null,
+        contentHint: track ? track.contentHint : null,
+        width: settings.width ?? null,
+        height: settings.height ?? null,
+      };
+    }));
+}
+
+/** `type: kind` RTP stats (`inbound-rtp` / `outbound-rtp`) of video on every open link, with the codec's mimeType. */
+export async function videoRtpStats(page, type) {
+  return page.evaluate(async (t) => {
+    const out = [];
+    for (const pc of window.__pcs.filter((p) => p.connectionState === 'connected')) {
+      const report = await pc.getStats();
+      const entries = [...report.values()];
+      const rtp = entries
+        .filter((r) => r.type === t && r.kind === 'video')
+        .sort((a, b) => (b.bytesReceived ?? b.bytesSent ?? 0) - (a.bytesReceived ?? a.bytesSent ?? 0))[0];
+      if (!rtp) {
+        out.push(null);
+        continue;
+      }
+      out.push({
+        frameWidth: rtp.frameWidth ?? null,
+        frameHeight: rtp.frameHeight ?? null,
+        framesPerSecond: rtp.framesPerSecond ?? null,
+        bytes: rtp.bytesReceived ?? rtp.bytesSent ?? 0,
+        codec: report.get(rtp.codecId)?.mimeType ?? null,
+        qualityLimitationReason: rtp.qualityLimitationReason ?? null,
+      });
+    }
+    return out;
+  }, type);
+}
+
+/** The `jitterBufferTarget` of the video receiver on every open link (`null` when unset). */
+export async function videoJitterTargets(page) {
+  return page.evaluate(() => window.__pcs
+    .filter((pc) => pc.connectionState === 'connected')
+    .map((pc) => {
+      const receiving = pc.getTransceivers()
+        .filter((t) => !t.stopped && t.receiver.track?.kind === 'video' && /recv/.test(t.currentDirection || t.direction));
+      if (!receiving.length) return undefined;
+      return receiving[0].receiver.jitterBufferTarget;
+    }));
+}
+
+/** Layout of the time code `TIMESTAMP_SCREEN` paints (source pixels of the 1920×1080 canvas). */
+const STAMP_LAYOUT = { width: 1920, height: 1080, x0: 80, y0: 80, cell: 80, cols: 16, rows: 6 };
+
+/**
+ * Paints the time code (runs in the page, see `TIMESTAMP_SCREEN`). Rows of 16 cells, black
+ * for 0 and white for 1, most significant bit first: the paint time's low 32 bits in whole ms
+ * (two rows), the same two rows inverted, a 16-bit frame counter and the counter inverted.
+ */
+function installTimestampScreen(L) {
+  navigator.mediaDevices.getDisplayMedia = async () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = L.width;
+    canvas.height = L.height;
+    const ctx = canvas.getContext('2d', { alpha: false });
+    let counter = 0;
+    let lastPaint = -Infinity;
+    const paint = () => {
+      const stamp = Math.floor(performance.timeOrigin + performance.now()) % 4294967296;
+      counter = (counter + 1) & 0xffff;
+      ctx.fillStyle = '#404040';
+      ctx.fillRect(0, 0, L.width, L.height);
+      // A moving bar, so the picture is never entirely still.
+      ctx.fillStyle = '#2a6f97';
+      ctx.fillRect((counter * 8) % L.width, L.height - 120, 160, 80);
+      const rows = [stamp >>> 16, stamp & 0xffff, ~(stamp >>> 16) & 0xffff, ~stamp & 0xffff, counter, ~counter & 0xffff];
+      rows.forEach((bits, r) => {
+        for (let c = 0; c < L.cols; c += 1) {
+          ctx.fillStyle = (bits >> (L.cols - 1 - c)) & 1 ? '#ffffff' : '#000000';
+          ctx.fillRect(L.x0 + c * L.cell, L.y0 + r * L.cell, L.cell, L.cell);
+        }
+      });
+      lastPaint = performance.now();
+      window.__stampPaints = (window.__stampPaints || 0) + 1;
+    };
+    // Every animation frame; a 60 Hz timer stands in while animation frames don't run.
+    const onFrame = () => {
+      paint();
+      requestAnimationFrame(onFrame);
+    };
+    requestAnimationFrame(onFrame);
+    setInterval(() => {
+      if (performance.now() - lastPaint > 1000 / 30) paint();
+    }, 1000 / 60);
+    paint();
+    const stream = canvas.captureStream(60);
+    const track = stream.getVideoTracks()[0];
+    const settings = track.getSettings.bind(track);
+    track.getSettings = () => ({ ...settings(), displaySurface: 'monitor' });
+    return stream;
+  };
+}
+
+/**
+ * Init script: screen sharing returns a real 1920×1080 canvas captured at 60 fps, repainted
+ * on every animation frame with its paint time as a time code (`startStampDecoder` reads it).
+ * Only `displaySurface: 'monitor'` is added to `getSettings()`: the size is the canvas's own.
+ */
+export const TIMESTAMP_SCREEN = `(${installTimestampScreen.toString()})(${JSON.stringify(STAMP_LAYOUT)});`;
+
+/**
+ * In a viewer's page: decode the time code of every frame `selector` (a tile `<video>`)
+ * presents and record its latency (`window.__stamps`): when the frame is shown
+ * (`expectedDisplayTime` of `requestVideoFrameCallback`, in this page's
+ * `timeOrigin + now` clock) minus when the sharer painted it (the sharer's clock).
+ * Misreads (a cell neither black nor white, a check row that doesn't match) and repeated or
+ * older frames are rejected. Without `requestVideoFrameCallback` callbacks it falls back to
+ * sampling on animation frames (`window.__stamps.mode` says which).
+ */
+export async function startStampDecoder(page, selector) {
+  await page.evaluate(([sel, L]) => {
+    const video = document.querySelector(sel);
+    const state = { mode: 'rvfc', samples: [], rejected: 0, misread: 0, callbacks: 0, lastStamp: -Infinity, lastCounter: null };
+    window.__stamps = state;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const wrap = 4294967296;
+    const read = (shownAt) => {
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (!vw || !vh) return;
+      const sx = vw / L.width;
+      const sy = vh / L.height;
+      const rx = L.x0 * sx;
+      const ry = L.y0 * sy;
+      const rw = Math.max(1, Math.round(L.cols * L.cell * sx));
+      const rh = Math.max(1, Math.round(L.rows * L.cell * sy));
+      if (canvas.width !== rw || canvas.height !== rh) {
+        canvas.width = rw;
+        canvas.height = rh;
+      }
+      ctx.drawImage(video, rx, ry, L.cols * L.cell * sx, L.rows * L.cell * sy, 0, 0, rw, rh);
+      const px = ctx.getImageData(0, 0, rw, rh).data;
+      const cellW = rw / L.cols;
+      const cellH = rh / L.rows;
+      // The middle third of a cell, averaged: 0 (black), 1 (white) or -1 (neither: a misread).
+      const bit = (r, c) => {
+        const cx = Math.floor((c + 0.5) * cellW);
+        const cy = Math.floor((r + 0.5) * cellH);
+        const hx = Math.max(0, Math.floor(cellW / 6));
+        const hy = Math.max(0, Math.floor(cellH / 6));
+        let sum = 0;
+        let n = 0;
+        for (let y = cy - hy; y <= cy + hy; y += 1) {
+          for (let x = cx - hx; x <= cx + hx; x += 1) {
+            const i = (y * rw + x) * 4;
+            sum += px[i] + px[i + 1] + px[i + 2];
+            n += 3;
+          }
+        }
+        const v = sum / n;
+        if (v < 80) return 0;
+        if (v > 175) return 1;
+        return -1;
+      };
+      const rows = [];
+      for (let r = 0; r < L.rows; r += 1) {
+        let value = 0;
+        for (let c = 0; c < L.cols; c += 1) {
+          const b = bit(r, c);
+          if (b < 0) {
+            state.misread += 1;
+            return;
+          }
+          value = value * 2 + b;
+        }
+        rows.push(value);
+      }
+      if ((rows[0] ^ rows[2]) !== 0xffff || (rows[1] ^ rows[3]) !== 0xffff || (rows[4] ^ rows[5]) !== 0xffff) {
+        state.misread += 1;
+        return;
+      }
+      const shown = performance.timeOrigin + shownAt;
+      const low = rows[0] * 65536 + rows[1];
+      // The paint time in full: the 32-bit stamp nearest to (and normally before) `shown`.
+      let behind = (((Math.floor(shown) - low) % wrap) + wrap) % wrap;
+      if (behind > wrap / 2) behind -= wrap;
+      const painted = Math.floor(shown) - behind;
+      const counter = rows[4];
+      const forward = state.lastCounter === null ? 1 : (counter - state.lastCounter + 0x10000) & 0xffff;
+      if (painted <= state.lastStamp || forward === 0 || forward > 0x8000) {
+        state.rejected += 1;
+        return;
+      }
+      state.lastStamp = painted;
+      state.lastCounter = counter;
+      state.samples.push({ at: shown, latency: shown - painted, counter });
+    };
+    const onFrame = (now, metadata) => {
+      state.callbacks += 1;
+      read(metadata && typeof metadata.expectedDisplayTime === 'number' ? metadata.expectedDisplayTime : now);
+      video.requestVideoFrameCallback(onFrame);
+    };
+    if (typeof video.requestVideoFrameCallback === 'function') video.requestVideoFrameCallback(onFrame);
+    setTimeout(() => {
+      if (state.callbacks > 0) return;
+      // No presented-frame callbacks: sample whatever frame shows on each animation frame.
+      state.mode = 'raf';
+      const tick = (now) => {
+        read(now);
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    }, 2000);
+  }, [selector, STAMP_LAYOUT]);
+}
+
+/** What `startStampDecoder` recorded so far. */
+export async function stampResults(page) {
+  return page.evaluate(() => {
+    const { mode, samples, rejected, misread, callbacks } = window.__stamps;
+    return { mode, samples, rejected, misread, callbacks };
+  });
+}
+
+/**
+ * How far `b`'s `timeOrigin + now` clock is ahead of `a`'s, from the best of `rounds`
+ * back-to-back readings (a, b, a). `uncertainty` is half that reading's round trip.
+ */
+export async function clockOffset(a, b, rounds = 12) {
+  const clock = () => performance.timeOrigin + performance.now();
+  let best = null;
+  for (let i = 0; i < rounds; i += 1) {
+    const t0 = await a.evaluate(clock);
+    const tb = await b.evaluate(clock);
+    const t1 = await a.evaluate(clock);
+    const reading = { offset: tb - (t0 + t1) / 2, uncertainty: (t1 - t0) / 2 };
+    if (!best || reading.uncertainty < best.uncertainty) best = reading;
+  }
+  return best;
+}
+
 /** Total audio bytes received on all open links. */
 export async function inboundAudioBytes(page) {
   return page.evaluate(async () => {
@@ -140,10 +415,23 @@ export async function inboundAudioBytes(page) {
   });
 }
 
-/** Two members in a room together (2-member mesh). */
-export async function twoMembers(browser, createOptions = {}) {
+/** Add init scripts to a member's context: each one a script or `[script, arg]`. */
+export async function addInitScripts(member, scripts = []) {
+  for (const script of scripts) {
+    if (Array.isArray(script)) await member.context.addInitScript(script[0], script[1]);
+    else await member.context.addInitScript(script);
+  }
+}
+
+/**
+ * Two members in a room together (2-member mesh). `init.ana` / `init.bo` are init scripts
+ * for each (see `addInitScripts`), added before either page loads.
+ */
+export async function twoMembers(browser, createOptions = {}, init = {}) {
   const ana = await newMember(browser, 'Ana');
   const bo = await newMember(browser, 'Bo');
+  await addInitScripts(ana, init.ana);
+  await addInitScripts(bo, init.bo);
   const invite = inviteFrom(await createRoom(ana.page, { name: 'Ana', ...createOptions }));
   await joinRoom(bo.page, invite, 'Bo');
   await expectDirectMesh(ana.page, ['Ana', 'Bo'], 'Ana');
