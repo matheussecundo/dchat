@@ -10,6 +10,7 @@ mod qr;
 mod remote_input;
 mod session;
 mod state;
+mod stats;
 
 use i18n::{
     detect_browser_language, large_file_warning_desc, t, t_replace_1, update_document_direction,
@@ -17,6 +18,7 @@ use i18n::{
 };
 use leptos::*;
 use names::{pubkey_tag, random_name, sanitize_name, MAX_NAME_CHARS};
+use protocol::video::{CameraPreset, ScreenPreset, VideoPresets};
 use protocol::{
     format_relay_list, parse_cap, password_room_key, split_relay_input, stretch_password, RoomParams, VideoKind,
     DEFAULT_MEMBER_CAP, DEFAULT_VIDEO_CAP, DEFAULT_VOICE_CAP, KEY_LENGTH, REACTIONS, ControlWants, MonitorInfo,
@@ -29,7 +31,7 @@ use std::rc::Rc;
 use session::{RoomSession, SessionSignals};
 use state::{
     admin_url, create_room, current_fragment, format_file_size, host_download_url, fragment_relay_choice, invite_url, read_credentials,
-    AudioSettings, RelayMode,
+    selectable_devices, AudioSettings, DeviceChoice, DeviceEntry, RelayMode, CAMERA_KIND, MIC_KIND, SPEAKER_KIND,
     ChatMessageUi, ConnectionStatus, DmUi, FileOfferInfo, FileTransferStatus, LinkUi,
     LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RekeyTarget, RoomCaps, ControlUi, ControlPromptUi,
 };
@@ -73,6 +75,9 @@ fn App() -> impl IntoView {
     let (hide_ip_input, set_hide_ip_input) = create_signal(false);
     // Typed at creation or on the join screen; cleared once stretched.
     let (password_input, set_password_input) = create_signal(String::new());
+    // Creating a password room is opt-in: the box exists only while this is ticked, so a
+    // password the browser saved earlier is never filled into a new room by itself.
+    let (password_wanted, set_password_wanted) = create_signal(false);
     // Spell checking the message boxes (some browsers' enhanced spell check sends text away).
     let (spellcheck_on, set_spellcheck_on) = create_signal(true);
     // Relay choice: what the link already says, else public; a deployment can pre-fill its
@@ -137,6 +142,21 @@ fn App() -> impl IntoView {
     let (speaking, set_speaking) = create_signal(HashSet::<String>::new());
     let (voice_prompt, set_voice_prompt) = create_signal(Option::<String>::None);
     let (audio_settings, set_audio_settings) = create_signal(AudioSettings::default());
+    // The sharer's video quality presets: RAM only, kept across voice rejoins and rekeys.
+    let (video_presets, set_video_presets) = create_signal(VideoPresets::default());
+    // Microphone, speaker and camera (None: the system default). RAM only, kept across
+    // voice rejoins and rekeys.
+    let (device_choice, set_device_choice) = create_signal(DeviceChoice::default());
+    // What the browser lists, refreshed while the settings are open.
+    let (device_list, set_device_list) = create_signal(Vec::<DeviceEntry>::new());
+    // A speaker picked in the browser's own chooser (Firefox), which it may not list.
+    let (picked_speaker, set_picked_speaker) = create_signal(None::<DeviceEntry>);
+    // Safari can't choose where audio plays.
+    let speaker_supported = media::speaker_selection_supported();
+    // The open ▾ quality menu (camera or screen), placed next to its button.
+    let (quality_menu, set_quality_menu) = create_signal(None::<QualityMenu>);
+    // Mobile browsers can't share a screen: no screen quality controls there.
+    let screen_supported = media::screen_capture_supported();
 
     // Chat extras
     let (typing, set_typing) = create_signal(Vec::<String>::new());
@@ -188,6 +208,7 @@ fn App() -> impl IntoView {
             update_required: set_update_required,
             no_turn: set_no_turn,
             control: set_control,
+            devices: set_device_choice,
         };
         set_room_id_sig.set(room_id.clone());
         match RoomSession::start(room_id, key, my_name.get_value(), signals, migrated, host_ice.get_value()) {
@@ -195,6 +216,10 @@ fn App() -> impl IntoView {
                 session_ref.set_value(Some(session.clone()));
                 session.set_allow_control(allow_control.get_untracked());
                 session.attach_agent(agent_link.get_value());
+                // Before anyone joins voice here (a rekey rejoins right after this returns).
+                session.set_audio_settings(audio_settings.get_untracked());
+                session.set_video_presets(video_presets.get_untracked());
+                session.set_devices(device_choice.get_untracked());
                 set_screen.set(Screen::Room);
                 Some(session)
             }
@@ -262,7 +287,7 @@ fn App() -> impl IntoView {
             video: parse_cap(Some(&video_cap_input.get_untracked()), DEFAULT_VIDEO_CAP),
             history: history_input.get_untracked(),
             hide_ip: hide_ip_input.get_untracked(),
-            password: !password_input.get_untracked().trim().is_empty(),
+            password: password_wanted.get_untracked() && !password_input.get_untracked().trim().is_empty(),
             relays: match (relay_mode.get_untracked(), custom_relays.get_untracked()) {
                 (RelayMode::Public, _) => None,
                 (mode, Some(urls)) => Some(format_relay_list(&urls, mode == RelayMode::CustomWithPublic)),
@@ -461,6 +486,128 @@ fn App() -> impl IntoView {
         set_audio_settings.set(settings);
         with_session(&|s| s.set_audio_settings(settings));
     };
+    // For the video quality pickers (settings modal and the quick menus).
+    let apply_video_presets = move |presets: VideoPresets| {
+        set_video_presets.set(presets);
+        with_session(&|s| s.set_video_presets(presets));
+    };
+    let toggle_quality_menu = move |source: QualitySource, ev: web_sys::MouseEvent| {
+        if quality_menu.with_untracked(|m| m.is_some_and(|m| m.source == source)) {
+            set_quality_menu.set(None);
+            return;
+        }
+        // Delegated events have no useful currentTarget: anchor on the clicked split button.
+        let anchor = ev
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+            .and_then(|el| el.closest(".split-btn").ok().flatten());
+        if let Some(anchor) = anchor {
+            let pos = MenuPos::next_to(&anchor, lang.get_untracked().is_rtl());
+            set_quality_menu.set(Some(QualityMenu { source, pos }));
+            // Keyboard users land on the current choice (Escape closes). Without scrolling:
+            // a scroll of the page would close the menu again.
+            if let Some(selected) =
+                window().and_then(|w| w.document()).and_then(|d| d.query_selector(".quality-menu .quality-option.selected").ok().flatten())
+            {
+                let options = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(&options, &"preventScroll".into(), &true.into());
+                if let Ok(focus) = js_sys::Reflect::get(&selected, &"focus".into()).and_then(|f| f.dyn_into::<js_sys::Function>()) {
+                    let _ = focus.call1(&selected, &options);
+                }
+            }
+        }
+    };
+    let pick_quality = move |presets: VideoPresets| {
+        apply_video_presets(presets);
+        set_quality_menu.set(None);
+    };
+    // The menus belong to the in-voice controls.
+    create_effect(move |_| {
+        if !my_voice.with(|v| v.in_voice) && quality_menu.with_untracked(Option::is_some) {
+            set_quality_menu.set(None);
+        }
+    });
+    {
+        // A press anywhere but the menu (or its button) closes the quick quality menu, and
+        // so does anything that moves its button: scrolling the page, resizing.
+        let close = move || {
+            if quality_menu.with_untracked(Option::is_some) {
+                set_quality_menu.set(None);
+            }
+        };
+        let on_press = wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::Event| {
+            let inside = ev
+                .target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                .is_some_and(|el| el.closest(".quality-menu, .quality-btn").ok().flatten().is_some());
+            if !inside {
+                close();
+            }
+        }) as Box<dyn FnMut(web_sys::Event)>);
+        let on_scroll = wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::Event| {
+            // Only the page and #app carry the lounge bar; the chat or the menu scrolling doesn't.
+            let moves_button = ev
+                .target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                .map_or(true, |el| el.id() == "app" || el.tag_name().eq_ignore_ascii_case("html"));
+            if moves_button {
+                close();
+            }
+        }) as Box<dyn FnMut(web_sys::Event)>);
+        let on_resize = wasm_bindgen::closure::Closure::wrap(Box::new(close) as Box<dyn FnMut()>);
+        if let Some(win) = window() {
+            let _ = win.add_event_listener_with_callback("resize", on_resize.as_ref().unchecked_ref());
+            if let Some(doc) = win.document() {
+                let _ = doc.add_event_listener_with_callback("pointerdown", on_press.as_ref().unchecked_ref());
+                // Scroll events don't bubble: listen in the capture phase to see #app's.
+                let _ = doc.add_event_listener_with_callback_and_bool("scroll", on_scroll.as_ref().unchecked_ref(), true);
+            }
+        }
+        on_press.forget();
+        on_scroll.forget();
+        on_resize.forget();
+    }
+    // ---- Devices --------------------------------------------------------------------------
+    let apply_devices = move |choice: DeviceChoice| {
+        set_device_choice.set(choice.clone());
+        with_session(&|s| s.set_devices(choice.clone()));
+    };
+    let refresh_devices = move || {
+        wasm_bindgen_futures::spawn_local(async move {
+            match media::enumerate_devices().await {
+                Ok(list) => set_device_list.set(list),
+                Err(err) => log::warn!("enumerateDevices failed: {:?}", err),
+            }
+        });
+    };
+    // Firefox lists no speakers until one is picked in its own chooser (from this click).
+    let choose_speaker = move |_| {
+        let picked = media::select_audio_output();
+        wasm_bindgen_futures::spawn_local(async move {
+            match picked.await {
+                Ok(device) if !device.device_id.is_empty() => {
+                    set_picked_speaker.set(Some(device.clone()));
+                    apply_devices(DeviceChoice { speaker: Some(device.device_id), ..device_choice.get_untracked() });
+                    refresh_devices();
+                }
+                Ok(_) => {}
+                Err(err) => log::info!("No speaker picked: {:?}", err),
+            }
+        });
+    };
+    {
+        // Plugged or unplugged while the settings are open: list again (one listener for
+        // the page's lifetime).
+        let on_change = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
+            if show_audio_settings.get_untracked() {
+                refresh_devices();
+            }
+        }) as Box<dyn FnMut()>);
+        if let Some(media_devices) = window().and_then(|w| w.navigator().media_devices().ok()) {
+            let _ = media_devices.add_event_listener_with_callback("devicechange", on_change.as_ref().unchecked_ref());
+        }
+        on_change.forget();
+    }
     let open_audio_settings = move |_| {
         // The modal lives outside the video grid, so it would be hidden in fullscreen.
         if let Some(doc) = window().and_then(|w| w.document()) {
@@ -468,6 +615,7 @@ fn App() -> impl IntoView {
                 doc.exit_fullscreen();
             }
         }
+        refresh_devices();
         set_show_audio_settings.set(true);
     };
     // Fullscreen for the whole video grid or a single tile. Browsers without element
@@ -521,6 +669,9 @@ fn App() -> impl IntoView {
         let on_key = wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::KeyboardEvent| {
             if ev.key() == "Escape" && grid_expanded.get_untracked() {
                 set_grid_expanded.set(false);
+            }
+            if ev.key() == "Escape" && quality_menu.with_untracked(Option::is_some) {
+                set_quality_menu.set(None);
             }
         }) as Box<dyn FnMut(web_sys::KeyboardEvent)>);
         if let Some(doc) = window().and_then(|w| w.document()) {
@@ -866,16 +1017,33 @@ fn App() -> impl IntoView {
                     {move || hide_ip_input.get().then(|| view! {
                         <p class="lobby-hint">{move || t(lang.get(), "hide_ip_hint")}</p>
                     })}
-                    <label class="lobby-label" for="password-input">{move || t(lang.get(), "password_label")}</label>
-                    <input
-                        id="password-input"
-                        class="lobby-input"
-                        type="password"
-                        autocomplete="off"
-                        prop:value=move || password_input.get()
-                        on:input=move |ev| set_password_input.set(event_target_value(&ev))
-                    />
-                    {move || (!password_input.get().trim().is_empty()).then(|| view! {
+                    <label class="lobby-check" for="password-checkbox">
+                        <input
+                            type="checkbox"
+                            id="password-checkbox"
+                            prop:checked=move || password_wanted.get()
+                            on:change=move |ev| {
+                                let wanted = event_target_checked(&ev);
+                                set_password_wanted.set(wanted);
+                                if !wanted {
+                                    set_password_input.set(String::new());
+                                }
+                            }
+                        />
+                        <span>{move || t(lang.get(), "password_checkbox_label")}</span>
+                    </label>
+                    // Chromium ignores autocomplete="off" on password boxes and would fill a
+                    // saved password into every new room; "new-password" makes it never fill one.
+                    {move || password_wanted.get().then(|| view! {
+                        <label class="lobby-label" for="password-input">{move || t(lang.get(), "join_password_label")}</label>
+                        <input
+                            id="password-input"
+                            class="lobby-input"
+                            type="password"
+                            autocomplete="new-password"
+                            prop:value=move || password_input.get()
+                            on:input=move |ev| set_password_input.set(event_target_value(&ev))
+                        />
                         <p class="lobby-hint">{move || t(lang.get(), "password_hint")}</p>
                     })}
                     {move || cap_is_large().then(|| view! {
@@ -899,6 +1067,7 @@ fn App() -> impl IntoView {
                     <p class="lobby-desc">{move || t(lang.get(), "join_desc")}</p>
                     {name_field}
                     {password_room.then(|| view! {
+                        <p class="lobby-hint password-room-hint">{move || t(lang.get(), "join_password_ask")}</p>
                         <label class="lobby-label" for="password-input">{move || t(lang.get(), "join_password_label")}</label>
                         <input
                             id="password-input"
@@ -1174,34 +1343,43 @@ fn App() -> impl IntoView {
                             >
                                 {if mine.speaker_muted { "🔈" } else { "🔊" }}
                             </button>
-                            <button
-                                id="camera-btn"
-                                class=if mine.video == VideoKind::Camera { "btn btn-mute active" } else { "btn btn-mute" }
-                                disabled=move || mine.video == VideoKind::None && video_full()
-                                on:click=move |_| with_session(&|s| s.toggle_camera())
-                                title=move || if mine.video == VideoKind::None && video_full() { t(lang.get(), "video_full_title") } else { t(lang.get(), "title_camera") }
-                            >
-                                "📹"
-                            </button>
+                            <div class="split-btn">
+                                <button
+                                    id="camera-btn"
+                                    class=if mine.video == VideoKind::Camera { "btn btn-mute active" } else { "btn btn-mute" }
+                                    disabled=move || mine.video == VideoKind::None && video_full()
+                                    on:click=move |_| with_session(&|s| s.toggle_camera())
+                                    title=move || if mine.video == VideoKind::None && video_full() { t(lang.get(), "video_full_title") } else { t(lang.get(), "title_camera") }
+                                >
+                                    "📹"
+                                </button>
+                                {quality_button(lang, QualitySource::Camera, quality_menu, toggle_quality_menu)}
+                            </div>
                             {(mine.video == VideoKind::Camera).then(|| view! {
                                 <button
                                     id="flip-camera-btn"
                                     class="btn btn-secondary"
                                     on:click=move |_| with_session(&|s| s.flip_camera())
-                                    title=move || t(lang.get(), "title_flip_camera")
+                                    title=move || {
+                                        let key = if device_choice.with(|d| d.camera.is_some()) { "title_next_camera" } else { "title_flip_camera" };
+                                        t(lang.get(), key)
+                                    }
                                 >
                                     "🔄"
                                 </button>
                             })}
-                            <button
-                                id="screen-btn"
-                                class=if mine.video == VideoKind::Screen { "btn btn-mute active" } else { "btn btn-mute" }
-                                disabled=move || mine.video == VideoKind::None && video_full()
-                                on:click=move |_| with_session(&|s| s.toggle_screen())
-                                title=move || if mine.video == VideoKind::Screen { t(lang.get(), "title_stop_screen") } else { t(lang.get(), "title_screen_share") }
-                            >
-                                "🖥️"
-                            </button>
+                            <div class="split-btn">
+                                <button
+                                    id="screen-btn"
+                                    class=if mine.video == VideoKind::Screen { "btn btn-mute active" } else { "btn btn-mute" }
+                                    disabled=move || mine.video == VideoKind::None && video_full()
+                                    on:click=move |_| with_session(&|s| s.toggle_screen())
+                                    title=move || if mine.video == VideoKind::Screen { t(lang.get(), "title_stop_screen") } else { t(lang.get(), "title_screen_share") }
+                                >
+                                    "🖥️"
+                                </button>
+                                {screen_supported.then(|| quality_button(lang, QualitySource::Screen, quality_menu, toggle_quality_menu))}
+                            </div>
                             {move || show_video_grid.get().then(|| view! {
                                 <button
                                     id="fullscreen-btn"
@@ -1313,7 +1491,7 @@ fn App() -> impl IntoView {
                     <For
                         each=video_members
                         key=|m| (m.pubkey.clone(), m.video)
-                        children=move |m| video_tile(lang, m, lounge, speaking, toggle_fullscreen, control, controlling, names, on_tile_control)
+                        children=move |m| video_tile(lang, m, lounge, speaking, toggle_fullscreen, control, controlling, names, on_tile_control, session_ref)
                     />
                     <button
                         class="btn btn-secondary grid-fullscreen"
@@ -1628,6 +1806,64 @@ fn App() -> impl IntoView {
                                 <h3>{move || t(lang.get(), "settings_title")}</h3>
                                 <button class="btn btn-secondary" on:click=move |_| set_show_audio_settings.set(false)>"✕"</button>
                             </div>
+                            <h4 class="settings-section">{move || t(lang.get(), "settings_devices")}</h4>
+                            <div class="device-pickers">
+                                {device_picker(
+                                    lang,
+                                    "mic-device-select",
+                                    "device_mic_label",
+                                    "device_mic_n",
+                                    Signal::derive(move || device_list.with(|l| selectable_devices(l, MIC_KIND))),
+                                    Signal::derive(move || device_choice.with(|d| d.mic.clone())),
+                                    move |mic| apply_devices(DeviceChoice { mic, ..device_choice.get_untracked() }),
+                                )}
+                                {speaker_supported.then(|| {
+                                    // Listed speakers, plus one picked in the browser's chooser.
+                                    let speakers = Signal::derive(move || {
+                                        let mut list = device_list.with(|l| selectable_devices(l, SPEAKER_KIND));
+                                        if let Some(picked) = picked_speaker.get() {
+                                            if !list.iter().any(|d| d.device_id == picked.device_id) {
+                                                list.push(picked);
+                                            }
+                                        }
+                                        list
+                                    });
+                                    // Firefox lists no speakers until one is picked in its own chooser:
+                                    // offer that (always, where it exists), and the list once there is one.
+                                    let chooser = media::audio_output_chooser_supported();
+                                    let something_to_pick = move || {
+                                        !chooser || speakers.with(|l| !l.is_empty()) || device_choice.with(|d| d.speaker.is_some())
+                                    };
+                                    view! {
+                                        {move || something_to_pick().then(|| device_picker(
+                                            lang,
+                                            "speaker-device-select",
+                                            "device_speaker_label",
+                                            "device_speaker_n",
+                                            speakers,
+                                            Signal::derive(move || device_choice.with(|d| d.speaker.clone())),
+                                            move |speaker| apply_devices(DeviceChoice { speaker, ..device_choice.get_untracked() }),
+                                        ))}
+                                        {chooser.then(|| view! {
+                                            <button id="speaker-choose-btn" type="button" class="btn btn-secondary btn-sm" on:click=choose_speaker>
+                                                {move || t(lang.get(), "btn_choose_speaker")}
+                                            </button>
+                                        })}
+                                    }
+                                })}
+                                {device_picker(
+                                    lang,
+                                    "camera-device-select",
+                                    "device_camera_label",
+                                    "device_camera_n",
+                                    Signal::derive(move || device_list.with(|l| selectable_devices(l, CAMERA_KIND))),
+                                    Signal::derive(move || device_choice.with(|d| d.camera.clone())),
+                                    move |camera| apply_devices(DeviceChoice { camera, ..device_choice.get_untracked() }),
+                                )}
+                                {move || device_list.with(|l| l.iter().any(|d| d.kind != SPEAKER_KIND && d.label.is_empty())).then(|| view! {
+                                    <p class="settings-hint">{move || t(lang.get(), "devices_permission_hint")}</p>
+                                })}
+                            </div>
                             <h4 class="settings-section">{move || t(lang.get(), "settings_audio")}</h4>
                             <div class="audio-options">
                                 {audio_option_row(
@@ -1655,6 +1891,9 @@ fn App() -> impl IntoView {
                                     move |on| apply_audio_settings(AudioSettings { auto_gain_control: on, ..audio_settings.get_untracked() }),
                                 )}
                             </div>
+                            <h4 class="settings-section">{move || t(lang.get(), "settings_video")}</h4>
+                            {preset_group(lang, QualitySource::Camera, video_presets, apply_video_presets)}
+                            {screen_supported.then(|| preset_group(lang, QualitySource::Screen, video_presets, apply_video_presets))}
                             <h4 class="settings-section">{move || t(lang.get(), "settings_typing")}</h4>
                             <div class="audio-options">
                                 {audio_option_row(
@@ -1820,6 +2059,9 @@ fn App() -> impl IntoView {
                     </div>
                 </div>
             })}
+
+            // Quick video quality menu (▾ next to the camera and screen buttons)
+            {move || quality_menu.get().map(|menu| quality_menu_view(lang, menu, video_presets, pick_quality))}
 
             <div id="overlay-layer" class="overlay-layer" node_ref=overlay_ref>
                 <div id="control-prompts" class="control-prompts">
@@ -2021,7 +2263,12 @@ fn video_tile(
     controlling: ReadSignal<Option<String>>,
     names: ReadSignal<HashMap<String, String>>,
     on_control: impl Fn(String, TileControlAction) + Copy + 'static,
+    session: StoredValue<Option<RoomSession>>,
 ) -> impl IntoView {
+    let video_ref = create_node_ref::<leptos::html::Video>();
+    // The ⓘ panel; it polls only while open and stops when it closes or the tile goes.
+    let (stats_open, set_stats_open) = create_signal(false);
+    let pk_stats = member.pubkey.clone();
     let pk_speaking = member.pubkey.clone();
     let pk_mic = member.pubkey.clone();
     let pk_dbl = member.pubkey.clone();
@@ -2078,7 +2325,7 @@ fn video_tile(
             data-control=move || tile_control.get().key()
             on:dblclick=move |_| on_fullscreen(Some(pk_dbl.clone()))
         >
-            <video id=format!("tile-video-{}", member.pubkey) autoplay playsinline muted></video>
+            <video id=format!("tile-video-{}", member.pubkey) node_ref=video_ref autoplay playsinline muted></video>
             {move || has_surface.get().then(|| {
                 let pk = pk_surface.clone();
                 view! {
@@ -2099,13 +2346,33 @@ fn video_tile(
                     </div>
                 }
             })}
-            <button
-                class="tile-fullscreen"
-                title=move || t(lang.get(), "title_fullscreen")
-                on:click=move |_| on_fullscreen(Some(pk_btn.clone()))
-            >
-                "⛶"
-            </button>
+            // Above the control surface (never inside it), so these never reach the shared screen.
+            <div class="tile-actions">
+                <button
+                    class="tile-stats-btn"
+                    class:active=move || stats_open.get()
+                    aria-pressed=move || stats_open.get().to_string()
+                    title=move || t(lang.get(), "title_tile_stats")
+                    on:click=move |_| set_stats_open.update(|open| *open = !*open)
+                    on:dblclick=|ev| ev.stop_propagation()
+                >
+                    "ⓘ"
+                </button>
+                <button
+                    class="tile-fullscreen"
+                    title=move || t(lang.get(), "title_fullscreen")
+                    on:click=move |_| on_fullscreen(Some(pk_btn.clone()))
+                >
+                    "⛶"
+                </button>
+            </div>
+            {move || stats_open.get().then(|| {
+                let video = video_ref.get_untracked().map(|v| {
+                    let el: &web_sys::HtmlVideoElement = &v;
+                    el.clone()
+                });
+                stats::stats_panel(lang, pk_stats.clone(), is_self, session, names, video)
+            })}
             {move || {
                 let pk = pk_bar.clone();
                 let (mode, pad, requested, controllers) = bar_info.get();
@@ -2198,6 +2465,245 @@ fn video_tile(
     }
 }
 
+/// The two video sources with their own quality presets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QualitySource {
+    Camera,
+    Screen,
+}
+
+impl QualitySource {
+    /// For element ids (`camera-preset-hd`, `#screen-quality-btn`, …).
+    fn key(self) -> &'static str {
+        match self {
+            Self::Camera => "camera",
+            Self::Screen => "screen",
+        }
+    }
+
+    fn title_key(self) -> &'static str {
+        match self {
+            Self::Camera => "video_camera_quality",
+            Self::Screen => "video_screen_quality",
+        }
+    }
+
+    fn button_title_key(self) -> &'static str {
+        match self {
+            Self::Camera => "title_camera_quality",
+            Self::Screen => "title_screen_quality",
+        }
+    }
+
+    /// `(id, name key, description key)` of every preset, in ladder order.
+    fn choices(self) -> Vec<(&'static str, &'static str, &'static str)> {
+        match self {
+            Self::Camera => CameraPreset::ALL
+                .into_iter()
+                .map(|p| {
+                    let (name, desc) = camera_preset_keys(p);
+                    (p.id(), name, desc)
+                })
+                .collect(),
+            Self::Screen => ScreenPreset::ALL
+                .into_iter()
+                .map(|p| {
+                    let (name, desc) = screen_preset_keys(p);
+                    (p.id(), name, desc)
+                })
+                .collect(),
+        }
+    }
+
+    /// The id of this source's current preset.
+    fn current(self, presets: VideoPresets) -> &'static str {
+        match self {
+            Self::Camera => presets.camera.id(),
+            Self::Screen => presets.screen.id(),
+        }
+    }
+
+    /// `presets` with this source's preset set to `id` (the other source unchanged).
+    fn with(self, presets: VideoPresets, id: &str) -> VideoPresets {
+        match self {
+            Self::Camera => VideoPresets { camera: CameraPreset::from_id(id).unwrap_or(presets.camera), ..presets },
+            Self::Screen => VideoPresets { screen: ScreenPreset::from_id(id).unwrap_or(presets.screen), ..presets },
+        }
+    }
+}
+
+fn camera_preset_keys(preset: CameraPreset) -> (&'static str, &'static str) {
+    match preset {
+        CameraPreset::Smooth60 => ("preset_camera_smooth60", "preset_camera_smooth60_desc"),
+        CameraPreset::Balanced => ("preset_camera_balanced", "preset_camera_balanced_desc"),
+        CameraPreset::Hd => ("preset_camera_hd", "preset_camera_hd_desc"),
+        CameraPreset::FullHd => ("preset_camera_fullhd", "preset_camera_fullhd_desc"),
+        CameraPreset::DataSaver => ("preset_camera_datasaver", "preset_camera_datasaver_desc"),
+    }
+}
+
+fn screen_preset_keys(preset: ScreenPreset) -> (&'static str, &'static str) {
+    match preset {
+        ScreenPreset::Fastest => ("preset_screen_fastest", "preset_screen_fastest_desc"),
+        ScreenPreset::Smooth => ("preset_screen_smooth", "preset_screen_smooth_desc"),
+        ScreenPreset::Balanced => ("preset_screen_balanced", "preset_screen_balanced_desc"),
+        ScreenPreset::Sharp => ("preset_screen_sharp", "preset_screen_sharp_desc"),
+        ScreenPreset::Text => ("preset_screen_text", "preset_screen_text_desc"),
+    }
+}
+
+/// Where an open quick menu sits: fixed to the viewport next to its split button, kept
+/// inside the screen (phones), flipped above the button when there is more room there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MenuPos {
+    left: f64,
+    top: Option<f64>,
+    bottom: Option<f64>,
+    width: f64,
+    max_height: f64,
+}
+
+/// Viewport edge margin for the quick menus, in CSS pixels.
+const MENU_MARGIN: f64 = 8.0;
+const MENU_MAX_WIDTH: f64 = 300.0;
+
+impl MenuPos {
+    fn next_to(anchor: &web_sys::Element, rtl: bool) -> Self {
+        let rect = anchor.get_bounding_client_rect();
+        let root = window().and_then(|w| w.document()).and_then(|d| d.document_element());
+        let (vw, vh) = root.map_or((1024.0, 768.0), |r| (f64::from(r.client_width()), f64::from(r.client_height())));
+        let width = (vw - 2.0 * MENU_MARGIN).min(MENU_MAX_WIDTH);
+        // Start-aligned with the button: its left edge, or its right edge in RTL.
+        let start = if rtl { rect.right() - width } else { rect.left() };
+        let left = start.min(vw - width - MENU_MARGIN).max(MENU_MARGIN);
+        let room_below = vh - rect.bottom() - 2.0 * MENU_MARGIN;
+        let room_above = rect.top() - 2.0 * MENU_MARGIN;
+        if room_below >= 240.0 || room_below >= room_above {
+            Self { left, top: Some(rect.bottom() + 4.0), bottom: None, width, max_height: room_below.max(120.0) }
+        } else {
+            Self { left, top: None, bottom: Some(vh - rect.top() + 4.0), width, max_height: room_above }
+        }
+    }
+
+    fn style(&self) -> String {
+        let vertical = match (self.top, self.bottom) {
+            (Some(top), _) => format!("top: {top:.0}px;"),
+            (None, Some(bottom)) => format!("bottom: {bottom:.0}px;"),
+            (None, None) => String::new(),
+        };
+        format!(
+            "left: {:.0}px; {vertical} width: {:.0}px; max-height: {:.0}px;",
+            self.left, self.width, self.max_height
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct QualityMenu {
+    source: QualitySource,
+    pos: MenuPos,
+}
+
+/// The ▾ half of a camera or screen split button: opens that source's quality menu.
+fn quality_button(
+    lang: ReadSignal<Language>,
+    source: QualitySource,
+    menu: ReadSignal<Option<QualityMenu>>,
+    on_toggle: impl Fn(QualitySource, web_sys::MouseEvent) + Copy + 'static,
+) -> impl IntoView {
+    let open = move || menu.with(|m| m.is_some_and(|m| m.source == source));
+    view! {
+        <button
+            id=format!("{}-quality-btn", source.key())
+            class="btn btn-mute quality-btn"
+            class:open=open
+            aria-haspopup="menu"
+            aria-expanded=move || open().to_string()
+            title=move || t(lang.get(), source.button_title_key())
+            on:click=move |ev| on_toggle(source, ev)
+        >
+            "▾"
+        </button>
+    }
+}
+
+/// The open quick menu: one button per preset (name and a one-line description), the
+/// current one marked. Works before a source starts (it is used for the next one) and
+/// while it runs (applied at once).
+fn quality_menu_view(
+    lang: ReadSignal<Language>,
+    menu: QualityMenu,
+    presets: ReadSignal<VideoPresets>,
+    on_pick: impl Fn(VideoPresets) + Copy + 'static,
+) -> impl IntoView {
+    let source = menu.source;
+    view! {
+        <div
+            id=format!("{}-quality-menu", source.key())
+            class="quality-menu"
+            role="menu"
+            data-source=source.key()
+            style=menu.pos.style()
+        >
+            <div class="quality-menu-title">{move || t(lang.get(), source.title_key())}</div>
+            {source.choices().into_iter().map(|(id, name_key, desc_key)| {
+                let selected = move || presets.with(|p| source.current(*p) == id);
+                view! {
+                    <button
+                        type="button"
+                        class="quality-option"
+                        class:selected=selected
+                        role="menuitemradio"
+                        aria-checked=move || selected().to_string()
+                        data-preset=id
+                        on:click=move |_| on_pick(source.with(presets.get_untracked(), id))
+                    >
+                        <span class="quality-option-name">{move || t(lang.get(), name_key)}</span>
+                        <span class="quality-option-desc">{move || t(lang.get(), desc_key)}</span>
+                    </button>
+                }
+            }).collect_view()}
+        </div>
+    }
+}
+
+/// A radio group in the settings modal: one row per preset, like the audio options.
+fn preset_group(
+    lang: ReadSignal<Language>,
+    source: QualitySource,
+    presets: ReadSignal<VideoPresets>,
+    on_pick: impl Fn(VideoPresets) + Copy + 'static,
+) -> impl IntoView {
+    let group = source.key();
+    let heading_id = format!("{group}-preset-heading");
+    view! {
+        <div id=format!("{group}-preset-group") class="preset-group" role="radiogroup" aria-labelledby=heading_id.clone()>
+            <h5 id=heading_id class="settings-subsection">{move || t(lang.get(), source.title_key())}</h5>
+            <div class="audio-options">
+                {source.choices().into_iter().map(|(id, name_key, desc_key)| {
+                    let input_id = format!("{group}-preset-{id}");
+                    view! {
+                        <label class="audio-option preset-option" for=input_id.clone()>
+                            <input
+                                type="radio"
+                                id=input_id
+                                name=format!("{group}-preset")
+                                value=id
+                                prop:checked=move || presets.with(|p| source.current(*p) == id)
+                                on:change=move |_| on_pick(source.with(presets.get_untracked(), id))
+                            />
+                            <span class="preset-text">
+                                <span class="preset-name">{move || t(lang.get(), name_key)}</span>
+                                <span class="preset-desc">{move || t(lang.get(), desc_key)}</span>
+                            </span>
+                        </label>
+                    }
+                }).collect_view()}
+            </div>
+        </div>
+    }
+}
+
 fn agent_status_key(status: &AgentStatus) -> &'static str {
     match status {
         AgentStatus::Off => "agent_status_off",
@@ -2251,6 +2757,61 @@ fn control_prompt(
                 </button>
             </div>
         </div>
+    }
+}
+
+/// One device picker in the settings: "System default" first, then the devices the browser
+/// lists (numbered while it hides their names), and the chosen device if it isn't listed
+/// (unplugged). Picking "System default" chooses `None`.
+fn device_picker(
+    lang: ReadSignal<Language>,
+    id: &'static str,
+    label_key: &'static str,
+    numbered_key: &'static str,
+    devices: Signal<Vec<DeviceEntry>>,
+    chosen: Signal<Option<String>>,
+    on_pick: impl Fn(Option<String>) + 'static,
+) -> impl IntoView {
+    let options = move || {
+        let lang = lang.get();
+        let chosen = chosen.get();
+        let listed = devices.get();
+        let mut options = vec![(String::new(), t(lang, "device_default").to_string())];
+        for (i, device) in listed.iter().enumerate() {
+            let label = if device.label.trim().is_empty() {
+                t_replace_1(lang, numbered_key, "{n}", &(i + 1).to_string())
+            } else {
+                device.label.clone()
+            };
+            options.push((device.device_id.clone(), label));
+        }
+        if let Some(missing) = chosen.as_ref().filter(|c| !listed.iter().any(|d| &d.device_id == *c)) {
+            options.push((missing.clone(), t(lang, "device_unavailable").to_string()));
+        }
+        let selected = chosen.unwrap_or_default();
+        options
+            .into_iter()
+            .map(|(value, label)| {
+                let is_selected = value == selected;
+                view! { <option value=value selected=is_selected>{label}</option> }
+            })
+            .collect_view()
+    };
+    view! {
+        <label class="device-picker" for=id>
+            <span class="device-picker-label">{move || t(lang.get(), label_key)}</span>
+            <select
+                id=id
+                class="lobby-input device-select"
+                prop:value=move || chosen.get().unwrap_or_default()
+                on:change=move |ev| {
+                    let value = event_target_value(&ev);
+                    on_pick((!value.is_empty()).then_some(value));
+                }
+            >
+                {options}
+            </select>
+        </label>
     }
 }
 

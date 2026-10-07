@@ -84,6 +84,55 @@ impl Default for AudioSettings {
     }
 }
 
+/// Which microphone, speaker and camera to use, by `deviceId` (`None`: the system default).
+/// Held in RAM only, like `AudioSettings`: it resets on reload.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeviceChoice {
+    pub mic: Option<String>,
+    pub speaker: Option<String>,
+    pub camera: Option<String>,
+}
+
+/// One entry of `navigator.mediaDevices.enumerateDevices()`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeviceEntry {
+    /// `audioinput`, `audiooutput` or `videoinput`.
+    pub kind: String,
+    pub device_id: String,
+    /// Empty until the page may use a device (microphone or camera permission).
+    pub label: String,
+    pub group_id: String,
+}
+
+pub const MIC_KIND: &str = "audioinput";
+pub const SPEAKER_KIND: &str = "audiooutput";
+pub const CAMERA_KIND: &str = "videoinput";
+
+/// The devices of `kind` a picker can offer, in the browser's order: real ids only (before
+/// permission some browsers hide them as ""), each once, and without Chrome's `default` and
+/// `communications` aliases (the picker's own "System default" stands for those).
+pub fn selectable_devices(devices: &[DeviceEntry], kind: &str) -> Vec<DeviceEntry> {
+    let mut seen = std::collections::HashSet::new();
+    devices
+        .iter()
+        .filter(|d| d.kind == kind)
+        .filter(|d| !d.device_id.is_empty() && d.device_id != "default" && d.device_id != "communications")
+        .filter(|d| seen.insert(d.device_id.clone()))
+        .cloned()
+        .collect()
+}
+
+/// The camera after `current` in `cameras`, wrapping around (the first one when `current`
+/// isn't listed). `None` when there is no other camera to move to.
+pub fn next_device(cameras: &[DeviceEntry], current: Option<&str>) -> Option<String> {
+    let position = current.and_then(|c| cameras.iter().position(|d| d.device_id == c));
+    let next = match position {
+        Some(i) => cameras.get((i + 1) % cameras.len())?,
+        None => cameras.first()?,
+    };
+    (Some(next.device_id.as_str()) != current).then(|| next.device_id.clone())
+}
+
 /// A member currently in the voice lounge, as shown to this tab.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LoungeMemberUi {
@@ -438,4 +487,44 @@ pub fn fragment_relay_choice() -> Option<(RelayMode, String)> {
     }
     let mode = if with_public { RelayMode::CustomWithPublic } else { RelayMode::Custom };
     Some((mode, custom.join(", ")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn device(kind: &str, id: &str, label: &str) -> DeviceEntry {
+        DeviceEntry { kind: kind.into(), device_id: id.into(), label: label.into(), group_id: String::new() }
+    }
+
+    #[test]
+    fn pickers_offer_real_devices_of_one_kind_without_aliases() {
+        let listed = [
+            device(MIC_KIND, "default", "Default - Headset"),
+            device(MIC_KIND, "communications", "Communications - Headset"),
+            device(MIC_KIND, "a1", "Headset"),
+            device(MIC_KIND, "a2", ""),
+            device(MIC_KIND, "a1", "Headset"),
+            device(CAMERA_KIND, "v1", "Webcam"),
+            device(SPEAKER_KIND, "o1", "Speakers"),
+        ];
+        let ids = |kind| selectable_devices(&listed, kind).into_iter().map(|d| d.device_id).collect::<Vec<_>>();
+        assert_eq!(ids(MIC_KIND), ["a1", "a2"]);
+        assert_eq!(ids(CAMERA_KIND), ["v1"]);
+        assert_eq!(ids(SPEAKER_KIND), ["o1"]);
+        // Before permission some browsers list devices without ids: nothing to pick.
+        assert!(selectable_devices(&[device(MIC_KIND, "", "")], MIC_KIND).is_empty());
+    }
+
+    #[test]
+    fn next_camera_wraps_and_needs_another_camera() {
+        let cameras = [device(CAMERA_KIND, "v1", "Front"), device(CAMERA_KIND, "v2", "Back"), device(CAMERA_KIND, "v3", "USB")];
+        assert_eq!(next_device(&cameras, Some("v1")).as_deref(), Some("v2"));
+        assert_eq!(next_device(&cameras, Some("v3")).as_deref(), Some("v1"));
+        // A camera that is gone (or none chosen): start from the first one.
+        assert_eq!(next_device(&cameras, Some("unplugged")).as_deref(), Some("v1"));
+        assert_eq!(next_device(&cameras, None).as_deref(), Some("v1"));
+        assert_eq!(next_device(&cameras[..1], Some("v1")), None);
+        assert_eq!(next_device(&[], Some("v1")), None);
+    }
 }

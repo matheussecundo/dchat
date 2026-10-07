@@ -8,6 +8,7 @@ mod extras;
 mod files;
 mod history;
 mod lounge;
+mod quality;
 
 use crate::mesh::{LinkEvent, LinkEventHandler, PeerLink, SignalOut};
 use crate::names::pubkey_tag;
@@ -83,6 +84,9 @@ pub struct SessionSignals {
     pub no_turn: WriteSignal<bool>,
     /// Remote control: offers, my rights, requests waiting for my answer.
     pub control: WriteSignal<crate::state::ControlUi>,
+    /// The device choice, when the session changes it (a chosen device was missing, or 🔄
+    /// moved to the next camera).
+    pub devices: WriteSignal<crate::state::DeviceChoice>,
 }
 
 #[derive(Clone)]
@@ -432,7 +436,10 @@ impl RoomSession {
             }
             LinkEvent::Closed => self.drop_link(remote, true),
             LinkEvent::Message(text) => self.on_frame(remote, &text),
-            LinkEvent::Track(track, stream) => self.on_remote_track(remote, track, stream),
+            // Our own stream per member is used, never the browser's (see `on_remote_track`).
+            LinkEvent::Track(track, _stream, receiver) => self.on_remote_track(remote, track, receiver),
+            // The codecs this link negotiated are known now: pick ours among them.
+            LinkEvent::Negotiated => self.apply_video_params(remote),
             LinkEvent::Chunk(packet) => self.on_file_chunk(remote, &packet),
             LinkEvent::Input { lane, packet } => self.on_input_packet(remote, lane, &packet),
         }
@@ -811,6 +818,27 @@ impl RoomSession {
 
     fn link(&self, remote: &str) -> Option<Rc<PeerLink>> {
         self.inner.links.borrow().get(remote).cloned()
+    }
+
+    /// `getStats()` of the link to `remote` (for the stats panel), if there is one.
+    pub fn peer_stats(&self, remote: &str) -> Option<js_sys::Promise> {
+        self.link(remote).map(|link| link.stats())
+    }
+
+    /// Members our video currently goes to (their video sender carries a track), for the
+    /// stats panel's rows.
+    pub fn video_viewers(&self) -> Vec<String> {
+        let mut viewers: Vec<String> = self
+            .inner
+            .lounge
+            .senders
+            .borrow()
+            .iter()
+            .filter(|(_, l)| l.video.as_ref().is_some_and(|v| v.track().is_some()))
+            .map(|(remote, _)| remote.clone())
+            .collect();
+        viewers.sort();
+        viewers
     }
 
     fn has_open_link(&self) -> bool {

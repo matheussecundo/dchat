@@ -45,6 +45,13 @@ Every agent modifying this codebase must enforce these non-negotiable security a
    - **Rekey**: only admin-signed `AdminRekey` envelopes are honored; grants are ECDH-sealed per recipient session key. Members offline during a rekey are stranded and need a fresh invite.
    - **History**: off unless `&hist=1`; only messages whose author's link had `hist=1` (`shareable`) are ever served, as signed originals verified by the receiver. RAM only; enforced by honest clients.
    - **Lounge media**: media flows only between members who both hold a voice seat over an open direct link (`sync_media_for`). Each link has at most one audio and one video `RtcRtpSender`; toggles use `replaceTrack`, never add/remove, so SDP does not grow.
+   - **Video quality presets (Phase 10)**: the sharer picks one camera preset and one screen preset (`protocol::video`) for everyone; they are local settings, never on the wire, so they need no `PROTOCOL_VERSION` bump. `session/quality.rs` is the only place they are applied:
+     - every `setParameters` writes the complete state (`maxBitrate`, `maxFramerate`, `scaleResolutionDownBy`, top-level `degradationPreference`, `encodings[0].codec`), deleting a key the preset leaves to the browser, with no `await` between `getParameters` and `setParameters`, one call per sender at a time;
+     - `applyConstraints` always gets the full constraint set (it replaces the previous one) and never `frameRate.min` (Chrome's zero-hertz mode delays frames);
+     - `contentHint` is set before the track is attached (Safari reads it only at attach); a live change re-attaches with `replaceTrack(sameTrack)`;
+     - the codec comes from the preset's ladder (`codec_ladder`, `MediaCapabilities.encodingInfo`) and is picked among the link's negotiated codecs (`pick_negotiated`); a link that lacks it keeps its default;
+     - the screen's `ScreenInfo` (sent to dchat-host to find the monitor) is read before any size cap: always the source size.
+   - **No lip sync for video**: the video sender is added under its own empty `MediaStream` (`video_msid`), so receivers never hold video back to match the voice buffer. Viewers re-sync camera tiles only, by setting that video receiver's `jitterBufferTarget` to the member's current audio buffer delay every 2 s; screen tiles stay `null`. The receiver always builds its own per-member `MediaStream`.
 
 6. **Hosting Anywhere (static, any path)**:
    - The production build must work at a domain root, under a path (`https://<user>.github.io/<repo>/`) and on IPFS: asset URLs are relative (`crates/client/Trunk.toml`), and code never navigates to `/`; use `state::page_base_url()` for "home".
@@ -70,6 +77,7 @@ Every agent modifying this codebase must enforce these non-negotiable security a
 9. **Remote Control (dchat-host)**:
    - **Only by the sharer's click**: `ControlRequest` waits in `ControlState` until the sharer allows it; nothing is ever granted automatically. One member holds mouse and keyboard at a time (granting moves it, `TakenOver`); controllers take slots P1–P4, limited to what the app reports it can create, and a pad with no update for 0.5 s goes back to neutral. Grants end with the share (or a share that isn't a whole monitor), the app pairing, the viewer's voice seat, the link, and the session (`set_available(false)`, `on_control_peer_lost`, `on_control_voice_state`).
    - **Input path**: viewer → sharer only over their direct link's `input-events` (reliable) and `input-state` (unordered, no retransmits) channels, sealed with the room key and an AAD binding lane, seq, sender and recipient (`seal_input`). Never relayed. The sharer's tab opens, budgets (`InputBudget`) and filters (`InputGate`: only what that member holds, pads mapped to their slot) before forwarding to the app, which checks roles again.
+   - **Input pacing** (`protocol::pacing`): viewers send each pointer move at once, at most every 4 ms (`MoveSpacer`, ≤ 250 Hz). The sharer's `AgentPacer` keeps the frames sent to dchat-host under its 500 messages/s limit: state events (pointer, pads) are coalesced per member within 400 frames/s; clicks, keys and other events never wait and carry that member's pending state ahead of them, so order is kept.
    - **dchat-host**: listens on 127.0.0.1 only; Host header must be its own loopback port (DNS rebinding); Origin must be in a never-empty allow-list; pairing needs the one-time code printed in its terminal, proven by HMAC both ways (the tab sends nothing to an app that can't prove it), with lockout after 5 wrong codes; one connected session at a time (a disconnected one is replaced by a new pairing). It releases everything held on every exit path (revoke, `ReleaseAll`, socket loss, `Bye`, stop shortcut, Enter, Ctrl+C, SIGTERM/SIGHUP or Windows console close/logoff/shutdown, watchdog after 1.5 s without input, panic hook, Drop), never logs input, and writes no files.
    - **Tab side**: the app link opens only when the user clicks Connect; the code and session token live in RAM. The dialog's download link (`host_download_url`: `DCHAT_HOST_DOWNLOAD_URL`, else the building repository's latest release) opens with `rel="noopener noreferrer"`.
    - **Allowed site**: when none is built in or given and a console is attached, dchat-host asks; `origin_from_input` keeps only `scheme://host[:port]` (a pasted room link's key is dropped and never printed). Without a console it refuses to start. Mouse and keyboard can do anything the sharer can (including clicking Allow for others): the prompt says so.
@@ -94,9 +102,11 @@ dchat/
 │   │       ├── messages.rs     # Addressed SignalPayload, signed RoomEnvelope/RoomBody, ICE types
 │   │       ├── nostr.rs        # NIP-01/16 types, BIP-340 Schnorr keys (k256), message signing, topic hashing
 │   │       ├── relays.rs       # Room relay list: &relays= parsing (exact, `nostr` = public), validation
+│   │       ├── pacing.rs       # Remote-control input pacing: MoveSpacer (viewer, 4 ms), AgentPacer (sharer → dchat-host budget), unit-tested
 │   │       ├── password.rs     # Room passwords: Argon2id stretch, password room key and topic (unit-tested)
 │   │       ├── room.rs         # Roster, link graph, gossip routing, member/voice/video cap eviction, RoomParams (pure, unit-tested)
 │   │       ├── version.rs      # PROTOCOL_VERSION, versioned relay signals, wire-format fingerprint test
+│   │       ├── video.rs        # Video quality presets (local only): capture and sender targets, bitrate/scale math, codec ladder, WebCodecs adapter (unit-tested)
 │   │       └── lib.rs
 │   ├── relay/                  # dchat-relay: RAM-only Nostr relay for dchat signaling (lib + binary)
 │   │   ├── Dockerfile          # Container image (build from the repo root)
@@ -138,12 +148,13 @@ dchat/
 │           ├── i18n.rs         # Strongly typed i18n, browser detection, RTL handling
 │           ├── ice.rs          # Optional host TURN: GET ./ice-servers (3 s timeout, silent fallback)
 │           ├── layout.rs       # Video grid fit: largest 16:9 tiles without scrolling (unit-tested)
-│           ├── media.rs        # Capture (mic/camera/screen), per-member <audio>, video attach, speaking meter
+│           ├── media.rs        # Capture (mic/camera/screen, chosen device with fallback), device list, speaker choice (setSinkId), per-member <audio>, video attach, speaking meter
 │           ├── mesh.rs         # PeerLink: one RTCPeerConnection per member (chat + file-transfer channels), perfect negotiation, batched ICE, tracks
 │           ├── names.rs        # Random session names, name sanitizing, pubkey tags
 │           ├── nostr_pool.rs   # Multi-relay pool, fan-out broadcast, deduplication, recipient filtering
 │           ├── qr.rs           # On-the-fly SVG QR code generation
-│           ├── remote_input.rs # Viewer capture over a shared screen: pointer (letterbox-aware), keys, wheel, heartbeat
+│           ├── remote_input.rs # Viewer capture over a shared screen: pointer (letterbox-aware, sent at once, 4 ms spacing), keys, wheel, heartbeat
+│           ├── stats.rs        # On-demand tile stats (getStats deltas, requestVideoFrameCallback); no addresses shown, nothing stored
 │           ├── session/
 │           │   ├── mod.rs      # RoomSession: mesh orchestration, signed gossip, roster, caps, e2e hooks
 │           │   ├── admin.rs    # Kick / rotate link: ECDH-sealed AdminRekey, migration to the new room
@@ -151,8 +162,9 @@ dchat/
 │           │   ├── extras.rs   # Typing, reactions, edit/delete, ECDH-sealed DMs, @mention detection
 │           │   ├── files.rs    # Room-wide file cards, per-requester pulls, upload queue, chunk I/O
 │           │   ├── history.rs  # Opt-in history (&hist=1): signed shareable messages for late joiners
+│           │   ├── quality.rs  # Video presets applied: capture, complete setParameters per sender, codec choice, camera re-sync via jitterBufferTarget
 │           │   └── lounge.rs   # Voice lounge: seats, per-link senders, voice/video caps, speaking, controls
-│           └── state.rs        # UI types, URL fragment helpers (create room, invite/admin links), relays
+│           └── state.rs        # UI types, device choice and picker lists (unit-tested), URL fragment helpers (create room, invite/admin links), relays
 ├── e2e/                        # Playwright automated multi-peer end-to-end tests
 │   ├── playwright.config.js    # Starts the dev server (serves crates/client/dist-e2e) and a recording dchat-host on port 7499
 │   └── tests/
@@ -169,13 +181,15 @@ dchat/
 │       ├── link_renegotiation.spec.js # With every relay cut after linking, voice and video still negotiate over the link
 │       ├── protocol_version.spec.js # Different protocol versions never link; the older member gets a reload banner
 │       ├── room_password.spec.js # Password rooms: link + password, wrong password finds nobody, rekey keeps the password
-│       ├── remote_control.spec.js # dchat-host pairing, request/allow, clicks through letterboxing, one holder, others' raw input dropped, release on shortcut/revoke/link loss, prompts in fullscreen, window shares not offered, game mode (pointer lock, relative moves, motion hint), controllers (P1/P2 per member, neutral + unplug on revoke, kept alongside mouse/keyboard)
+│       ├── remote_control.spec.js # dchat-host pairing, request/allow, clicks through letterboxing, one holder, others' raw input dropped, release on shortcut/revoke/link loss, prompts in fullscreen, window shares not offered, game mode (pointer lock, relative moves, video left to the sharer's preset), controllers (P1/P2 per member, neutral + unplug on revoke, kept alongside mouse/keyboard), clicks through an open stats panel, no move after the release shortcut, moves ≥ 4 ms apart with the last one delivered, source screen size sent to dchat-host under every preset
 │       ├── privacy.spec.js     # Sealed handshakes vs the room key, STUN fallback, hideip through a real TURN (node-turn)
 │       ├── audio_call.spec.js  # 2-member lounge audio, mic/speaker mute, leave (replaceTrack null) and rejoin
-│       ├── video_call.spec.js  # Camera tiles, camera flip keeps the mic, camera off, grid teardown
+│       ├── video_call.spec.js  # Camera tiles, camera flip keeps the mic (and HD's 1280×720), camera off, grid teardown
 │       ├── screen_share.spec.js# Screen share, switch to camera on the same sender, stop
+│       ├── video_quality.spec.js # Presets: sender parameters per link, live switch, caps, stale state cleared, own msid + camera re-sync, lifetime across rekey, stats panel, glass-to-glass latency
 │       ├── file_sharing.spec.js# Room-wide file cards: parallel pulls, decline/withdraw, upload queue, unreachable sender, sender leaving
 │       ├── audio_settings.spec.js # Mic processing checkboxes, live track swap in voice, carry-over, reload reset
+│       ├── devices.spec.js     # Mic/speaker/camera pickers (two fake cameras): live mic swap keeping the mute, camera switch keeping the preset, 🔄 to the next camera, setSinkId, missing device fallback, RAM only
 │       └── i18n.spec.js        # UI localization, dynamic switching, Arabic RTL, zero persistence
 ├── .github/workflows/
 │   ├── build.yml               # Reusable: Rust + Worker tests, release build, no-hooks check, "site" artifact
@@ -250,6 +264,7 @@ dchat/
   - Unsupported switches (per `getSupportedConstraints()`) are disabled with a hint.
   - Local speaker mute on the hidden `#remote-audio` element for all call types; resets on call end. The peer is not notified.
   - Settings are RAM-only signals: they survive across calls within a tab and reset on reload.
+  - Device pickers (Devices section, first in ⚙️ settings): microphone, speaker and camera as a RAM-only `DeviceChoice` pushed into every session (so it survives rekeys). Capture uses `deviceId: { exact }`; a device that is gone (`OverconstrainedError` / `NotFoundError`) is retried once as the system default, with a toast, and the choice is cleared. A new mic goes through the same latest-wins swap as the processing switches; a new camera through the 🔄 recapture (hint before attach, sender parameters re-applied), and 🔄 itself moves to the next listed camera when one is chosen. Speakers use `setSinkId` on every `audio.remote-audio` (hidden where unsupported, e.g. Safari; Firefox's `selectAudioOutput` chooser where offered).
 - **Phase 8: Discord-like Group Rooms over a Serverless Mesh (Completed)**
   - **8a Mesh core (Completed)**: create/join lobby with session nicknames; full-mesh `PeerLink`s with addressed signaling and perfect negotiation; signed `RoomEnvelope` gossip with relay to members lacking a direct link; roster with mutual-link reachability and `direct` / `via X` / `connecting` link states; per-room member cap (`&max=`, default 25, `0` = unlimited) with deterministic latest-joiner eviction and an admin seat; admin link (`adm`/`admsk`) vs invite link; optional TURN in the fragment; join/leave notices.
   - **8b Voice lounge (Completed)**: drop-in lounge replaces the ring flow (`CallInvite`/`CallAccepted` gone); signed `VoiceState` gossip (seat time, mic, video kind); per-room voice/video caps (`&maxa=`, `&maxv=`) with the same latest-loses rule (admins not exempt); one audio + one video sender per link (`addTrack` once, then `replaceTrack`, `None` to stop: no renegotiation on toggles); camera/screen as one video source with front/rear flip; per-member hidden `<audio class="remote-audio">`; Web Audio speaking meter; video grid with fullscreen; "X joined voice" prompt; audio settings carry over between joins.
@@ -259,9 +274,15 @@ dchat/
 
 - **Phase 9: Remote Control (Completed)**
   - **9a Desktop control on Linux (Completed)**: protocol v4 (`ControlStatus`/`ControlRequest`/`ControlGrant`/`ControlRelease`, sealed input packets, `DomCode`); `dchat-host` (loopback WebSocket, mutual pairing, engine with release-on-exit and watchdog, uinput backend, X11/XWayland monitor layout); tab ↔ app link; permission prompts that follow fullscreen; desktop-mode mouse and keyboard with letterbox-aware positions; E2E against a recording dchat-host.
-  - **9b Windows and game mode (Completed)**: `SendInput` backend (scan codes, `VIRTUALDESK` absolute positions, per-monitor DPI awareness, administrator note), Windows monitor layout, `win_input` records unit-tested on every platform, CI on Windows; viewer game mode (pointer lock with `unadjustedMovement`, relative moves, keyboard lock in fullscreen, losing the lock ends control), `Mode` switches the sharer's stream to `contentHint: motion` at 60 fps.
+  - **9b Windows and game mode (Completed)**: `SendInput` backend (scan codes, `VIRTUALDESK` absolute positions, per-monitor DPI awareness, administrator note), Windows monitor layout, `win_input` records unit-tested on every platform, CI on Windows; viewer game mode (pointer lock with `unadjustedMovement`, relative moves, keyboard lock in fullscreen, losing the lock ends control). Since Phase 10, `Mode` no longer changes the shared video: the sharer's preset decides.
   - **9c Controllers (Completed)**: viewers send their first "standard" gamepad (`PadPoller`, `pad_state_from`, `PadSampler` heartbeat) while they hold a slot; `ControlStatus.controllers` advertises how many virtual pads the app can create (`ControlState::set_pad_slots`); dchat-host plugs a virtual Xbox 360 pad per slot (uinput copy of xpad `045e:028e` on Linux, ViGEm on Windows with an install hint when the driver is missing), neutralizes a pad after 0.5 s without updates, and unplugs it on revoke.
   - **9d Releases and polish (Completed)**: global stop shortcut (`global-hotkey`: Windows message loop, X11; Wayland reported unavailable, the GlobalShortcuts portal is left for later); panic hook and SIGHUP / Windows console-close, logoff and shutdown all release held input; release workflow (`host-v*` tags: static musl and MSVC `+crt-static` builds, packaged with the udev rule and README, `SHA256SUMS`, optional `DCHAT_HOST_ORIGINS` repository variable).
+
+- **Phase 10: Low-latency video with quality presets (Completed)**
+  - Sharer-wide presets (screen: Fastest, Smooth, Balanced, Sharp, Text; camera: Smooth 60, Balanced, HD, Full HD, Data saver; Balanced by default) in the settings modal and a ▾ menu next to the camera and screen buttons; RAM only, kept across voice rejoins and rekeys (audio settings now also survive a rekey).
+  - Each preset sets capture (full `applyConstraints` set), `maxBitrate` (lifts Chrome's 2.5 Mbps default), `maxFramerate`, `scaleResolutionDownBy`, `degradationPreference`, `contentHint` and the codec (hardware H.265/H.264 for motion, AV1/VP9 for detail when the browser reports them smooth). Game mode no longer touches video.
+  - Video leaves the voice's lip-sync group; viewers re-sync camera tiles with `jitterBufferTarget`. Pointer moves are sent at once (4 ms spacing) and paced toward dchat-host. ⓘ stats per tile (RTT, buffer, decode, to-screen, encode, send delay, limiting factor).
+  - Future (not built): encode once for many viewers; Chrome's Encoded Source is the preferred route, so the preset table stays engine-neutral and each link keeps one video sender with one encoding.
 
 ---
 
@@ -340,6 +361,9 @@ When writing or reviewing code, check off every item:
 - [ ] Remote control: nothing is granted without the sharer's click; input is accepted only from current holders, over their own direct link, sealed with the input AAD; dchat-host stays loopback-only with Host/Origin checks and mutual pairing, releases held input on every exit path, and logs no input.
 - [ ] DM plaintext is only ever sealed with `seal_json` to the recipient's session key; DMs carry no recipient field; the recipient never relays a DM; no DM text in logs.
 - [ ] A room password never appears in the link, logs, messages or storage: only its salt (`pw`) is in the link, the input is cleared after stretching, and only the stretched value stays in RAM.
-- [ ] Text inputs and lobby forms keep `autocomplete="off"`; message boxes follow the spell-check setting.
+- [ ] Text inputs and lobby forms keep `autocomplete="off"`, except the create form's password box, which exists only while **Protect with a password** (`#password-checkbox`) is ticked and uses `autocomplete="new-password"` (Chromium ignores "off" on password boxes and would fill a saved password into every new room); message boxes follow the spell-check setting.
 - [ ] Edits/deletes are applied only when the envelope author equals the original message author.
 - [ ] History serves only `shareable` chat envelopes (author's choice) and the receiver verifies every signature; Hellos from history only label names, never join the roster.
+- [ ] Video presets stay local (never in `RoomBody` or the wire fingerprint); `setParameters` writes complete state; `applyConstraints` always gets the full set and never `frameRate.min`.
+- [ ] The stats overlay never shows addresses, ports or candidates, and stores nothing.
+- [ ] Input to dchat-host goes through the `AgentPacer`; nothing reaches the app after `ReleaseAll` (the viewer's trailing move flush is cancelled first).

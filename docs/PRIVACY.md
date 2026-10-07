@@ -17,7 +17,7 @@ Messages, voice, video and files are end-to-end encrypted, and nothing is stored
 ## Protections
 
 - **End-to-end encryption.** WebRTC encrypts every link (DTLS, SRTP). On top of that, room messages are encrypted with the room key and signed by their author.
-- **Room passwords (optional).** Set a password when creating a room, and share it separately from the link, for example by voice.
+- **Room passwords (optional).** Set a password when creating a room, and share it separately from the link, for example by voice. It is opt-in: the password box appears only after ticking **Protect with a password**, and it asks for a new password (`autocomplete="new-password"`), so a password the browser saved earlier never turns a new room into a password room.
   - The room key is derived from the key in the link *and* the password (Argon2id, then SHA-256), so a link that leaks through a chat app, browser history or sync is useless on its own.
   - The link holds only a random salt (`pw=`). The relay topic also depends on the password, so someone with just the link can't even find the room's relay traffic.
   - The password is typed on the join screen, stretched once and cleared from the field; only the stretched value stays in memory, which lets members follow a new link (kick or rotate) without retyping it.
@@ -30,9 +30,10 @@ Messages, voice, video and files are end-to-end encrypted, and nothing is stored
   - It needs a TURN server: deploy on Cloudflare (the site provides one), or add `&turn=` to the link. Without one, the room shows a banner and nobody can connect.
   - All traffic then goes through TURN, which costs bandwidth and adds some delay.
   - It hides you from members, not from relays or the TURN server, which still see your IP address. Use a VPN for that.
-- **Nothing typed is kept by the browser.** Forms and text boxes turn off autofill (`autocomplete="off"`), so names, passwords and relay addresses aren't saved to the browser's form history.
+- **Nothing typed is kept by the browser.** Forms and text boxes turn off autofill (`autocomplete="off"`; the create screen's password box uses `new-password` instead, which browsers never fill), so names, passwords and relay addresses aren't saved to the browser's form history.
 - **Spell checking can be turned off.** Some browsers' enhanced spell check (Chrome's, Edge's) sends what you type to Google or Microsoft. **⚙️ Settings → Spell check while typing** turns spell checking off for the message boxes. It is on by default.
 - **Remote control only with your click.** Members can ask to control your mouse and keyboard (one person at a time) or to plug in a game controller while you share your screen, but nothing happens until you allow it. Their input reaches only your computer, sealed over your direct link; your tab and `dchat-host` both drop anything from someone you didn't allow. Everything held down is released when control ends.
+- **Video quality and stats stay on your device.** The camera and screen presets are local settings: nothing about them is sent to anyone beyond what the video itself shows. Choosing a codec asks your own browser which encoders it has (`MediaCapabilities`); members can infer from the negotiated codec whether you have, say, a hardware H.265 encoder, but WebRTC's handshake already listed your browser's codecs to them. The ⓘ stats panel reads only your own connection's statistics, never shows addresses or candidates, and stores nothing.
 - **No long-term identity.** Each tab makes a fresh session key; nothing ties two visits together.
 - **Short-lived relay events.** Signaling uses ephemeral Nostr events (kind 20001), which compliant relays forward without storing. `dchat-relay` stores nothing and logs no IP addresses.
 

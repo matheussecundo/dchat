@@ -1,24 +1,28 @@
 //! Browser media plumbing: capture, per-member audio elements, video attachment and
 //! the speaking meter. No session state lives here.
 
-use crate::state::AudioSettings;
+use crate::state::{AudioSettings, DeviceEntry};
+use protocol::video::{CaptureTarget, CodecKind, CodecProbe};
 use std::collections::HashMap;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    window, AnalyserNode, AudioContext, HtmlAudioElement, HtmlVideoElement, MediaStream,
+    window, AnalyserNode, AudioContext, HtmlAudioElement, HtmlMediaElement, HtmlVideoElement, MediaStream,
     MediaStreamAudioSourceNode, MediaStreamConstraints, MediaStreamTrack,
 };
 
 /// Single place where mic processing is requested; a future in-app denoiser
-/// (e.g. RNNoise) would hook in alongside this.
-fn build_audio_constraints(settings: &AudioSettings) -> Result<JsValue, JsValue> {
+/// (e.g. RNNoise) would hook in alongside this. `device` asks for that microphone exactly.
+fn build_audio_constraints(settings: &AudioSettings, device: Option<&str>) -> Result<JsValue, JsValue> {
     // Plain booleans are "ideal" constraints: an unsupported switch never makes
     // getUserMedia fail with OverconstrainedError.
     let audio_opts = js_sys::Object::new();
     js_sys::Reflect::set(&audio_opts, &"noiseSuppression".into(), &settings.noise_suppression.into())?;
     js_sys::Reflect::set(&audio_opts, &"echoCancellation".into(), &settings.echo_cancellation.into())?;
     js_sys::Reflect::set(&audio_opts, &"autoGainControl".into(), &settings.auto_gain_control.into())?;
+    if let Some(id) = device {
+        js_sys::Reflect::set(&audio_opts, &"deviceId".into(), &bound("exact", id)?)?;
+    }
     Ok(audio_opts.into())
 }
 
@@ -57,17 +61,200 @@ pub fn first_track(stream: &MediaStream, kind: &str) -> Option<MediaStreamTrack>
     (tracks.length() > 0).then(|| tracks.get(0).unchecked_into())
 }
 
-pub async fn capture_microphone(settings: &AudioSettings) -> Result<MediaStreamTrack, JsValue> {
-    let stream = get_user_media(build_audio_constraints(settings)?, JsValue::FALSE).await?;
+/// A fresh capture. `fell_back`: the chosen device was missing, so the system default
+/// stands in.
+pub struct Captured {
+    pub track: MediaStreamTrack,
+    pub fell_back: bool,
+}
+
+/// What `getUserMedia` says when an exact `deviceId` isn't there (unplugged, or an id from
+/// another browser profile). The other constraints are only ideal: they never fail.
+fn device_missing(err: &JsValue) -> bool {
+    let name = js_sys::Reflect::get(err, &"name".into()).ok().and_then(|n| n.as_string());
+    matches!(name.as_deref(), Some("OverconstrainedError" | "NotFoundError"))
+}
+
+async fn open_microphone(settings: &AudioSettings, device: Option<&str>) -> Result<MediaStreamTrack, JsValue> {
+    let stream = get_user_media(build_audio_constraints(settings, device)?, JsValue::FALSE).await?;
     first_track(&stream, "audio").ok_or_else(|| JsValue::from_str("No audio track captured"))
 }
 
-pub async fn capture_camera(front: bool) -> Result<MediaStreamTrack, JsValue> {
-    let video_opts = js_sys::Object::new();
-    let facing = if front { "user" } else { "environment" };
-    js_sys::Reflect::set(&video_opts, &"facingMode".into(), &facing.into())?;
+/// Open the microphone `device` (`None`: the system default). A chosen device that is gone
+/// is retried once as the system default (`Captured::fell_back`).
+pub async fn capture_microphone(settings: &AudioSettings, device: Option<&str>) -> Result<Captured, JsValue> {
+    match open_microphone(settings, device).await {
+        Err(err) if device.is_some() && device_missing(&err) => {
+            let track = open_microphone(settings, None).await?;
+            Ok(Captured { track, fell_back: true })
+        }
+        result => result.map(|track| Captured { track, fell_back: false }),
+    }
+}
+
+/// `facingMode` for the front (`user`) or rear (`environment`) camera.
+pub fn facing_mode(front: bool) -> &'static str {
+    if front {
+        "user"
+    } else {
+        "environment"
+    }
+}
+
+async fn open_camera(front: bool, device: Option<&str>, target: &CaptureTarget) -> Result<MediaStreamTrack, JsValue> {
+    let video_opts = match device {
+        Some(id) => {
+            let opts = capture_constraints(target, None)?;
+            js_sys::Reflect::set(&opts, &"deviceId".into(), &bound("exact", id)?)?;
+            opts
+        }
+        None => capture_constraints(target, Some(facing_mode(front)))?,
+    };
     let stream = get_user_media(JsValue::FALSE, video_opts.into()).await?;
     first_track(&stream, "video").ok_or_else(|| JsValue::from_str("No video track captured"))
+}
+
+/// Open the camera `device`, or without one the `front` or rear camera, asking for the
+/// preset's size and frame rate as ideal values (the camera gets as close as it can;
+/// nothing fails over them). A chosen device that is gone is retried once as the system
+/// default (`Captured::fell_back`).
+pub async fn capture_camera(front: bool, device: Option<&str>, target: &CaptureTarget) -> Result<Captured, JsValue> {
+    match open_camera(front, device, target).await {
+        Err(err) if device.is_some() && device_missing(&err) => {
+            let track = open_camera(front, None, target).await?;
+            Ok(Captured { track, fell_back: true })
+        }
+        result => result.map(|track| Captured { track, fell_back: false }),
+    }
+}
+
+/// `navigator.mediaDevices.enumerateDevices()`: every microphone, camera and speaker the
+/// browser lists. Labels stay empty until the page may use a device.
+pub async fn enumerate_devices() -> Result<Vec<DeviceEntry>, JsValue> {
+    let media_devices = window().ok_or("No window")?.navigator().media_devices()?;
+    let enumerate: js_sys::Function = js_sys::Reflect::get(&media_devices, &"enumerateDevices".into())?.dyn_into()?;
+    let promise: js_sys::Promise = enumerate.call0(&media_devices)?.dyn_into()?;
+    let list: js_sys::Array = JsFuture::from(promise).await?.dyn_into()?;
+    Ok(list.iter().map(|info| device_entry(&info)).collect())
+}
+
+fn device_entry(info: &JsValue) -> DeviceEntry {
+    let field = |name: &str| js_sys::Reflect::get(info, &name.into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
+    DeviceEntry { kind: field("kind"), device_id: field("deviceId"), label: field("label"), group_id: field("groupId") }
+}
+
+/// Whether media elements can play through a chosen speaker (`setSinkId`; not Safari).
+pub fn speaker_selection_supported() -> bool {
+    window()
+        .and_then(|w| js_sys::Reflect::get(&w, &"HTMLMediaElement".into()).ok())
+        .and_then(|class| js_sys::Reflect::get(&class, &"prototype".into()).ok())
+        .is_some_and(|proto| proto.is_object() && js_sys::Reflect::has(&proto, &"setSinkId".into()).unwrap_or(false))
+}
+
+/// Whether the browser has its own speaker chooser (`selectAudioOutput`, Firefox), for
+/// when it lists no speakers to pick from.
+pub fn audio_output_chooser_supported() -> bool {
+    window()
+        .and_then(|w| w.navigator().media_devices().ok())
+        .is_some_and(|md| js_sys::Reflect::has(&md, &"selectAudioOutput".into()).unwrap_or(false))
+}
+
+/// The browser's own speaker chooser (`navigator.mediaDevices.selectAudioOutput()`). It is
+/// asked for right away, so call it straight from a click (it needs the user gesture); the
+/// future resolves with the speaker picked, or fails when the chooser is dismissed.
+pub fn select_audio_output() -> impl std::future::Future<Output = Result<DeviceEntry, JsValue>> {
+    let started = (|| -> Result<js_sys::Promise, JsValue> {
+        let media_devices = window().ok_or("No window")?.navigator().media_devices()?;
+        let select: js_sys::Function = js_sys::Reflect::get(&media_devices, &"selectAudioOutput".into())?.dyn_into()?;
+        select.call0(&media_devices)?.dyn_into()
+    })();
+    async move {
+        let info = JsFuture::from(started?).await?;
+        Ok(device_entry(&info))
+    }
+}
+
+/// Play `element` through the speaker `id` ("" = the system default). Does nothing where
+/// the browser can't choose speakers; a refusal is logged and the element keeps its output.
+pub fn set_sink_id(element: &HtmlMediaElement, id: &str) {
+    let current = js_sys::Reflect::get(element, &"sinkId".into()).ok().and_then(|v| v.as_string());
+    if current.as_deref() == Some(id) {
+        return;
+    }
+    let Ok(set) = js_sys::Reflect::get(element, &"setSinkId".into()).and_then(|f| f.dyn_into::<js_sys::Function>()) else {
+        return;
+    };
+    match set.call1(element, &id.into()).and_then(|p| p.dyn_into::<js_sys::Promise>()) {
+        Ok(promise) => wasm_bindgen_futures::spawn_local(async move {
+            if let Err(err) = JsFuture::from(promise).await {
+                log::warn!("setSinkId refused: {:?}", js_sys::Reflect::get(&err, &"name".into()).unwrap_or(err));
+            }
+        }),
+        Err(err) => log::warn!("setSinkId failed: {:?}", err),
+    }
+}
+
+/// `{ key: value }`, as in `{ ideal: 30 }`.
+fn bound(key: &str, value: impl Into<JsValue>) -> Result<JsValue, JsValue> {
+    let obj = js_sys::Object::new();
+    js_sys::Reflect::set(&obj, &key.into(), &value.into())?;
+    Ok(obj.into())
+}
+
+/// The whole constraint set for a capture target: `applyConstraints` replaces every
+/// constraint given before, so nothing may be left out. Screens get upper bounds (and never
+/// a minimum frame rate: Chrome's zero-hertz capture would then hold frames back); cameras
+/// get ideal values plus their `facingMode`.
+fn capture_constraints(target: &CaptureTarget, facing: Option<&str>) -> Result<js_sys::Object, JsValue> {
+    let c = js_sys::Object::new();
+    let size_key = if target.ideal { "ideal" } else { "max" };
+    if let Some(w) = target.width {
+        js_sys::Reflect::set(&c, &"width".into(), &bound(size_key, w)?)?;
+    }
+    if let Some(h) = target.height {
+        js_sys::Reflect::set(&c, &"height".into(), &bound(size_key, h)?)?;
+    }
+    let rate = bound("ideal", target.fps)?;
+    if !target.ideal {
+        js_sys::Reflect::set(&rate, &"max".into(), &target.fps.into())?;
+    }
+    js_sys::Reflect::set(&c, &"frameRate".into(), &rate)?;
+    if let Some(facing) = facing {
+        js_sys::Reflect::set(&c, &"facingMode".into(), &bound("ideal", facing)?)?;
+    }
+    Ok(c)
+}
+
+/// Re-constrain a live capture to `target` (the full set, see `capture_constraints`).
+/// `facing` keeps a camera on the same side. A refusal is ignored: the track keeps what it had.
+pub async fn apply_capture(track: &MediaStreamTrack, target: &CaptureTarget, facing: Option<&str>) {
+    let Ok(constraints) = capture_constraints(target, facing) else {
+        return;
+    };
+    let Ok(apply) = js_sys::Reflect::get(track, &"applyConstraints".into()).and_then(|f| f.dyn_into::<js_sys::Function>())
+    else {
+        return;
+    };
+    if let Ok(promise) = apply.call1(track, &constraints).and_then(|p| p.dyn_into::<js_sys::Promise>()) {
+        if let Err(err) = JsFuture::from(promise).await {
+            log::info!("applyConstraints refused: {:?}", err);
+        }
+    }
+}
+
+/// The size a video track delivers now (`getSettings()`), `(0, 0)` when unknown.
+pub fn track_size(track: &MediaStreamTrack) -> (u32, u32) {
+    let settings = track_settings(track);
+    let field = |name: &str| js_sys::Reflect::get(&settings, &name.into()).ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
+    (field("width").max(0.0) as u32, field("height").max(0.0) as u32)
+}
+
+fn track_settings(track: &MediaStreamTrack) -> JsValue {
+    js_sys::Reflect::get(track, &"getSettings".into())
+        .ok()
+        .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+        .and_then(|f| f.call0(track).ok())
+        .unwrap_or(JsValue::UNDEFINED)
 }
 
 /// What a screen share shows, from `track.getSettings()`: remote control maps pointer
@@ -86,16 +273,16 @@ impl ScreenInfo {
     }
 }
 
-/// Share the screen. The picker leans towards a whole screen (what remote control needs),
-/// leaves this dchat tab out, and the shared cursor is always drawn.
-pub async fn capture_screen() -> Result<(MediaStreamTrack, ScreenInfo), JsValue> {
+/// Share the screen at `fps` (both the ideal and the maximum). The picker leans towards a
+/// whole screen (what remote control needs) and leaves this dchat tab out. There is no size
+/// cap here: the returned `ScreenInfo` must be the source's own size, which dchat-host
+/// matches against its monitors. Presets cap the size afterwards with `apply_capture`.
+pub async fn capture_screen(fps: u32) -> Result<(MediaStreamTrack, ScreenInfo), JsValue> {
     let media_devices = window().ok_or("No window")?.navigator().media_devices()?;
     let video = js_sys::Object::new();
     js_sys::Reflect::set(&video, &"displaySurface".into(), &"monitor".into())?;
-    js_sys::Reflect::set(&video, &"cursor".into(), &"always".into())?;
-    let frame_rate = js_sys::Object::new();
-    js_sys::Reflect::set(&frame_rate, &"ideal".into(), &30.into())?;
-    js_sys::Reflect::set(&frame_rate, &"max".into(), &60.into())?;
+    let frame_rate = bound("ideal", fps)?;
+    js_sys::Reflect::set(&frame_rate, &"max".into(), &fps.into())?;
     js_sys::Reflect::set(&video, &"frameRate".into(), &frame_rate)?;
     let options = js_sys::Object::new();
     js_sys::Reflect::set(&options, &"video".into(), &video)?;
@@ -109,12 +296,16 @@ pub async fn capture_screen() -> Result<(MediaStreamTrack, ScreenInfo), JsValue>
     Ok((track, info))
 }
 
+/// Whether this browser can share a screen at all (mobile browsers can't), for the screen
+/// controls.
+pub fn screen_capture_supported() -> bool {
+    window()
+        .and_then(|w| w.navigator().media_devices().ok())
+        .is_some_and(|md| js_sys::Reflect::has(&md, &"getDisplayMedia".into()).unwrap_or(false))
+}
+
 pub fn screen_info(track: &MediaStreamTrack) -> ScreenInfo {
-    let settings = js_sys::Reflect::get(track, &"getSettings".into())
-        .ok()
-        .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
-        .and_then(|f| f.call0(track).ok())
-        .unwrap_or(JsValue::UNDEFINED);
+    let settings = track_settings(track);
     let field = |name: &str| js_sys::Reflect::get(&settings, &name.into()).unwrap_or(JsValue::UNDEFINED);
     ScreenInfo {
         surface: field("displaySurface").as_string().unwrap_or_default(),
@@ -124,22 +315,62 @@ pub fn screen_info(track: &MediaStreamTrack) -> ScreenInfo {
     }
 }
 
-/// Ask the capture for a frame rate (best effort: browsers may cap screen capture).
-pub fn set_frame_rate(track: &MediaStreamTrack, fps: u32) {
-    let constraints = js_sys::Object::new();
-    let rate = js_sys::Object::new();
-    let _ = js_sys::Reflect::set(&rate, &"ideal".into(), &fps.into());
-    let _ = js_sys::Reflect::set(&constraints, &"frameRate".into(), &rate);
-    if let Ok(apply) = js_sys::Reflect::get(track, &"applyConstraints".into()).and_then(|f| f.dyn_into::<js_sys::Function>()) {
-        if let Ok(promise) = apply.call1(track, &constraints).and_then(|p| p.dyn_into::<js_sys::Promise>()) {
-            let ignore = wasm_bindgen::closure::Closure::once(|_: JsValue| {});
-            let _ = promise.catch(&ignore);
-            ignore.forget();
-        }
+/// How long a `MediaCapabilities.encodingInfo` probe may take before it counts as "no".
+const PROBE_TIMEOUT_MS: i32 = 1500;
+
+/// `navigator.mediaCapabilities.encodingInfo({ type: "webrtc" })` for one codec at the size,
+/// frame rate and bitrate a preset would send. A missing API, an error or a timeout all
+/// count as unsupported.
+pub async fn encoding_info(kind: CodecKind, width: u32, height: u32, fps: u32, bitrate: u32) -> CodecProbe {
+    let unsupported = CodecProbe { kind, supported: false, smooth: false, power_efficient: false };
+    let start = || -> Result<js_sys::Promise, JsValue> {
+        let navigator = window().ok_or("No window")?.navigator();
+        let capabilities = js_sys::Reflect::get(&navigator, &"mediaCapabilities".into())?;
+        let encoding_info: js_sys::Function = js_sys::Reflect::get(&capabilities, &"encodingInfo".into())?.dyn_into()?;
+        let video = js_sys::Object::new();
+        js_sys::Reflect::set(&video, &"contentType".into(), &kind.mime().into())?;
+        js_sys::Reflect::set(&video, &"width".into(), &width.max(1).into())?;
+        js_sys::Reflect::set(&video, &"height".into(), &height.max(1).into())?;
+        js_sys::Reflect::set(&video, &"bitrate".into(), &bitrate.max(1).into())?;
+        js_sys::Reflect::set(&video, &"framerate".into(), &fps.max(1).into())?;
+        let config = js_sys::Object::new();
+        js_sys::Reflect::set(&config, &"type".into(), &"webrtc".into())?;
+        js_sys::Reflect::set(&config, &"video".into(), &video)?;
+        encoding_info.call1(&capabilities, &config)?.dyn_into()
+    };
+    let Ok(promise) = start() else {
+        return unsupported;
+    };
+    let Ok(info) = JsFuture::from(with_timeout(promise, PROBE_TIMEOUT_MS)).await else {
+        return unsupported;
+    };
+    if !info.is_object() {
+        return unsupported;
     }
+    let flag = |name: &str| js_sys::Reflect::get(&info, &name.into()).ok().and_then(|v| v.as_bool()).unwrap_or(false);
+    CodecProbe { kind, supported: flag("supported"), smooth: flag("smooth"), power_efficient: flag("powerEfficient") }
 }
 
-/// `contentHint`: "detail" keeps desktop text sharp, "motion" keeps games smooth.
+/// Every codec kind `codec_ladder` knows.
+pub const CODEC_KINDS: [CodecKind; 5] = [CodecKind::H265, CodecKind::H264, CodecKind::Av1, CodecKind::Vp9, CodecKind::Vp8];
+
+/// `encoding_info` for every codec kind, all at once.
+pub async fn probe_codecs(width: u32, height: u32, fps: u32, bitrate: u32) -> Vec<CodecProbe> {
+    futures::future::join_all(CODEC_KINDS.map(|kind| encoding_info(kind, width, height, fps, bitrate))).await
+}
+
+/// `promise`, or `undefined` after `ms` if it hasn't settled by then.
+fn with_timeout(promise: js_sys::Promise, ms: i32) -> js_sys::Promise {
+    let timer = js_sys::Promise::new(&mut |resolve, _| {
+        if let Some(win) = window() {
+            let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+        }
+    });
+    js_sys::Promise::race(&js_sys::Array::of2(&promise, &timer))
+}
+
+/// `contentHint` ("" leaves it to the browser). Browsers read it when the track is attached
+/// to a sender, so set it before that. Firefox has no such property: harmless there.
 pub fn set_content_hint(track: &MediaStreamTrack, hint: &str) {
     let _ = js_sys::Reflect::set(track, &"contentHint".into(), &hint.into());
 }
@@ -191,9 +422,10 @@ fn remote_audio_id(pubkey: &str) -> String {
     format!("remote-audio-{pubkey}")
 }
 
-/// Play `stream` through a hidden `<audio>` dedicated to this member. Returns the `play()`
-/// promise, which rejects when the browser blocks autoplay (the user must tap the page once).
-pub fn play_remote_audio(pubkey: &str, stream: &MediaStream, muted: bool) -> Option<js_sys::Promise> {
+/// Play `stream` through a hidden `<audio>` dedicated to this member, on the speaker `sink`
+/// ("" = the system default). Returns the `play()` promise, which rejects when the browser
+/// blocks autoplay (the user must tap the page once).
+pub fn play_remote_audio(pubkey: &str, stream: &MediaStream, muted: bool, sink: &str) -> Option<js_sys::Promise> {
     let doc = window()?.document()?;
     let id = remote_audio_id(pubkey);
     let audio: HtmlAudioElement = match doc.get_element_by_id(&id) {
@@ -209,6 +441,7 @@ pub fn play_remote_audio(pubkey: &str, stream: &MediaStream, muted: bool) -> Opt
             el.dyn_into().ok()?
         }
     };
+    set_sink_id(&audio, sink);
     if audio.src_object().map(|cur| cur.id()) != Some(stream.id()) {
         audio.set_src_object(Some(stream));
     }
@@ -243,6 +476,13 @@ fn remote_audio_elements() -> Vec<HtmlAudioElement> {
 pub fn set_remote_audio_muted(muted: bool) {
     for audio in remote_audio_elements() {
         audio.set_muted(muted);
+    }
+}
+
+/// Move every member's incoming audio to the speaker `id` ("" = the system default).
+pub fn set_remote_audio_sink(id: &str) {
+    for audio in remote_audio_elements() {
+        set_sink_id(&audio, id);
     }
 }
 
