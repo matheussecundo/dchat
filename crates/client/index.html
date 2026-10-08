@@ -5,8 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
     <meta name="theme-color" content="#0a0f1d">
     <title>dchat - Ephemeral Zero-Knowledge P2P Chat</title>
+    <!-- Installable app (PWA). No protocol_handlers: their %s template would put the room key in a request. -->
+    <link rel="manifest" href="manifest.webmanifest">
+    <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="dchat">
     <link data-trunk rel="css" href="style.css">
     <link data-trunk rel="copy-file" href="service-worker.js">
+    <link data-trunk rel="copy-file" href="manifest.webmanifest">
+    <link data-trunk rel="copy-dir" href="icons">
     <link data-trunk rel="rust" href="Cargo.toml" data-bin="client">
 </head>
 <body>
@@ -19,6 +28,18 @@
           });
         });
       }
+      // Chromium may offer installing the app before the wasm has loaded: keep its prompt
+      // for the lobby's Install button (pwa.rs), and tell the page when that changes.
+      window.dchatInstallPrompt = null;
+      window.addEventListener('beforeinstallprompt', (event) => {
+        event.preventDefault();
+        window.dchatInstallPrompt = event;
+        window.dispatchEvent(new Event('dchat-installable'));
+      });
+      window.addEventListener('appinstalled', () => {
+        window.dchatInstallPrompt = null;
+        window.dispatchEvent(new Event('dchat-installable'));
+      });
     </script>
 </body>
 </html>

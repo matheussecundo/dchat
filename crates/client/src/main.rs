@@ -6,6 +6,7 @@ mod media;
 mod mesh;
 mod names;
 mod nostr_pool;
+mod pwa;
 mod qr;
 mod remote_input;
 mod session;
@@ -20,7 +21,7 @@ use leptos::*;
 use names::{pubkey_tag, random_name, sanitize_name, MAX_NAME_CHARS};
 use protocol::video::{CameraPreset, ScreenPreset, VideoPresets};
 use protocol::{
-    format_relay_list, parse_cap, password_room_key, split_relay_input, stretch_password, RoomParams, VideoKind,
+    format_relay_list, parse_cap, password_room_key, split_relay_input, stretch_password, FragmentParams, RoomParams, VideoKind,
     DEFAULT_MEMBER_CAP, DEFAULT_VIDEO_CAP, DEFAULT_VOICE_CAP, KEY_LENGTH, REACTIONS, ControlWants, MonitorInfo,
     DEFAULT_AGENT_PORT, PointerMode,
 };
@@ -115,6 +116,19 @@ fn App() -> impl IntoView {
     let (room_id_sig, set_room_id_sig) = create_signal(String::new());
     let (toast, set_toast) = create_signal(Option::<&'static str>::None);
     let (update_required, set_update_required) = create_signal(false);
+
+    // Installing the app (PWA): the browser's install offer, read again whenever it changes.
+    let installed = pwa::is_installed();
+    let apple_install_hint = pwa::apple_install_hint();
+    let (install_offered, set_install_offered) = create_signal(pwa::install_available());
+    pwa::on_install_change(move || set_install_offered.set(pwa::install_available()));
+    // "Join with a link" in the lobby: any dchat site's link, of which only the fragment is used.
+    let (join_link_input, set_join_link_input) = create_signal(String::new());
+    let (join_link_invalid, set_join_link_invalid) = create_signal(false);
+    let join_with_link = move || match FragmentParams::from_link(&join_link_input.get_untracked()) {
+        Some(params) => state::join_link(&params),
+        None => set_join_link_invalid.set(true),
+    };
 
     // Remote control: the paired dchat-host app (app level: it survives a room rekey) and
     // which shared screen this tab is controlling right now.
@@ -896,8 +910,10 @@ fn App() -> impl IntoView {
         if let Some(doc) = window().and_then(|w| w.document()) {
             if count > 0 && page_hidden() {
                 doc.set_title(&format!("({count}) {base_title}"));
+                pwa::set_badge(count);
             } else {
                 doc.set_title(&base_title);
+                pwa::set_badge(0);
                 if count > 0 {
                     set_mention_count.set(0);
                 }
@@ -918,6 +934,20 @@ fn App() -> impl IntoView {
     }
     let am_admin = create_memo(move |_| members.with(|m| m.iter().any(|x| x.link == LinkUi::Me && x.is_admin)));
     let confirm = |text: String| window().and_then(|w| w.confirm_with_message(&text).ok()).unwrap_or(false);
+    // A room link handed to the installed app's open window (Android has only one). A new
+    // window (desktop) gets the link it was opened with: same room, nothing to do.
+    pwa::on_launch(move |target| {
+        let Some(params) = FragmentParams::from_link(&target) else {
+            return;
+        };
+        if params.get("room") == read_credentials().map(|(room, _)| room).as_deref() {
+            return;
+        }
+        if screen.get_untracked() == Screen::Room && !confirm(t(lang.get_untracked(), "confirm_switch_room").to_string()) {
+            return;
+        }
+        state::join_link(&params);
+    });
     let kick_member = move |pubkey: String, name: String| {
         if confirm(t_replace_1(lang.get_untracked(), "confirm_kick", "{name}", &name)) {
             with_session(&|s| s.kick(&pubkey));
@@ -973,144 +1003,181 @@ fn App() -> impl IntoView {
         };
         view! {
             <div class="lobby">
-                <form class="lobby-card" autocomplete="off" on:submit=move |ev| { ev.prevent_default(); create_and_enter(); }>
-                    <h2>{move || t(lang.get(), "create_title")}</h2>
-                    <p class="lobby-desc">{move || t(lang.get(), "create_desc")}</p>
-                    {name_field}
-                    <label class="lobby-label" for="cap-input">{move || t(lang.get(), "member_cap_label")}</label>
-                    <input
-                        id="cap-input"
-                        class="lobby-input"
-                        type="number"
-                        autocomplete="off"
-                        min="0"
-                        prop:value=move || cap_input.get()
-                        on:input=move |ev| set_cap_input.set(event_target_value(&ev))
-                    />
-                    <div class="lobby-row">
-                        <div class="lobby-field">
-                            <label class="lobby-label" for="voice-cap-input">{move || t(lang.get(), "voice_cap_label")}</label>
-                            <input
-                                id="voice-cap-input"
-                                class="lobby-input"
-                                type="number"
-                                autocomplete="off"
-                                min="0"
-                                prop:value=move || voice_cap_input.get()
-                                on:input=move |ev| set_voice_cap_input.set(event_target_value(&ev))
-                            />
-                        </div>
-                        <div class="lobby-field">
-                            <label class="lobby-label" for="video-cap-input">{move || t(lang.get(), "video_cap_label")}</label>
-                            <input
-                                id="video-cap-input"
-                                class="lobby-input"
-                                type="number"
-                                autocomplete="off"
-                                min="0"
-                                prop:value=move || video_cap_input.get()
-                                on:input=move |ev| set_video_cap_input.set(event_target_value(&ev))
-                            />
-                        </div>
-                    </div>
-                    <label class="lobby-label" for="relay-mode">{move || t(lang.get(), "relay_mode_label")}</label>
-                    <select
-                        id="relay-mode"
-                        class="lobby-input"
-                        on:change=move |ev| {
-                            set_relay_mode.set(match event_target_value(&ev).as_str() {
-                                "custom" => RelayMode::Custom,
-                                "both" => RelayMode::CustomWithPublic,
-                                _ => RelayMode::Public,
-                            });
-                        }
-                    >
-                        <option value="public" selected=move || relay_mode.get() == RelayMode::Public>
-                            {move || t(lang.get(), "relay_mode_public")}
-                        </option>
-                        <option value="custom" selected=move || relay_mode.get() == RelayMode::Custom>
-                            {move || t(lang.get(), "relay_mode_custom")}
-                        </option>
-                        <option value="both" selected=move || relay_mode.get() == RelayMode::CustomWithPublic>
-                            {move || t(lang.get(), "relay_mode_both")}
-                        </option>
-                    </select>
-                    {move || (relay_mode.get() != RelayMode::Public).then(|| view! {
-                        <label class="lobby-label" for="relay-url">{move || t(lang.get(), "relay_url_label")}</label>
+                <div class="lobby-stack">
+                    <form class="lobby-card" autocomplete="off" on:submit=move |ev| { ev.prevent_default(); create_and_enter(); }>
+                        <h2>{move || t(lang.get(), "create_title")}</h2>
+                        <p class="lobby-desc">{move || t(lang.get(), "create_desc")}</p>
+                        {name_field}
+                        <label class="lobby-label" for="cap-input">{move || t(lang.get(), "member_cap_label")}</label>
                         <input
-                            id="relay-url"
+                            id="cap-input"
                             class="lobby-input"
-                            type="text"
+                            type="number"
                             autocomplete="off"
-                            inputmode="url"
-                            autocapitalize="off"
-                            spellcheck="false"
-                            placeholder="wss://relay.example.com"
-                            prop:value=move || relay_input.get()
-                            on:input=move |ev| set_relay_input.set(event_target_value(&ev))
+                            min="0"
+                            prop:value=move || cap_input.get()
+                            on:input=move |ev| set_cap_input.set(event_target_value(&ev))
                         />
-                        {move || (!relay_input.get().trim().is_empty() && custom_relays.get().is_none()).then(|| view! {
-                            <p class="lobby-warning relay-invalid">{move || t(lang.get(), "relay_url_invalid")}</p>
-                        })}
-                    })}
-                    <p class="lobby-hint">{move || t(lang.get(), "relay_hint")}</p>
-                    <label class="lobby-check" for="history-checkbox">
-                        <input
-                            type="checkbox"
-                            id="history-checkbox"
-                            prop:checked=move || history_input.get()
-                            on:change=move |ev| set_history_input.set(event_target_checked(&ev))
-                        />
-                        <span>{move || t(lang.get(), "history_label")}</span>
-                    </label>
-                    <label class="lobby-check" for="hide-ip-checkbox">
-                        <input
-                            type="checkbox"
-                            id="hide-ip-checkbox"
-                            prop:checked=move || hide_ip_input.get()
-                            on:change=move |ev| set_hide_ip_input.set(event_target_checked(&ev))
-                        />
-                        <span>{move || t(lang.get(), "hide_ip_label")}</span>
-                    </label>
-                    {move || hide_ip_input.get().then(|| view! {
-                        <p class="lobby-hint">{move || t(lang.get(), "hide_ip_hint")}</p>
-                    })}
-                    <label class="lobby-check" for="password-checkbox">
-                        <input
-                            type="checkbox"
-                            id="password-checkbox"
-                            prop:checked=move || password_wanted.get()
-                            on:change=move |ev| {
-                                let wanted = event_target_checked(&ev);
-                                set_password_wanted.set(wanted);
-                                if !wanted {
-                                    set_password_input.set(String::new());
-                                }
-                            }
-                        />
-                        <span>{move || t(lang.get(), "password_checkbox_label")}</span>
-                    </label>
-                    // Chromium ignores autocomplete="off" on password boxes and would fill a
-                    // saved password into every new room; "new-password" makes it never fill one.
-                    {move || password_wanted.get().then(|| view! {
-                        <label class="lobby-label" for="password-input">{move || t(lang.get(), "join_password_label")}</label>
-                        <input
-                            id="password-input"
+                        <div class="lobby-row">
+                            <div class="lobby-field">
+                                <label class="lobby-label" for="voice-cap-input">{move || t(lang.get(), "voice_cap_label")}</label>
+                                <input
+                                    id="voice-cap-input"
+                                    class="lobby-input"
+                                    type="number"
+                                    autocomplete="off"
+                                    min="0"
+                                    prop:value=move || voice_cap_input.get()
+                                    on:input=move |ev| set_voice_cap_input.set(event_target_value(&ev))
+                                />
+                            </div>
+                            <div class="lobby-field">
+                                <label class="lobby-label" for="video-cap-input">{move || t(lang.get(), "video_cap_label")}</label>
+                                <input
+                                    id="video-cap-input"
+                                    class="lobby-input"
+                                    type="number"
+                                    autocomplete="off"
+                                    min="0"
+                                    prop:value=move || video_cap_input.get()
+                                    on:input=move |ev| set_video_cap_input.set(event_target_value(&ev))
+                                />
+                            </div>
+                        </div>
+                        <label class="lobby-label" for="relay-mode">{move || t(lang.get(), "relay_mode_label")}</label>
+                        <select
+                            id="relay-mode"
                             class="lobby-input"
-                            type="password"
-                            autocomplete="new-password"
-                            prop:value=move || password_input.get()
-                            on:input=move |ev| set_password_input.set(event_target_value(&ev))
-                        />
-                        <p class="lobby-hint">{move || t(lang.get(), "password_hint")}</p>
+                            on:change=move |ev| {
+                                set_relay_mode.set(match event_target_value(&ev).as_str() {
+                                    "custom" => RelayMode::Custom,
+                                    "both" => RelayMode::CustomWithPublic,
+                                    _ => RelayMode::Public,
+                                });
+                            }
+                        >
+                            <option value="public" selected=move || relay_mode.get() == RelayMode::Public>
+                                {move || t(lang.get(), "relay_mode_public")}
+                            </option>
+                            <option value="custom" selected=move || relay_mode.get() == RelayMode::Custom>
+                                {move || t(lang.get(), "relay_mode_custom")}
+                            </option>
+                            <option value="both" selected=move || relay_mode.get() == RelayMode::CustomWithPublic>
+                                {move || t(lang.get(), "relay_mode_both")}
+                            </option>
+                        </select>
+                        {move || (relay_mode.get() != RelayMode::Public).then(|| view! {
+                            <label class="lobby-label" for="relay-url">{move || t(lang.get(), "relay_url_label")}</label>
+                            <input
+                                id="relay-url"
+                                class="lobby-input"
+                                type="text"
+                                autocomplete="off"
+                                inputmode="url"
+                                autocapitalize="off"
+                                spellcheck="false"
+                                placeholder="wss://relay.example.com"
+                                prop:value=move || relay_input.get()
+                                on:input=move |ev| set_relay_input.set(event_target_value(&ev))
+                            />
+                            {move || (!relay_input.get().trim().is_empty() && custom_relays.get().is_none()).then(|| view! {
+                                <p class="lobby-warning relay-invalid">{move || t(lang.get(), "relay_url_invalid")}</p>
+                            })}
+                        })}
+                        <p class="lobby-hint">{move || t(lang.get(), "relay_hint")}</p>
+                        <label class="lobby-check" for="history-checkbox">
+                            <input
+                                type="checkbox"
+                                id="history-checkbox"
+                                prop:checked=move || history_input.get()
+                                on:change=move |ev| set_history_input.set(event_target_checked(&ev))
+                            />
+                            <span>{move || t(lang.get(), "history_label")}</span>
+                        </label>
+                        <label class="lobby-check" for="hide-ip-checkbox">
+                            <input
+                                type="checkbox"
+                                id="hide-ip-checkbox"
+                                prop:checked=move || hide_ip_input.get()
+                                on:change=move |ev| set_hide_ip_input.set(event_target_checked(&ev))
+                            />
+                            <span>{move || t(lang.get(), "hide_ip_label")}</span>
+                        </label>
+                        {move || hide_ip_input.get().then(|| view! {
+                            <p class="lobby-hint">{move || t(lang.get(), "hide_ip_hint")}</p>
+                        })}
+                        <label class="lobby-check" for="password-checkbox">
+                            <input
+                                type="checkbox"
+                                id="password-checkbox"
+                                prop:checked=move || password_wanted.get()
+                                on:change=move |ev| {
+                                    let wanted = event_target_checked(&ev);
+                                    set_password_wanted.set(wanted);
+                                    if !wanted {
+                                        set_password_input.set(String::new());
+                                    }
+                                }
+                            />
+                            <span>{move || t(lang.get(), "password_checkbox_label")}</span>
+                        </label>
+                        // Chromium ignores autocomplete="off" on password boxes and would fill a
+                        // saved password into every new room; "new-password" makes it never fill one.
+                        {move || password_wanted.get().then(|| view! {
+                            <label class="lobby-label" for="password-input">{move || t(lang.get(), "join_password_label")}</label>
+                            <input
+                                id="password-input"
+                                class="lobby-input"
+                                type="password"
+                                autocomplete="new-password"
+                                prop:value=move || password_input.get()
+                                on:input=move |ev| set_password_input.set(event_target_value(&ev))
+                            />
+                            <p class="lobby-hint">{move || t(lang.get(), "password_hint")}</p>
+                        })}
+                        {move || cap_is_large().then(|| view! {
+                            <p class="lobby-warning">{move || t(lang.get(), "cap_warning")}</p>
+                        })}
+                        <button id="create-room-btn" type="submit" class="btn btn-primary lobby-submit" disabled=move || entering.get() || !relay_choice_valid()>
+                            {move || enter_label("btn_create_room")}
+                        </button>
+                    </form>
+                    <form class="lobby-card join-link-card" autocomplete="off" on:submit=move |ev| { ev.prevent_default(); join_with_link(); }>
+                        <label class="lobby-label" for="join-link-input">{move || t(lang.get(), "join_link_label")}</label>
+                        <div class="join-link-row">
+                            <input
+                                id="join-link-input"
+                                class="lobby-input"
+                                type="text"
+                                autocomplete="off"
+                                inputmode="url"
+                                autocapitalize="off"
+                                spellcheck="false"
+                                placeholder="https://…/#room=…&key=…"
+                                prop:value=move || join_link_input.get()
+                                on:input=move |ev| {
+                                    set_join_link_input.set(event_target_value(&ev));
+                                    set_join_link_invalid.set(false);
+                                }
+                            />
+                            <button id="join-link-btn" type="submit" class="btn btn-secondary" disabled=move || join_link_input.get().trim().is_empty()>
+                                {move || t(lang.get(), "join_link_btn")}
+                            </button>
+                        </div>
+                        {move || join_link_invalid.get().then(|| view! {
+                            <p class="lobby-warning join-link-invalid">{move || t(lang.get(), "join_link_invalid")}</p>
+                        })}
+                    </form>
+                    // Installing is offered here only: from a page without a room in its address.
+                    {move || (install_offered.get() && !installed).then(|| view! {
+                        <button id="install-app-btn" type="button" class="btn btn-secondary install-app-btn" on:click=move |_| pwa::prompt_install()>
+                            {move || t(lang.get(), "install_app")}
+                        </button>
                     })}
-                    {move || cap_is_large().then(|| view! {
-                        <p class="lobby-warning">{move || t(lang.get(), "cap_warning")}</p>
+                    {apple_install_hint.then(|| view! {
+                        <p class="lobby-hint install-hint">{move || t(lang.get(), "install_hint_apple")}</p>
                     })}
-                    <button id="create-room-btn" type="submit" class="btn btn-primary lobby-submit" disabled=move || entering.get() || !relay_choice_valid()>
-                        {move || enter_label("btn_create_room")}
-                    </button>
-                </form>
+                </div>
             </div>
         }
     };

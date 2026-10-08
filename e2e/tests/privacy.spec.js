@@ -40,7 +40,8 @@ test('handshakes through the relays are sealed: the room key alone does not reve
     expect(signal.payload.content.to).toBe(boKey);
   }
   const readable = JSON.stringify(signals);
-  for (const secret of ['v=0', 'candidate', 'a=fingerprint', 'sdp']) {
+  // `"sdp`, not `sdp`: random base64url ciphertext can contain the letters, never a quote.
+  for (const secret of ['v=0', 'candidate', 'a=fingerprint', '"sdp']) {
     expect(readable).not.toContain(secret);
   }
 
@@ -157,9 +158,13 @@ test('nothing typed is kept by the browser, and spell checking can be turned off
   const ana = await newMember(browser, 'Ana');
   const bo = await newMember(browser, 'Bo');
   await ana.page.goto('/');
-  // Form autofill would save names and relay addresses to disk.
-  await expect(ana.page.locator('form.lobby-card')).toHaveAttribute('autocomplete', 'off');
-  for (const id of ['#name-input', '#cap-input']) {
+  // Form autofill would save names, relay addresses and pasted room links to disk.
+  const forms = ana.page.locator('form.lobby-card');
+  await expect(forms).toHaveCount(2);
+  for (const form of await forms.all()) {
+    await expect(form).toHaveAttribute('autocomplete', 'off');
+  }
+  for (const id of ['#name-input', '#cap-input', '#join-link-input']) {
     await expect(ana.page.locator(id)).toHaveAttribute('autocomplete', 'off');
   }
   // Chromium ignores "off" on password boxes: the opt-in box asks for a new password, which

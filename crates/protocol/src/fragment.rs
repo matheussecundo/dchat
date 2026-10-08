@@ -1,3 +1,5 @@
+use crate::crypto::key_from_base64;
+
 /// Ordered key/value pairs of a URL fragment (`#room=..&key=..&relays=..`).
 ///
 /// Round-trips every parameter, including ones this version does not know about,
@@ -22,6 +24,17 @@ impl FragmentParams {
             })
             .collect();
         Self { pairs }
+    }
+
+    /// The room in a pasted or launched dchat link: everything after the first `#`, from any
+    /// site's link or a bare `#room=..&key=..`. Only the fragment is kept (the room lives
+    /// entirely in it); `None` unless it names a room with a valid key.
+    pub fn from_link(link: &str) -> Option<Self> {
+        let (_, hash) = link.trim().split_once('#')?;
+        let params = Self::parse(hash);
+        params.get("room")?;
+        key_from_base64(params.get("key")?).ok()?;
+        Some(params)
     }
 
     /// First non-empty value for `key`.
@@ -101,6 +114,28 @@ mod tests {
     fn test_only_first_equals_splits() {
         let params = FragmentParams::parse("relays=wss://r.example/?a=b");
         assert_eq!(params.get("relays"), Some("wss://r.example/?a=b"));
+    }
+
+    const KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+
+    #[test]
+    fn test_from_link_keeps_only_the_fragment() {
+        let link = format!("https://mirror.example/dchat/?q=1#room=r1&key={KEY}&relays=nostr&pw=salt&admsk=ab&future=1");
+        let params = FragmentParams::from_link(&link).unwrap();
+        assert_eq!(params.to_hash(), format!("#room=r1&key={KEY}&relays=nostr&pw=salt&admsk=ab&future=1"));
+        let bare = FragmentParams::from_link(&format!("  #room=r1&key={KEY}\n")).unwrap();
+        assert_eq!(bare.to_hash(), format!("#room=r1&key={KEY}"));
+    }
+
+    #[test]
+    fn test_from_link_rejects_links_without_a_room() {
+        assert_eq!(FragmentParams::from_link(""), None);
+        assert_eq!(FragmentParams::from_link("https://dchat.example/"), None);
+        assert_eq!(FragmentParams::from_link(&format!("room=r1&key={KEY}")), None);
+        assert_eq!(FragmentParams::from_link(&format!("#key={KEY}")), None);
+        assert_eq!(FragmentParams::from_link("#room=r1"), None);
+        assert_eq!(FragmentParams::from_link("#room=r1&key=c2hvcnQ"), None);
+        assert_eq!(FragmentParams::from_link("#room=r1&key=not base64!"), None);
     }
 
     #[test]

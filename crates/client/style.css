@@ -966,6 +966,36 @@ select.lobby-input {
   font-size: 1rem;
 }
 
+/* Create card, "Join with a link" and the install offer, stacked. Auto margins center it
+   while it fits and let it scroll from the top when it doesn't. */
+.lobby-stack {
+  width: 100%;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-self: flex-start;
+  margin: auto 0;
+}
+
+.join-link-row {
+  display: flex;
+  gap: 8px;
+}
+
+.join-link-row .lobby-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.install-app-btn {
+  align-self: center;
+}
+
+.install-hint {
+  text-align: center;
+}
+
 /* Room layout: chat plus member list */
 .room-body {
   flex: 1;

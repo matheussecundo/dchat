@@ -104,4 +104,5 @@ features = [
   "DomRectReadOnly",
   "KeyboardEvent",
   "Response",
+  "MediaQueryList",
 ]

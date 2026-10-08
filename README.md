@@ -90,6 +90,9 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 10. **Phase 10: Low-Latency Video with Quality Presets (Completed)**
    - Pick how your camera and screen share look to everyone: from **Fastest** (720p, 60 fps, lowest latency) to **Text** (full resolution, 15 fps, crisp and light). Video no longer waits for voice lip sync, pointer moves are sent at once, and an ⓘ panel on each tile shows what the connection is doing.
 
+11. **Phase 11: Installable App (Completed)**
+   - Install dchat as an app (PWA) on desktop, Android, iPhone and iPad: its own window and icon, room links that open in the app, **Join with a link** in the lobby, and @mentions counted on the app icon. Still nothing stored; remote control still uses `dchat-host`.
+
 ---
 
 ## Group Rooms
@@ -117,7 +120,7 @@ Every room message is signed with its author's session key, so a member relaying
 - **Reactions**: hover a message and tap 😀 to add 👍 ❤️ 😂 😮 😢 🎉; tap a reaction chip to add or remove yours.
 - **Edit / delete your own messages**: ✏️ puts the text back in the box (Enter saves, Esc cancels) and others see *(edited)*. 🗑️ removes it for everyone. Both are signed by you; deletion is best effort, since anyone may have already read or copied the message. Edited or deleted messages leave the history shown to late joiners.
 - **Private messages**: ✉️ next to a member opens a private chat. Messages are sealed with a key only the two of you can derive (ECDH between your session keys). With a direct link they travel only over that link; otherwise other members relay them without being able to read them or see whom they are for. The conversation ends when either of you leaves, because session keys are per tab.
-- **@mentions**: write `@Name` and that member sees the message highlighted, hears a short chime and, if the tab is in the background, gets a `(n)` badge in the tab title.
+- **@mentions**: write `@Name` and that member sees the message highlighted, hears a short chime and, if the tab is in the background, gets a `(n)` badge in the tab title (and on the app icon when dchat is installed).
 
 ### Voice Lounge
 
@@ -168,6 +171,17 @@ While you share your **entire screen** in the lounge, you can let someone else u
 6. **Stopping**: **Ctrl+Alt+Shift+Q** anywhere on the shared computer (Windows and X11 desktops), **⛔ Stop control** in the lounge bar, the **✕** next to a member, or Enter / Ctrl+C in dchat-host's terminal. Control also ends when you stop sharing, leave voice, or the app disconnects, and everything held down is released.
 
 Security: dchat-host only listens on `127.0.0.1`, only accepts your dchat site, and pairs only with someone who types its code (both sides prove they know it). Your tab forwards input only from the person you allowed, and the app checks that again. Mouse and keyboard give full use of your computer, including allowing others: only allow people you trust.
+
+### Installing dchat as an App
+
+dchat can be installed like an app (a PWA): it gets its own window and icon, and starts from the icon. It is the same site: nothing is stored, a reload still wipes the session, and installing changes nothing about who sees what.
+
+- **Desktop (Chrome, Edge)**: the start page shows **📲 Install app** (or use the install icon in the address bar). Room links you click elsewhere then open in a new dchat window; the browser's app settings can turn that off.
+- **Android (Chrome)**: **📲 Install app**, or the menu's *Install app*. Room links open in the app; since it has one window, tapping a link while you are in a room asks before leaving it.
+- **iPhone, iPad**: Share → **Add to Home Screen**; on a Mac, Safari's File → **Add to Dock**. Add it from the start page rather than from inside a room, so the icon never holds a room link. iOS opens room links in Safari, never in the app: copy the link instead and paste it into **Join with a link**.
+- **Join with a link** (on the start page, everywhere): paste a room link from any dchat site, or just its `#room=…&key=…` part. Only the part after `#` is used, and the room is joined from this site.
+
+Installing needs HTTPS (or `localhost`): browsers don't offer it on the dev server's self-signed LAN address. Remote control still needs **`dchat-host`** on the shared computer, installed app or not: no web app can move the mouse or press keys.
 
 ### URL Fragment Parameters
 
