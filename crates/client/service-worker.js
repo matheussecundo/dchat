@@ -1,9 +1,16 @@
-const CACHE_NAME = "dchat-static-v3";
+const CACHE_NAME = "dchat-static-v4";
 // Only files with fixed names: the CSS/JS/WASM have content hashes in their names and are
 // cached when first fetched. Precaching a missing file would make the install fail.
+// The manifest and icons are served cache-first: bump CACHE_NAME when they change.
 const STATIC_ASSETS = [
   "./",
   "./index.html",
+  "./manifest.webmanifest",
+  "./icons/icon.svg",
+  "./icons/icon-192.png",
+  "./icons/icon-512.png",
+  "./icons/icon-maskable-512.png",
+  "./icons/apple-touch-icon.png",
 ];
 
 // Invariant: This Service Worker ONLY caches immutable application shell assets.

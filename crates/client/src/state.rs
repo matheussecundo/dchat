@@ -350,6 +350,16 @@ pub fn replace_fragment(params: &FragmentParams) {
     }
 }
 
+/// Open the room of a pasted or launched link (`FragmentParams::from_link`) in this window:
+/// the fragment is rewritten in place and the page reloads, so the key never travels in a
+/// request. Reloading leaves any current room, as a reload always does.
+pub fn join_link(params: &FragmentParams) {
+    replace_fragment(params);
+    if let Some(win) = window() {
+        let _ = win.location().reload();
+    }
+}
+
 /// The room ID and 256-bit key from the URL fragment, when both are present and valid.
 /// Format: #room=<room_id>&key=<base64_secret_key>[&other=params...]
 /// Invariant: URL hash fragments are NEVER sent to the HTTP or WebSocket server.

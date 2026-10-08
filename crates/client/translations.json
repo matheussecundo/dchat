@@ -288,7 +288,13 @@
     "toast_camera_device_missing": "The chosen camera isn't available: using the system default.",
     "title_next_camera": "Switch to the next camera",
     "password_checkbox_label": "Protect with a password",
-    "join_password_ask": "This room was created with a password. Ask whoever shared the link."
+    "join_password_ask": "This room was created with a password. Ask whoever shared the link.",
+    "join_link_label": "Have a room link? Paste it here to join",
+    "join_link_btn": "Join",
+    "join_link_invalid": "That isn't a dchat room link: it needs #room=…&key=…",
+    "install_app": "📲 Install app",
+    "install_hint_apple": "To install dchat: Share → Add to Home Screen (iPhone, iPad), or File → Add to Dock in Safari (Mac).",
+    "confirm_switch_room": "Leave this room and open the new link? This room's chat is not kept."
   },
   "zh": {
     "scan_qr": "📱 扫描二维码",
@@ -579,7 +585,13 @@
     "toast_camera_device_missing": "所选摄像头不可用：正在使用系统默认设备。",
     "title_next_camera": "切换到下一个摄像头",
     "password_checkbox_label": "使用密码保护",
-    "join_password_ask": "此房间创建时设置了密码。请向分享链接的人询问。"
+    "join_password_ask": "此房间创建时设置了密码。请向分享链接的人询问。",
+    "join_link_label": "有房间链接？粘贴到这里即可加入",
+    "join_link_btn": "加入",
+    "join_link_invalid": "这不是 dchat 房间链接：需要包含 #room=…&key=…",
+    "install_app": "📲 安装应用",
+    "install_hint_apple": "安装 dchat：分享 → 添加到主屏幕（iPhone、iPad），或在 Safari 中选择 文件 → 添加到程序坞（Mac）。",
+    "confirm_switch_room": "离开当前房间并打开新链接？当前房间的聊天记录不会保留。"
   },
   "hi": {
     "scan_qr": "📱 क्यूआर स्कैन करें",
@@ -870,7 +882,13 @@
     "toast_camera_device_missing": "चुना गया कैमरा उपलब्ध नहीं है: सिस्टम डिफ़ॉल्ट का उपयोग हो रहा है।",
     "title_next_camera": "अगले कैमरे पर जाएँ",
     "password_checkbox_label": "पासवर्ड से सुरक्षित करें",
-    "join_password_ask": "यह रूम पासवर्ड के साथ बनाया गया था। लिंक साझा करने वाले व्यक्ति से पूछें।"
+    "join_password_ask": "यह रूम पासवर्ड के साथ बनाया गया था। लिंक साझा करने वाले व्यक्ति से पूछें।",
+    "join_link_label": "कमरे का लिंक है? जुड़ने के लिए उसे यहाँ पेस्ट करें",
+    "join_link_btn": "जुड़ें",
+    "join_link_invalid": "यह dchat कमरे का लिंक नहीं है: इसमें #room=…&key=… होना चाहिए",
+    "install_app": "📲 ऐप इंस्टॉल करें",
+    "install_hint_apple": "dchat इंस्टॉल करने के लिए: शेयर → होम स्क्रीन में जोड़ें (iPhone, iPad), या Safari में फ़ाइल → Dock में जोड़ें (Mac)।",
+    "confirm_switch_room": "इस कमरे को छोड़कर नया लिंक खोलें? इस कमरे की चैट सहेजी नहीं जाती।"
   },
   "es": {
     "scan_qr": "📱 Escanear QR",
@@ -1161,7 +1179,13 @@
     "toast_camera_device_missing": "La cámara elegida no está disponible: se usa la predeterminada del sistema.",
     "title_next_camera": "Cambiar a la siguiente cámara",
     "password_checkbox_label": "Proteger con contraseña",
-    "join_password_ask": "Esta sala se creó con contraseña. Pídesela a quien compartió el enlace."
+    "join_password_ask": "Esta sala se creó con contraseña. Pídesela a quien compartió el enlace.",
+    "join_link_label": "¿Tienes un enlace de sala? Pégalo aquí para unirte",
+    "join_link_btn": "Unirse",
+    "join_link_invalid": "Ese no es un enlace de sala de dchat: necesita #room=…&key=…",
+    "install_app": "📲 Instalar la app",
+    "install_hint_apple": "Para instalar dchat: Compartir → Añadir a pantalla de inicio (iPhone, iPad), o Archivo → Añadir al Dock en Safari (Mac).",
+    "confirm_switch_room": "¿Salir de esta sala y abrir el nuevo enlace? El chat de esta sala no se conserva."
   },
   "fr": {
     "scan_qr": "📱 Scanner QR",
@@ -1452,7 +1476,13 @@
     "toast_camera_device_missing": "La caméra choisie n'est pas disponible : celle par défaut du système est utilisée.",
     "title_next_camera": "Passer à la caméra suivante",
     "password_checkbox_label": "Protéger par un mot de passe",
-    "join_password_ask": "Ce salon a été créé avec un mot de passe. Demandez-le à la personne qui a partagé le lien."
+    "join_password_ask": "Ce salon a été créé avec un mot de passe. Demandez-le à la personne qui a partagé le lien.",
+    "join_link_label": "Vous avez un lien de salon ? Collez-le ici pour le rejoindre",
+    "join_link_btn": "Rejoindre",
+    "join_link_invalid": "Ce n'est pas un lien de salon dchat : il doit contenir #room=…&key=…",
+    "install_app": "📲 Installer l'application",
+    "install_hint_apple": "Pour installer dchat : Partager → Sur l'écran d'accueil (iPhone, iPad), ou Fichier → Ajouter au Dock dans Safari (Mac).",
+    "confirm_switch_room": "Quitter ce salon et ouvrir le nouveau lien ? La discussion de ce salon n'est pas conservée."
   },
   "ar": {
     "scan_qr": "📱 مسح رمز QR",
@@ -1743,7 +1773,13 @@
     "toast_camera_device_missing": "الكاميرا المختارة غير متاحة: تُستخدم الافتراضية للنظام.",
     "title_next_camera": "الانتقال إلى الكاميرا التالية",
     "password_checkbox_label": "الحماية بكلمة مرور",
-    "join_password_ask": "أُنشئت هذه الغرفة بكلمة مرور. اطلبها ممن شارك الرابط."
+    "join_password_ask": "أُنشئت هذه الغرفة بكلمة مرور. اطلبها ممن شارك الرابط.",
+    "join_link_label": "لديك رابط غرفة؟ الصقه هنا للانضمام",
+    "join_link_btn": "انضمام",
+    "join_link_invalid": "هذا ليس رابط غرفة dchat: يجب أن يحتوي على #room=…&key=…",
+    "install_app": "📲 تثبيت التطبيق",
+    "install_hint_apple": "لتثبيت dchat: مشاركة ← إضافة إلى الشاشة الرئيسية (iPhone و iPad)، أو ملف ← إضافة إلى Dock في Safari (Mac).",
+    "confirm_switch_room": "هل تريد مغادرة هذه الغرفة وفتح الرابط الجديد؟ لا يتم الاحتفاظ بمحادثة هذه الغرفة."
   },
   "bn": {
     "scan_qr": "📱 কিউআর স্ক্যান",
@@ -2034,7 +2070,13 @@
     "toast_camera_device_missing": "বেছে নেওয়া ক্যামেরাটি পাওয়া যাচ্ছে না: সিস্টেম ডিফল্ট ব্যবহার করা হচ্ছে।",
     "title_next_camera": "পরের ক্যামেরায় যান",
     "password_checkbox_label": "পাসওয়ার্ড দিয়ে সুরক্ষিত করুন",
-    "join_password_ask": "এই রুমটি পাসওয়ার্ড দিয়ে তৈরি করা হয়েছে। যিনি লিংক শেয়ার করেছেন তাঁকে জিজ্ঞেস করুন।"
+    "join_password_ask": "এই রুমটি পাসওয়ার্ড দিয়ে তৈরি করা হয়েছে। যিনি লিংক শেয়ার করেছেন তাঁকে জিজ্ঞেস করুন।",
+    "join_link_label": "রুমের লিঙ্ক আছে? যোগ দিতে এখানে পেস্ট করুন",
+    "join_link_btn": "যোগ দিন",
+    "join_link_invalid": "এটি dchat রুমের লিঙ্ক নয়: এতে #room=…&key=… থাকতে হবে",
+    "install_app": "📲 অ্যাপ ইনস্টল করুন",
+    "install_hint_apple": "dchat ইনস্টল করতে: শেয়ার → হোম স্ক্রিনে যোগ করুন (iPhone, iPad), অথবা Safari-তে ফাইল → Dock-এ যোগ করুন (Mac)।",
+    "confirm_switch_room": "এই রুম ছেড়ে নতুন লিঙ্কটি খুলবেন? এই রুমের চ্যাট রাখা হয় না।"
   },
   "pt": {
     "scan_qr": "📱 Escanear QR",
@@ -2325,7 +2367,13 @@
     "toast_camera_device_missing": "A câmera escolhida não está disponível: usando o padrão do sistema.",
     "title_next_camera": "Mudar para a próxima câmera",
     "password_checkbox_label": "Proteger com senha",
-    "join_password_ask": "Esta sala foi criada com senha. Peça a quem compartilhou o link."
+    "join_password_ask": "Esta sala foi criada com senha. Peça a quem compartilhou o link.",
+    "join_link_label": "Tem um link de sala? Cole aqui para entrar",
+    "join_link_btn": "Entrar",
+    "join_link_invalid": "Isso não é um link de sala do dchat: ele precisa de #room=…&key=…",
+    "install_app": "📲 Instalar app",
+    "install_hint_apple": "Para instalar o dchat: Compartilhar → Adicionar à Tela de Início (iPhone, iPad), ou Arquivo → Adicionar ao Dock no Safari (Mac).",
+    "confirm_switch_room": "Sair desta sala e abrir o novo link? O chat desta sala não é guardado."
   },
   "ru": {
     "scan_qr": "📱 Сканировать QR",
@@ -2616,7 +2664,13 @@
     "toast_camera_device_missing": "Выбранная камера недоступна: используется системная по умолчанию.",
     "title_next_camera": "Переключиться на следующую камеру",
     "password_checkbox_label": "Защитить паролем",
-    "join_password_ask": "Эта комната создана с паролем. Спросите его у того, кто поделился ссылкой."
+    "join_password_ask": "Эта комната создана с паролем. Спросите его у того, кто поделился ссылкой.",
+    "join_link_label": "Есть ссылка на комнату? Вставьте её сюда, чтобы войти",
+    "join_link_btn": "Войти",
+    "join_link_invalid": "Это не ссылка на комнату dchat: в ней должно быть #room=…&key=…",
+    "install_app": "📲 Установить приложение",
+    "install_hint_apple": "Чтобы установить dchat: Поделиться → На экран «Домой» (iPhone, iPad) или Файл → Добавить в Dock в Safari (Mac).",
+    "confirm_switch_room": "Покинуть эту комнату и открыть новую ссылку? Чат этой комнаты не сохраняется."
   },
   "de": {
     "scan_qr": "📱 QR scannen",
@@ -2907,6 +2961,12 @@
     "toast_camera_device_missing": "Die gewählte Kamera ist nicht verfügbar: Der Systemstandard wird verwendet.",
     "title_next_camera": "Zur nächsten Kamera wechseln",
     "password_checkbox_label": "Mit Passwort schützen",
-    "join_password_ask": "Dieser Raum wurde mit einem Passwort erstellt. Frag die Person, die den Link geteilt hat."
+    "join_password_ask": "Dieser Raum wurde mit einem Passwort erstellt. Frag die Person, die den Link geteilt hat.",
+    "join_link_label": "Hast du einen Raumlink? Füge ihn hier ein, um beizutreten",
+    "join_link_btn": "Beitreten",
+    "join_link_invalid": "Das ist kein dchat-Raumlink: Er braucht #room=…&key=…",
+    "install_app": "📲 App installieren",
+    "install_hint_apple": "So installierst du dchat: Teilen → Zum Home-Bildschirm (iPhone, iPad) oder in Safari Ablage → Zum Dock hinzufügen (Mac).",
+    "confirm_switch_room": "Diesen Raum verlassen und den neuen Link öffnen? Der Chat dieses Raums wird nicht aufbewahrt."
   }
 }

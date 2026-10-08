@@ -18,6 +18,7 @@ Every agent modifying this codebase must enforce these non-negotiable security a
 2. **Zero-Knowledge Key Distribution**:
    - **URL Hash Confidentiality**: The room ID and 256-bit symmetric encryption key are stored in the URL fragment (`#room=<id>&key=<base64_secret>`).
    - **Rule**: URL hash fragments are never sent to the server over HTTP requests or WebSocket handshakes. The server is completely blind to the decryption key.
+   - **Links from outside the page** (the lobby's **Join with a link**, and `launchQueue` launches in the installed app) go through `FragmentParams::from_link` (only the part after `#`, any site's link) and `state::join_link` (rewrite the fragment in place, then reload). The manifest has no `protocol_handlers`: their `%s` URL template would carry the key in a request.
    - **Room passwords** (`&pw=<salt>`, `protocol::password`): room key = SHA-256(link key, Argon2id(password, salt)), relay topic = `password_room_topic` (so the link alone doesn't find the room). The stretched value stays in RAM and re-derives the key after a rekey (grants carry link keys, never derived keys). Never put a password verifier in the link: it would allow offline guessing from the link alone.
 
 3. **Dual-Layer End-to-End Encryption & Decentralized Signaling**:
@@ -55,7 +56,8 @@ Every agent modifying this codebase must enforce these non-negotiable security a
 
 6. **Hosting Anywhere (static, any path)**:
    - The production build must work at a domain root, under a path (`https://<user>.github.io/<repo>/`) and on IPFS: asset URLs are relative (`crates/client/Trunk.toml`), and code never navigates to `/`; use `state::page_base_url()` for "home".
-   - The Service Worker only precaches files with fixed names (`./`, `./index.html`); hashed assets are cached on first fetch. Precaching a missing file makes its install fail on real hosts (the local dev server masks this by answering unknown paths with `index.html`).
+   - The Service Worker only precaches files with fixed names (`./`, `./index.html`, `./manifest.webmanifest`, `./icons/*`); hashed assets are cached on first fetch. Precaching a missing file makes its install fail on real hosts (the local dev server masks this by answering unknown paths with `index.html`). The manifest and icons are served cache-first: bump `CACHE_NAME` when they change.
+   - **Installed app (Phase 11)**: `manifest.webmanifest` keeps `id`, `start_url` and `scope` at `./` (so every mirror is its own app), `display: standalone` (a reload button would wipe the room) and `launch_handler.client_mode: ["navigate-new", "focus-existing"]`: desktop opens each room link in a new window; a single-window app (Android) gets it through `launchQueue`, and the page asks before leaving a live room. The install offer and the Apple hint appear only on the create screen (no room in the address).
    - `Cargo.lock` is committed so CI deploys the dependency versions that were tested (`--locked`).
    - **Host TURN (Cloudflare)**: the client fetches `./ice-servers` once when entering a room and adds any servers returned to `RtcConfiguration`; 404, HTML or a timeout falls back silently (STUN plus `&turn=`). The Worker keeps `TURN_KEY_API_TOKEN` secret, returns only short-lived credentials (`Cache-Control: no-store`), filters port-53 URLs, rejects cross-site requests and rate-limits per IP. The request never includes room data, and the Service Worker never caches it.
    - The Worker entry module (`worker/index.js`) may only export its default handler: the Workers runtime rejects other named exports (put helpers in `ice.js`).
@@ -96,7 +98,7 @@ dchat/
 │   │       ├── agent.rs        # Tab ↔ dchat-host contract: JSON messages, mutual pairing proofs, own version + fingerprint
 │   │       ├── control.rs      # Remote-control permissions: ControlState (one mouse/keyboard holder, pads P1–P4), InputGate (unit-tested)
 │   │       ├── crypto.rs       # 256-bit keygen, encrypt/decrypt, base64 helpers
-│   │       ├── fragment.rs     # Order-preserving URL fragment parser (keeps unknown params)
+│   │       ├── fragment.rs     # Order-preserving URL fragment parser (keeps unknown params), room links from any site (`from_link`)
 │   │       ├── input.rs        # Remote-control input events, binary codec, sealed packets (room key + AAD), capture helpers
 │   │       ├── keycodes.rs     # DomCode: KeyboardEvent.code ↔ USB HID usage (126 keys)
 │   │       ├── messages.rs     # Addressed SignalPayload, signed RoomEnvelope/RoomBody, ICE types
@@ -138,7 +140,9 @@ dchat/
 │   │       └── tls.rs          # rcgen self-signed dev certificate generator
 │   └── client/                 # Leptos CSR frontend targeting wasm32-unknown-unknown
 │       ├── Trunk.toml          # public_url = "./": relative asset paths (works under any path)
-│       ├── index.html          # Trunk entry point & Service Worker registration
+│       ├── index.html          # Trunk entry point, Service Worker registration, PWA links, early beforeinstallprompt capture
+│       ├── manifest.webmanifest # Installable app: relative id/start_url/scope, standalone, launch_handler, icons
+│       ├── icons/              # icon.svg (source, favicon) + PNGs rendered from it once: 192, 512, maskable 512, apple-touch 180
 │       ├── style.css           # Responsive mobile-friendly dark theme
 │       ├── service-worker.js   # Caches immutable static assets ONLY (never state)
 │       ├── translations.json   # Embedded UI translation table for top 10 global languages
@@ -152,6 +156,7 @@ dchat/
 │           ├── mesh.rs         # PeerLink: one RTCPeerConnection per member (chat + file-transfer channels), perfect negotiation, batched ICE, tracks
 │           ├── names.rs        # Random session names, name sanitizing, pubkey tags
 │           ├── nostr_pool.rs   # Multi-relay pool, fan-out broadcast, deduplication, recipient filtering
+│           ├── pwa.rs          # Installed app glue: install offer, Apple hint, app badge, launchQueue links (all feature-detected)
 │           ├── qr.rs           # On-the-fly SVG QR code generation
 │           ├── remote_input.rs # Viewer capture over a shared screen: pointer (letterbox-aware, sent at once, 4 ms spacing), keys, wheel, heartbeat
 │           ├── stats.rs        # On-demand tile stats (getStats deltas, requestVideoFrameCallback); no addresses shown, nothing stored
@@ -190,6 +195,7 @@ dchat/
 │       ├── file_sharing.spec.js# Room-wide file cards: parallel pulls, decline/withdraw, upload queue, unreachable sender, sender leaving
 │       ├── audio_settings.spec.js # Mic processing checkboxes, live track swap in voice, carry-over, reload reset
 │       ├── devices.spec.js     # Mic/speaker/camera pickers (two fake cameras): live mic swap keeping the mute, camera switch keeping the preset, 🔄 to the next camera, setSinkId, missing device fallback, RAM only
+│       ├── pwa.spec.js         # Manifest/icons cached, Join with a link (any site, bare fragment, key never requested), launchQueue (lobby joins, live room asks), install offer, Apple hint, app badge
 │       └── i18n.spec.js        # UI localization, dynamic switching, Arabic RTL, zero persistence
 ├── .github/workflows/
 │   ├── build.yml               # Reusable: Rust + Worker tests, release build, no-hooks check, "site" artifact
@@ -284,6 +290,12 @@ dchat/
   - Video leaves the voice's lip-sync group; viewers re-sync camera tiles with `jitterBufferTarget`. Pointer moves are sent at once (4 ms spacing) and paced toward dchat-host. ⓘ stats per tile (RTT, buffer, decode, to-screen, encode, send delay, limiting factor).
   - Future (not built): encode once for many viewers; Chrome's Encoded Source is the preferred route, so the preset table stays engine-neutral and each link keeps one video sender with one encoding.
 
+- **Phase 11: Installable app (PWA) (Completed)**
+  - A native client was considered and set aside: a truly native build means a second client plus a media engine, a webview shell lacks WebRTC on Linux, and no web app can inject OS input. `dchat-host` stays the remote-control helper, unchanged.
+  - Manifest (standalone, relative scope, `launch_handler`), icons (SVG source + PNGs, maskable and Apple), precached by the Service Worker. UI only: no `PROTOCOL_VERSION` change.
+  - **Join with a link** in the lobby (any dchat site's link or a bare fragment, `FragmentParams::from_link`); room links launched into an open app window go through `launchQueue` and ask before leaving a live room.
+  - **📲 Install app** from Chromium's `beforeinstallprompt` (captured early in `index.html`), an Add to Home Screen / Add to Dock hint on Apple WebKit, both on the create screen only and hidden when installed; the app badge mirrors the `(n)` @mention title badge (`setAppBadge`).
+
 ---
 
 ## 4. Verification Loop for AI Agents
@@ -367,3 +379,4 @@ When writing or reviewing code, check off every item:
 - [ ] Video presets stay local (never in `RoomBody` or the wire fingerprint); `setParameters` writes complete state; `applyConstraints` always gets the full set and never `frameRate.min`.
 - [ ] The stats overlay never shows addresses, ports or candidates, and stores nothing.
 - [ ] Input to dchat-host goes through the `AgentPacer`; nothing reaches the app after `ReleaseAll` (the viewer's trailing move flush is cancelled first).
+- [ ] Links from outside the page (paste box, `launchQueue`) use only their fragment, via `FragmentParams::from_link` and `state::join_link`; leaving a live room for one asks first; the manifest has no `protocol_handlers`, and the Service Worker precaches only fixed-name app files (manifest, icons).
