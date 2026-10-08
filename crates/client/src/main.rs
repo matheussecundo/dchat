@@ -2199,6 +2199,7 @@ fn file_card(
                 .unwrap_or_else(|| pubkey_tag(pubkey))
         })
     };
+    let reachable = move || members.with(|m| m.iter().any(|x| x.pubkey == author && x.link == LinkUi::Direct));
     let actions = match file.status {
         FileTransferStatus::Sharing { active, waiting, done, active_peers, queued_peers } => {
             let active_list = if active_peers.is_empty() {
@@ -2265,7 +2266,6 @@ fn file_card(
             .into_view()
         }
         FileTransferStatus::Offered => {
-            let reachable = move || members.with(|m| m.iter().any(|x| x.pubkey == author && x.link == LinkUi::Direct));
             let download = button(FileAction::Download, "btn btn-sm btn-primary file-download-btn", "file_download");
             let decline = button(FileAction::Decline, "btn btn-sm btn-secondary file-decline-btn", "file_decline");
             view! {
@@ -2306,10 +2306,20 @@ fn file_card(
         }
         FileTransferStatus::Completed => status_line("file_download_complete", "completed"),
         FileTransferStatus::Declined => status_line("file_declined", "cancelled"),
-        FileTransferStatus::Cancelled => status_line("file_cancelled", "cancelled"),
+        // The offer still stands: the download can be started again.
+        status @ (FileTransferStatus::Cancelled | FileTransferStatus::Interrupted) => {
+            let key = if status == FileTransferStatus::Cancelled { "file_cancelled" } else { "file_interrupted" };
+            let download = button(FileAction::Download, "btn btn-sm btn-primary file-download-btn", "file_download");
+            view! {
+                <div class="file-status-row">
+                    {status_line(key, "cancelled")}
+                    {move || reachable().then(|| download.clone())}
+                </div>
+            }
+            .into_view()
+        }
         FileTransferStatus::Withdrawn => status_line("file_withdrawn", "cancelled"),
         FileTransferStatus::SenderLeft => status_line("file_sender_left", "cancelled"),
-        FileTransferStatus::Interrupted => status_line("file_interrupted", "cancelled"),
     };
     view! {
         <div class="file-card" data-file-id=file.file_id.clone()>

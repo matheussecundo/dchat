@@ -12,7 +12,7 @@ use protocol::{
     decrypt_chunk, encrypt_chunk, QueueDecision, RoomBody, RoomEnvelope, Upload, UploadQueue,
     CHUNK_SIZE, MAX_CONCURRENT_UPLOADS,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
@@ -48,6 +48,8 @@ struct Download {
 }
 
 struct ActiveUpload {
+    /// Tells this run apart from a later request for the same file by the same member.
+    id: u64,
     started: f64,
     sent_bytes: u64,
     last_ui_update: f64,
@@ -60,14 +62,14 @@ pub(super) struct Files {
     /// Files this tab offered, still available to request.
     outgoing: RefCell<HashMap<String, web_sys::File>>,
     queue: RefCell<UploadQueue>,
-    /// Uploads to stop at the next chunk: cancelled by the requester or link lost.
-    stopped: RefCell<HashSet<Upload>>,
     withdrawn: RefCell<HashSet<String>>,
     /// Completed uploads per offered file, for the author's card.
     delivered: RefCell<HashMap<String, usize>>,
     downloads: RefCell<HashMap<String, Download>>,
-    /// Active transfers currently streaming chunks: (file_id, peer) -> ActiveUpload.
-    active_transfers: RefCell<HashMap<(String, String), ActiveUpload>>,
+    /// Uploads streaming chunks. Removing one (requester cancelled, link lost) stops it
+    /// at its next chunk.
+    active_transfers: RefCell<HashMap<Upload, ActiveUpload>>,
+    next_upload_id: Cell<u64>,
     /// Test-only pause between chunks, so queues and interruptions are observable.
     #[cfg(feature = "e2e-hooks")]
     pub chunk_delay_ms: std::cell::Cell<i32>,
@@ -79,11 +81,11 @@ impl Default for Files {
             offers: RefCell::new(HashMap::new()),
             outgoing: RefCell::new(HashMap::new()),
             queue: RefCell::new(UploadQueue::new(MAX_CONCURRENT_UPLOADS)),
-            stopped: RefCell::new(HashSet::new()),
             withdrawn: RefCell::new(HashSet::new()),
             delivered: RefCell::new(HashMap::new()),
             downloads: RefCell::new(HashMap::new()),
             active_transfers: RefCell::new(HashMap::new()),
+            next_upload_id: Cell::new(0),
             #[cfg(feature = "e2e-hooks")]
             chunk_delay_ms: std::cell::Cell::new(0),
         }
@@ -167,12 +169,16 @@ impl RoomSession {
     }
 
     fn start_upload(&self, file_id: String, peer: String) {
-        let Some(file) = self.inner.files.outgoing.borrow().get(&file_id).cloned() else {
+        let files = &self.inner.files;
+        let Some(file) = files.outgoing.borrow().get(&file_id).cloned() else {
             return;
         };
-        self.inner.files.active_transfers.borrow_mut().insert(
+        let id = files.next_upload_id.get();
+        files.next_upload_id.set(id + 1);
+        files.active_transfers.borrow_mut().insert(
             (file_id.clone(), peer.clone()),
             ActiveUpload {
+                id,
                 started: js_sys::Date::now(),
                 sent_bytes: 0,
                 last_ui_update: js_sys::Date::now(),
@@ -183,9 +189,16 @@ impl RoomSession {
         self.refresh_sharing_card(&file_id);
         let s = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let completed = s.upload(&file, &file_id, &peer).await;
-            s.inner.files.stopped.borrow_mut().remove(&(file_id.clone(), peer.clone()));
-            s.inner.files.active_transfers.borrow_mut().remove(&(file_id.clone(), peer.clone()));
+            let completed = s.upload(&file, &file_id, &peer, id).await;
+            let upload = (file_id.clone(), peer.clone());
+            let mut active = s.inner.files.active_transfers.borrow_mut();
+            // A cancelled or lost upload was already taken out of the queue, and a new
+            // request from the same member may be running under this key by now.
+            if active.get(&upload).is_none_or(|a| a.id != id) {
+                return;
+            }
+            active.remove(&upload);
+            drop(active);
             if completed {
                 *s.inner.files.delivered.borrow_mut().entry(file_id.clone()).or_default() += 1;
             }
@@ -193,8 +206,14 @@ impl RoomSession {
         });
     }
 
+    /// Whether upload run `id` should keep sending (not cancelled, lost or withdrawn).
+    fn upload_running(&self, upload: &Upload, id: u64) -> bool {
+        let files = &self.inner.files;
+        files.active_transfers.borrow().get(upload).is_some_and(|a| a.id == id) && !files.withdrawn.borrow().contains(&upload.0)
+    }
+
     /// Stream `file` to `peer` in sealed chunks; returns whether every chunk was sent.
-    async fn upload(&self, file: &web_sys::File, file_id: &str, peer: &str) -> bool {
+    async fn upload(&self, file: &web_sys::File, file_id: &str, peer: &str, id: u64) -> bool {
         let Ok(file_uuid) = uuid::Uuid::parse_str(file_id) else {
             return false;
         };
@@ -206,9 +225,7 @@ impl RoomSession {
         let mut file_offset: f64 = 0.0;
 
         while file_offset < total_size {
-            if self.inner.files.stopped.borrow().contains(&upload)
-                || self.inner.files.withdrawn.borrow().contains(file_id)
-            {
+            if !self.upload_running(&upload, id) {
                 return false;
             }
 
@@ -223,16 +240,14 @@ impl RoomSession {
             file_offset = batch_end;
 
             for chunk_slice in batch_bytes.chunks(CHUNK_SIZE) {
-                if self.inner.files.stopped.borrow().contains(&upload)
-                    || self.inner.files.withdrawn.borrow().contains(file_id)
-                {
-                    return false;
-                }
-
                 let Some(link) = self.link(peer) else {
                     return false;
                 };
                 if !link.wait_file_buffer_drain(BACKPRESSURE_HIGH).await {
+                    return false;
+                }
+                // Checked after the last await: a stopped run sends nothing more.
+                if !self.upload_running(&upload, id) {
                     return false;
                 }
 
@@ -412,10 +427,14 @@ impl RoomSession {
         let Some(download) = downloads.get_mut(&file_id).filter(|d| d.author == from) else {
             return;
         };
-        if header.chunk_index != download.next_index || header.total_chunks == 0 {
+        if header.total_chunks == 0 {
             drop(downloads);
-            log::warn!("Out-of-order chunk for {file_id}; aborting download");
             self.abort_download(&file_id, FileTransferStatus::Interrupted);
+            return;
+        }
+        // The channel is ordered, so anything else is left over from a run we cancelled
+        // before asking again (same file, same bytes per index): drop it.
+        if header.chunk_index != download.next_index {
             return;
         }
         download.next_index += 1;
@@ -539,10 +558,8 @@ impl RoomSession {
             RoomBody::FileCancel { to: Some(_), file_id } => {
                 if self.inner.files.outgoing.borrow().contains_key(file_id) {
                     // A requester stopped its download: halt a running upload at its next
-                    // chunk (a queued one just leaves the line).
-                    if self.inner.files.queue.borrow().is_active(file_id, author) {
-                        self.inner.files.stopped.borrow_mut().insert((file_id.clone(), author.to_string()));
-                    }
+                    // chunk (a queued one just leaves the line). They may ask again.
+                    self.inner.files.active_transfers.borrow_mut().remove(&(file_id.clone(), author.to_string()));
                     self.finish_upload(file_id, author);
                 } else if self.inner.files.downloads.borrow().get(file_id).is_some_and(|d| d.author == author) {
                     self.abort_download(file_id, FileTransferStatus::Cancelled);

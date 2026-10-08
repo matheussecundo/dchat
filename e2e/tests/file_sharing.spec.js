@@ -95,6 +95,30 @@ test('decline is local; withdrawing an offer reaches everyone', async ({ browser
   for (const m of [ana, bo, cy]) await m.context.close();
 });
 
+test('a cancelled download can be started again', async ({ browser }) => {
+  const [ana, bo] = await room(browser, ['Ana', 'Bo']);
+  await ana.page.evaluate(() => window.__dchat.throttleUploads(400));
+  const content = 'R'.repeat(5 * 65536) + 'end'; // 6 chunks, ~2.4 s when throttled
+  await shareFile(ana.page, 'retry.bin', content, null);
+
+  await bo.page.evaluate(() => { delete window.showSaveFilePicker; });
+  await bo.page.locator('.file-download-btn').click({ timeout: 10000 });
+  await expect(bo.page.locator('.file-progress-label')).toBeVisible({ timeout: 10000 });
+  await expect(ana.page.locator('.file-count-active')).toHaveText('Sending: 1', { timeout: 10000 });
+  await bo.page.locator('.file-card .file-cancel-btn').click();
+  await expect(bo.page.locator('.file-card')).toContainText('Cancelled');
+
+  // Asked again at once, while Ana's cancelled run still sleeps between chunks.
+  const got = await downloadVia(bo.page, bo.page.locator('.file-card'));
+  expect(got.name).toBe('retry.bin');
+  expect(got.text).toBe(content);
+  await expect(bo.page.locator('.file-card')).toContainText('Download complete');
+  await expect(ana.page.locator('.file-count-done')).toHaveText('Received: 1', { timeout: 10000 });
+  await expect(ana.page.locator('.file-count-active')).toHaveText('Sending: 0');
+
+  for (const m of [ana, bo]) await m.context.close();
+});
+
 test('uploads run two at a time; the third requester waits its turn', async ({ browser }) => {
   const [ana, bo, cy, dee] = await room(browser, ['Ana', 'Bo', 'Cy', 'Dee']);
   await ana.page.evaluate(() => window.__dchat.throttleUploads(400));
