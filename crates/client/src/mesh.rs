@@ -16,6 +16,7 @@ use web_sys::{
 
 const CHAT_LABEL: &str = "chat";
 const FILE_LABEL: &str = "file-transfer";
+pub const FILE_BUFFER_LOW_THRESHOLD: u32 = 512 * 1024;
 const ICE_BATCH_DELAY_MS: i32 = 100;
 /// Pointer and controller states are dropped rather than queued behind this much data.
 const INPUT_STATE_MAX_BUFFERED: u32 = 8 * 1024;
@@ -63,6 +64,7 @@ pub struct PeerLink {
     chat: Rc<RefCell<Option<RtcDataChannel>>>,
     /// Binary channel for encrypted file chunks, separate so transfers never delay chat.
     files: Rc<RefCell<Option<RtcDataChannel>>>,
+    file_drain_notify: Rc<RefCell<Vec<futures::channel::oneshot::Sender<()>>>>,
     /// Remote-control input: keys and clicks (reliable) and pointer/controller states
     /// (unordered, never retransmitted), so neither waits behind chat or files.
     input_events: Rc<RefCell<Option<RtcDataChannel>>>,
@@ -105,6 +107,7 @@ impl PeerLink {
             ignore_offer: Cell::new(false),
             chat: Rc::new(RefCell::new(None)),
             files: Rc::new(RefCell::new(None)),
+            file_drain_notify: Rc::new(RefCell::new(Vec::new())),
             input_events: Rc::new(RefCell::new(None)),
             input_state: Rc::new(RefCell::new(None)),
             pending_ice: RefCell::new(Vec::new()),
@@ -126,7 +129,8 @@ impl PeerLink {
             attach_chat_callbacks(&dc, &link.remote, id, on_event.clone(), notify_closed);
             *link.chat.borrow_mut() = Some(dc);
             let file_dc = link.pc.create_data_channel_with_data_channel_dict(FILE_LABEL, &init);
-            attach_file_callbacks(&file_dc, &link.remote, id, on_event.clone());
+            file_dc.set_buffered_amount_low_threshold(FILE_BUFFER_LOW_THRESHOLD);
+            attach_file_callbacks(&file_dc, &link.remote, id, on_event.clone(), link.file_drain_notify.clone());
             *link.files.borrow_mut() = Some(file_dc);
             let events_dc = link.pc.create_data_channel_with_data_channel_dict(INPUT_EVENTS_LABEL, &init);
             attach_input_callbacks(&events_dc, &link.remote, id, InputLane::Events, on_event.clone());
@@ -140,6 +144,7 @@ impl PeerLink {
         } else {
             let chat = link.chat.clone();
             let files = link.files.clone();
+            let file_drain_notify = link.file_drain_notify.clone();
             let input_events = link.input_events.clone();
             let input_state = link.input_state.clone();
             let remote = link.remote.clone();
@@ -151,7 +156,8 @@ impl PeerLink {
                         *chat.borrow_mut() = Some(dc);
                     }
                     FILE_LABEL => {
-                        attach_file_callbacks(&dc, &remote, id, on_event.clone());
+                        dc.set_buffered_amount_low_threshold(FILE_BUFFER_LOW_THRESHOLD);
+                        attach_file_callbacks(&dc, &remote, id, on_event.clone(), file_drain_notify.clone());
                         *files.borrow_mut() = Some(dc);
                     }
                     INPUT_EVENTS_LABEL => {
@@ -204,6 +210,28 @@ impl PeerLink {
             .map(|dc| dc.buffered_amount())
     }
 
+    /// Wait until the file channel has less than `high_water` bytes queued.
+    /// Returns `false` if the channel is closed or lost.
+    pub async fn wait_file_buffer_drain(&self, high_water: u32) -> bool {
+        use futures::FutureExt;
+        loop {
+            if self.closed.get() {
+                return false;
+            }
+            match self.file_buffered_amount() {
+                None => return false,
+                Some(buffered) if buffered < high_water => return true,
+                Some(_) => {}
+            }
+            let (tx, rx) = futures::channel::oneshot::channel();
+            self.file_drain_notify.borrow_mut().push(tx);
+            futures::select! {
+                _ = rx.fuse() => {},
+                _ = crate::media::sleep_ms(100).fuse() => {},
+            }
+        }
+    }
+
     /// Send a sealed remote-control packet. State packets are dropped instead of queued
     /// when the channel is backed up: a newer state will follow.
     pub fn send_input(&self, lane: InputLane, packet: &[u8]) -> bool {
@@ -234,6 +262,9 @@ impl PeerLink {
 
     pub fn close(&self) {
         self.closed.set(true);
+        for tx in self.file_drain_notify.borrow_mut().drain(..) {
+            let _ = tx.send(());
+        }
         for channel in [&self.chat, &self.files, &self.input_events, &self.input_state] {
             if let Some(dc) = channel.borrow().as_ref() {
                 dc.close();
@@ -512,7 +543,13 @@ fn attach_chat_callbacks(
     }
 }
 
-fn attach_file_callbacks(dc: &RtcDataChannel, remote: &str, id: u64, on_event: LinkEventHandler) {
+fn attach_file_callbacks(
+    dc: &RtcDataChannel,
+    remote: &str,
+    id: u64,
+    on_event: LinkEventHandler,
+    drain_notify: Rc<RefCell<Vec<futures::channel::oneshot::Sender<()>>>>,
+) {
     dc.set_binary_type(RtcDataChannelType::Arraybuffer);
     let remote = remote.to_string();
     let on_message = Closure::wrap(Box::new(move |ev: MessageEvent| {
@@ -522,6 +559,14 @@ fn attach_file_callbacks(dc: &RtcDataChannel, remote: &str, id: u64, on_event: L
     }) as Box<dyn FnMut(MessageEvent)>);
     dc.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
     on_message.forget();
+
+    let on_low = Closure::wrap(Box::new(move || {
+        for tx in drain_notify.borrow_mut().drain(..) {
+            let _ = tx.send(());
+        }
+    }) as Box<dyn FnMut()>);
+    dc.set_onbufferedamountlow(Some(on_low.as_ref().unchecked_ref()));
+    on_low.forget();
 }
 
 fn attach_input_callbacks(dc: &RtcDataChannel, remote: &str, id: u64, lane: InputLane, on_event: LinkEventHandler) {

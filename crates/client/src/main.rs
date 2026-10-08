@@ -2191,19 +2191,79 @@ fn file_card(
     let status_line = |key: &'static str, class: &'static str| {
         view! { <span class=format!("file-status-text {class}")>{move || t(lang.get(), key)}</span> }.into_view()
     };
+    let display_name = move |pubkey: &str| {
+        members.with(|m| {
+            m.iter()
+                .find(|x| x.pubkey == pubkey)
+                .map(|x| x.name.clone())
+                .unwrap_or_else(|| pubkey_tag(pubkey))
+        })
+    };
     let actions = match file.status {
-        FileTransferStatus::Sharing { active, waiting, done } => view! {
-            <div class="file-status-row">
-                <span class="file-status-text">{move || t(lang.get(), "file_shared_room")}</span>
-                {button(FileAction::Withdraw, "btn btn-sm btn-danger file-withdraw-btn", "file_withdraw")}
-            </div>
-            <div class="file-share-counts">
-                <span class="file-count-active">{move || t_replace_1(lang.get(), "file_sending", "{n}", &active.to_string())}</span>
-                <span class="file-count-waiting">{move || t_replace_1(lang.get(), "file_waiting_count", "{n}", &waiting.to_string())}</span>
-                <span class="file-count-done">{move || t_replace_1(lang.get(), "file_done_count", "{n}", &done.to_string())}</span>
-            </div>
+        FileTransferStatus::Sharing { active, waiting, done, active_peers, queued_peers } => {
+            let active_list = if active_peers.is_empty() {
+                None
+            } else {
+                Some(view! {
+                    <div class="file-active-transfers">
+                        {active_peers.into_iter().map(|p| {
+                            let peer_name = display_name(&p.peer);
+                            let speed = if p.speed_kb > 1024 {
+                                format!("{:.1} MB/s", p.speed_kb as f64 / 1024.0)
+                            } else {
+                                format!("{} KB/s", p.speed_kb)
+                            };
+                            let progress = p.progress;
+                            view! {
+                                <div class="file-peer-transfer">
+                                    <div class="file-peer-meta">
+                                        <span class="file-peer-name" dir="auto">{peer_name}</span>
+                                        <span class="file-peer-stats">{format!("{progress}% ({speed})")}</span>
+                                    </div>
+                                    <div class="file-progress-bar">
+                                        <div class="file-progress-fill" style=format!("width: {progress}%;")></div>
+                                    </div>
+                                </div>
+                            }
+                        }).collect_view()}
+                    </div>
+                })
+            };
+
+            let queued_list = if queued_peers.is_empty() {
+                None
+            } else {
+                Some(view! {
+                    <div class="file-queued-transfers">
+                        {queued_peers.into_iter().map(|q| {
+                            let peer_name = display_name(&q.peer);
+                            let pos = q.position.to_string();
+                            view! {
+                                <div class="file-peer-queued">
+                                    <span class="file-peer-name" dir="auto">{peer_name}</span>
+                                    <span class="file-peer-pos">{move || t_replace_1(lang.get(), "file_queued", "{n}", &pos)}</span>
+                                </div>
+                            }
+                        }).collect_view()}
+                    </div>
+                })
+            };
+
+            view! {
+                <div class="file-status-row">
+                    <span class="file-status-text">{move || t(lang.get(), "file_shared_room")}</span>
+                    {button(FileAction::Withdraw, "btn btn-sm btn-danger file-withdraw-btn", "file_withdraw")}
+                </div>
+                <div class="file-share-counts">
+                    <span class="file-count-active">{move || t_replace_1(lang.get(), "file_sending", "{n}", &active.to_string())}</span>
+                    <span class="file-count-waiting">{move || t_replace_1(lang.get(), "file_waiting_count", "{n}", &waiting.to_string())}</span>
+                    <span class="file-count-done">{move || t_replace_1(lang.get(), "file_done_count", "{n}", &done.to_string())}</span>
+                </div>
+                {active_list}
+                {queued_list}
+            }
+            .into_view()
         }
-        .into_view(),
         FileTransferStatus::Offered => {
             let reachable = move || members.with(|m| m.iter().any(|x| x.pubkey == author && x.link == LinkUi::Direct));
             let download = button(FileAction::Download, "btn btn-sm btn-primary file-download-btn", "file_download");

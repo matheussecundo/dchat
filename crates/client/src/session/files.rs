@@ -4,6 +4,7 @@
 //! transfer state lives in RAM and dies with the link.
 
 use super::RoomSession;
+#[cfg(feature = "e2e-hooks")]
 use crate::media::sleep_ms;
 use crate::state::{current_time_string, ChatMessageUi, FileOfferInfo, FileTransferStatus};
 use leptos::*;
@@ -19,7 +20,9 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{window, HtmlAnchorElement};
 
 /// Pause sending while this much is still queued on the file channel.
-const BACKPRESSURE_HIGH: u32 = 512 * 1024;
+const BACKPRESSURE_HIGH: u32 = 2 * 1024 * 1024;
+/// Batch size when reading file from disk into memory before chunking.
+const READ_BATCH_SIZE: usize = 2 * 1024 * 1024;
 
 struct Offer {
     author: String,
@@ -36,9 +39,20 @@ struct Download {
     chunks: Vec<js_sys::Uint8Array>,
     /// `FileSystemWritableFileStream` when the user picked a save location.
     writable: Option<JsValue>,
+    /// Sequential promise chain for disk writes.
+    write_promise: Option<js_sys::Promise>,
     started: f64,
+    last_ui_update: f64,
     received: u64,
     next_index: u32,
+}
+
+struct ActiveUpload {
+    started: f64,
+    sent_bytes: u64,
+    last_ui_update: f64,
+    progress: u8,
+    speed_kb: u64,
 }
 
 pub(super) struct Files {
@@ -52,6 +66,8 @@ pub(super) struct Files {
     /// Completed uploads per offered file, for the author's card.
     delivered: RefCell<HashMap<String, usize>>,
     downloads: RefCell<HashMap<String, Download>>,
+    /// Active transfers currently streaming chunks: (file_id, peer) -> ActiveUpload.
+    active_transfers: RefCell<HashMap<(String, String), ActiveUpload>>,
     /// Test-only pause between chunks, so queues and interruptions are observable.
     #[cfg(feature = "e2e-hooks")]
     pub chunk_delay_ms: std::cell::Cell<i32>,
@@ -67,6 +83,7 @@ impl Default for Files {
             withdrawn: RefCell::new(HashSet::new()),
             delivered: RefCell::new(HashMap::new()),
             downloads: RefCell::new(HashMap::new()),
+            active_transfers: RefCell::new(HashMap::new()),
             #[cfg(feature = "e2e-hooks")]
             chunk_delay_ms: std::cell::Cell::new(0),
         }
@@ -153,10 +170,22 @@ impl RoomSession {
         let Some(file) = self.inner.files.outgoing.borrow().get(&file_id).cloned() else {
             return;
         };
+        self.inner.files.active_transfers.borrow_mut().insert(
+            (file_id.clone(), peer.clone()),
+            ActiveUpload {
+                started: js_sys::Date::now(),
+                sent_bytes: 0,
+                last_ui_update: js_sys::Date::now(),
+                progress: 0,
+                speed_kb: 0,
+            },
+        );
+        self.refresh_sharing_card(&file_id);
         let s = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let completed = s.upload(&file, &file_id, &peer).await;
             s.inner.files.stopped.borrow_mut().remove(&(file_id.clone(), peer.clone()));
+            s.inner.files.active_transfers.borrow_mut().remove(&(file_id.clone(), peer.clone()));
             if completed {
                 *s.inner.files.delivered.borrow_mut().entry(file_id.clone()).or_default() += 1;
             }
@@ -173,41 +202,76 @@ impl RoomSession {
         let total_chunks = ((total_size / CHUNK_SIZE as f64).ceil() as u32).max(1);
         let upload = (file_id.to_string(), peer.to_string());
 
-        for index in 0..total_chunks {
-            // Backpressure; a link that closed reports no buffer and ends the upload.
-            loop {
-                if self.inner.files.stopped.borrow().contains(&upload)
-                    || self.inner.files.withdrawn.borrow().contains(file_id)
-                {
-                    return false;
-                }
-                match self.link(peer).and_then(|l| l.file_buffered_amount()) {
-                    None => return false,
-                    Some(buffered) if buffered < BACKPRESSURE_HIGH => break,
-                    Some(_) => sleep_ms(15).await,
-                }
+        let mut chunk_index: u32 = 0;
+        let mut file_offset: f64 = 0.0;
+
+        while file_offset < total_size {
+            if self.inner.files.stopped.borrow().contains(&upload)
+                || self.inner.files.withdrawn.borrow().contains(file_id)
+            {
+                return false;
             }
 
-            let start = index as f64 * CHUNK_SIZE as f64;
-            let end = (start + CHUNK_SIZE as f64).min(total_size);
-            let Ok(blob) = file.slice_with_f64_and_f64(start, end) else {
+            let batch_end = (file_offset + READ_BATCH_SIZE as f64).min(total_size);
+            let Ok(blob) = file.slice_with_f64_and_f64(file_offset, batch_end) else {
                 return false;
             };
             let Ok(buffer) = JsFuture::from(blob.array_buffer()).await else {
                 return false;
             };
-            let plaintext = js_sys::Uint8Array::new(&buffer).to_vec();
-            let Ok(packet) = encrypt_chunk(&self.inner.key, file_uuid.as_bytes(), index, total_chunks, &plaintext) else {
-                return false;
-            };
-            if !self.link(peer).is_some_and(|l| l.send_bytes(&packet)) {
-                return false;
-            }
-            #[cfg(feature = "e2e-hooks")]
-            {
-                let delay = self.inner.files.chunk_delay_ms.get();
-                if delay > 0 {
-                    sleep_ms(delay).await;
+            let batch_bytes = js_sys::Uint8Array::new(&buffer).to_vec();
+            file_offset = batch_end;
+
+            for chunk_slice in batch_bytes.chunks(CHUNK_SIZE) {
+                if self.inner.files.stopped.borrow().contains(&upload)
+                    || self.inner.files.withdrawn.borrow().contains(file_id)
+                {
+                    return false;
+                }
+
+                let Some(link) = self.link(peer) else {
+                    return false;
+                };
+                if !link.wait_file_buffer_drain(BACKPRESSURE_HIGH).await {
+                    return false;
+                }
+
+                let Ok(packet) = encrypt_chunk(&self.inner.key, file_uuid.as_bytes(), chunk_index, total_chunks, chunk_slice) else {
+                    return false;
+                };
+                if !link.send_bytes(&packet) {
+                    return false;
+                }
+
+                chunk_index += 1;
+
+                let now = js_sys::Date::now();
+                let mut should_refresh = false;
+                {
+                    let mut active_transfers = self.inner.files.active_transfers.borrow_mut();
+                    if let Some(state) = active_transfers.get_mut(&upload) {
+                        state.sent_bytes += chunk_slice.len() as u64;
+                        let elapsed = (now - state.started) / 1000.0;
+                        if elapsed > 0.0 {
+                            state.speed_kb = (state.sent_bytes as f64 / 1024.0 / elapsed) as u64;
+                        }
+                        state.progress = ((chunk_index as f64 / total_chunks as f64) * 100.0).min(100.0) as u8;
+                        if now - state.last_ui_update >= 100.0 || chunk_index == total_chunks {
+                            state.last_ui_update = now;
+                            should_refresh = true;
+                        }
+                    }
+                }
+                if should_refresh {
+                    self.refresh_sharing_card(file_id);
+                }
+
+                #[cfg(feature = "e2e-hooks")]
+                {
+                    let delay = self.inner.files.chunk_delay_ms.get();
+                    if delay > 0 {
+                        sleep_ms(delay).await;
+                    }
                 }
             }
         }
@@ -221,7 +285,38 @@ impl RoomSession {
         }
         let (active, waiting) = files.queue.borrow().counts(file_id);
         let done = files.delivered.borrow().get(file_id).copied().unwrap_or(0);
-        self.set_file_status(file_id, FileTransferStatus::Sharing { active, waiting, done });
+
+        let active_transfers = files.active_transfers.borrow();
+        let active_peers: Vec<crate::state::PeerDownloadProgress> = active_transfers
+            .iter()
+            .filter(|((fid, _), _)| fid == file_id)
+            .map(|((_, peer), state)| crate::state::PeerDownloadProgress {
+                peer: peer.clone(),
+                progress: state.progress,
+                speed_kb: state.speed_kb,
+            })
+            .collect();
+
+        let positions = files.queue.borrow().positions();
+        let queued_peers: Vec<crate::state::PeerQueuedInfo> = positions
+            .into_iter()
+            .filter(|((fid, _), _)| fid == file_id)
+            .map(|((_, peer), position)| crate::state::PeerQueuedInfo {
+                peer,
+                position,
+            })
+            .collect();
+
+        self.set_file_status(
+            file_id,
+            FileTransferStatus::Sharing {
+                active,
+                waiting,
+                done,
+                active_peers,
+                queued_peers,
+            },
+        );
     }
 
     // ---- Downloader side --------------------------------------------------------------
@@ -259,7 +354,9 @@ impl RoomSession {
                     mime_type,
                     chunks: Vec::new(),
                     writable,
+                    write_promise: None,
                     started: js_sys::Date::now(),
+                    last_ui_update: js_sys::Date::now(),
                     received: 0,
                     next_index: 0,
                 },
@@ -291,6 +388,9 @@ impl RoomSession {
         if let Some(download) = self.inner.files.downloads.borrow_mut().remove(file_id) {
             if let Some(writable) = download.writable {
                 wasm_bindgen_futures::spawn_local(async move {
+                    if let Some(p) = download.write_promise {
+                        let _ = JsFuture::from(p).await;
+                    }
                     let _ = call_stream_method(&writable, "abort", None).await;
                 });
             }
@@ -324,19 +424,29 @@ impl RoomSession {
             Some(writable) => {
                 let writable = writable.clone();
                 let bytes = js_sys::Uint8Array::from(&plaintext[..]);
-                wasm_bindgen_futures::spawn_local(async move {
-                    let _ = call_stream_method(&writable, "write", Some(&bytes)).await;
+                let prev = download.write_promise.take();
+                let next = wasm_bindgen_futures::future_to_promise(async move {
+                    if let Some(p) = prev {
+                        let _ = JsFuture::from(p).await;
+                    }
+                    let _ = call_stream_method(&writable, "write", Some(&bytes.into())).await;
+                    Ok(JsValue::UNDEFINED)
                 });
+                download.write_promise = Some(next);
             }
             None => download.chunks.push(js_sys::Uint8Array::from(&plaintext[..])),
         }
 
         if header.chunk_index + 1 < header.total_chunks {
-            let elapsed = (js_sys::Date::now() - download.started) / 1000.0;
-            let speed_kb = if elapsed > 0.0 { (download.received as f64 / 1024.0 / elapsed) as u64 } else { 0 };
-            let progress = ((header.chunk_index + 1) as f64 / header.total_chunks as f64 * 100.0) as u8;
-            drop(downloads);
-            self.set_file_status(&file_id, FileTransferStatus::Downloading { progress, speed_kb });
+            let now = js_sys::Date::now();
+            if now - download.last_ui_update >= 100.0 {
+                download.last_ui_update = now;
+                let elapsed = (now - download.started) / 1000.0;
+                let speed_kb = if elapsed > 0.0 { (download.received as f64 / 1024.0 / elapsed) as u64 } else { 0 };
+                let progress = ((header.chunk_index + 1) as f64 / header.total_chunks as f64 * 100.0) as u8;
+                drop(downloads);
+                self.set_file_status(&file_id, FileTransferStatus::Downloading { progress, speed_kb });
+            }
             return;
         }
 
@@ -346,6 +456,9 @@ impl RoomSession {
         drop(downloads);
         let s = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
+            if let Some(p) = done.write_promise {
+                let _ = JsFuture::from(p).await;
+            }
             match done.writable {
                 Some(writable) => {
                     let _ = call_stream_method(&writable, "close", None).await;
@@ -379,7 +492,13 @@ impl RoomSession {
         );
         let is_self = envelope.author == self.inner.me;
         let status = if is_self {
-            FileTransferStatus::Sharing { active: 0, waiting: 0, done: 0 }
+            FileTransferStatus::Sharing {
+                active: 0,
+                waiting: 0,
+                done: 0,
+                active_peers: Vec::new(),
+                queued_peers: Vec::new(),
+            }
         } else {
             FileTransferStatus::Offered
         };
@@ -436,6 +555,7 @@ impl RoomSession {
     /// The direct link to `remote` is gone: its transfers in either direction stop.
     pub(super) fn on_file_peer_lost(&self, remote: &str) {
         let files = &self.inner.files;
+        files.active_transfers.borrow_mut().retain(|(_, peer), _| peer != remote);
         let downloads: Vec<String> = files
             .downloads
             .borrow()

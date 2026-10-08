@@ -218,6 +218,19 @@ pub struct RoomCaps {
     pub relays: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PeerDownloadProgress {
+    pub peer: String,
+    pub progress: u8,
+    pub speed_kb: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PeerQueuedInfo {
+    pub peer: String,
+    pub position: usize,
+}
+
 /// A file card's state, as seen by this tab.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FileTransferStatus {
@@ -233,7 +246,13 @@ pub enum FileTransferStatus {
     /// The direct link dropped mid-transfer.
     Interrupted,
     /// Our own offer: uploads running, waiting, finished.
-    Sharing { active: usize, waiting: usize, done: usize },
+    Sharing {
+        active: usize,
+        waiting: usize,
+        done: usize,
+        active_peers: Vec<PeerDownloadProgress>,
+        queued_peers: Vec<PeerQueuedInfo>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
