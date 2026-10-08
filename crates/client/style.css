@@ -198,6 +198,7 @@ header {
 .chat-container {
   flex: 1;
   overflow-y: auto;
+  overflow-anchor: auto;
   padding: 20px 24px;
   display: flex;
   flex-direction: column;
@@ -1252,6 +1253,7 @@ select.lobby-input {
 .dm-thread {
   flex: 1;
   overflow-y: auto;
+  overflow-anchor: auto;
   padding: 12px 14px;
   display: flex;
   flex-direction: column;

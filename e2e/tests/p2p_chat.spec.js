@@ -54,3 +54,62 @@ test('custom URL fragment params survive room creation', async ({ page }) => {
   // The custom relay is the one used for signaling.
   await expect(page.locator('.status-indicator')).toContainText('Waiting for Peer', { timeout: 10000 });
 });
+
+test('chat auto-scroll: auto-scrolls on arrival when at bottom, preserves position when scrolled up, snaps on send', async ({ browser }) => {
+  const peer1 = await newMember(browser, 'Scroller1');
+  const peer2 = await newMember(browser, 'Scroller2');
+
+  const adminUrl = await createRoom(peer1.page, { name: 'Peer One' });
+  await joinRoom(peer2.page, inviteFrom(adminUrl), 'Peer Two');
+
+  await expect(peer1.page.locator('.status-indicator')).toContainText('Connected (E2EE P2P Active)', { timeout: 15000 });
+  await expect(peer2.page.locator('.status-indicator')).toContainText('Connected (E2EE P2P Active)', { timeout: 15000 });
+
+  // Send enough messages to fill and overflow the chat container.
+  for (let i = 1; i <= 15; i++) {
+    await sendMessage(peer1.page, `Message number ${i} from Peer 1 to fill the screen`);
+  }
+
+  // Peer 2 should have received all messages and auto-scrolled to the bottom.
+  await expect(peer2.page.locator('.chat-container')).toContainText('Message number 15 from Peer 1', { timeout: 10000 });
+
+  // Verify Peer 2 is within 60px of the bottom.
+  await peer2.page.waitForFunction(() => {
+    const el = document.querySelector('.chat-container');
+    return el && (el.scrollHeight - el.scrollTop - el.clientHeight <= 60);
+  });
+
+  // Now Peer 2 scrolls all the way up.
+  await peer2.page.evaluate(() => {
+    const el = document.querySelector('.chat-container');
+    if (el) el.scrollTop = 0;
+  });
+
+  // Verify Peer 2's scroll position is at the top.
+  const topPosition = await peer2.page.evaluate(() => {
+    const el = document.querySelector('.chat-container');
+    return el ? el.scrollTop : -1;
+  });
+  expect(topPosition).toBe(0);
+
+  // Peer 1 sends another message while Peer 2 is scrolled up.
+  await sendMessage(peer1.page, 'Message 16 while Peer 2 is scrolled up');
+  await expect(peer2.page.locator('.chat-container')).toContainText('Message 16 while Peer 2', { timeout: 10000 });
+
+  // Verify Peer 2 did NOT get auto-scrolled to the bottom: scroll position should remain near top.
+  const positionAfterIncoming = await peer2.page.evaluate(() => {
+    const el = document.querySelector('.chat-container');
+    return el ? el.scrollTop : -1;
+  });
+  expect(positionAfterIncoming).toBeLessThan(100);
+
+  // Now Peer 2 sends a message of their own: it should snap to the bottom!
+  await sendMessage(peer2.page, 'Message from Peer 2 snapping down');
+  await peer2.page.waitForFunction(() => {
+    const el = document.querySelector('.chat-container');
+    return el && (el.scrollHeight - el.scrollTop - el.clientHeight <= 60);
+  });
+
+  await peer1.context.close();
+  await peer2.context.close();
+});

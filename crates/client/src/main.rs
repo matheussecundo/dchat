@@ -134,6 +134,8 @@ fn App() -> impl IntoView {
     // fullscreen, so they stay visible there.
     let overlay_ref = create_node_ref::<leptos::html::Div>();
     let overlay_home = store_value(None::<web_sys::Node>);
+    let chat_container_ref = create_node_ref::<leptos::html::Main>();
+    let chat_at_bottom = store_value(true);
     let (no_turn, set_no_turn) = create_signal(false);
 
     // Voice lounge
@@ -164,6 +166,8 @@ fn App() -> impl IntoView {
     let (dms, set_dms) = create_signal(HashMap::<String, Vec<DmUi>>::new());
     let (dm_unread, set_dm_unread) = create_signal(HashMap::<String, usize>::new());
     let (dm_open, set_dm_open) = create_signal(Option::<String>::None);
+    let dm_thread_ref = create_node_ref::<leptos::html::Div>();
+    let dm_at_bottom = store_value(true);
     let (dm_input, set_dm_input) = create_signal(String::new());
     let (editing, set_editing) = create_signal(Option::<String>::None);
     let (react_picker, set_react_picker) = create_signal(Option::<String>::None);
@@ -322,6 +326,10 @@ fn App() -> impl IntoView {
         if text.is_empty() && staged.is_none() {
             return;
         }
+        chat_at_bottom.set_value(true);
+        if let Some(el) = chat_container_ref.get_untracked() {
+            el.set_scroll_top(el.scroll_height());
+        }
         session_ref.with_value(|session| {
             let Some(session) = session else {
                 return;
@@ -339,6 +347,32 @@ fn App() -> impl IntoView {
             }
         });
     };
+
+    create_effect(move |_| {
+        let count = messages.with(|m| m.len());
+        let in_room = screen.get() == Screen::Room;
+        if in_room && count > 0 && chat_at_bottom.get_value() {
+            request_animation_frame(move || {
+                if let Some(el) = chat_container_ref.get_untracked() {
+                    el.set_scroll_top(el.scroll_height());
+                }
+            });
+        }
+    });
+
+    {
+        let on_chat_resize = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
+            if chat_at_bottom.get_value() {
+                if let Some(el) = chat_container_ref.get_untracked() {
+                    el.set_scroll_top(el.scroll_height());
+                }
+            }
+        }) as Box<dyn FnMut()>);
+        if let Some(win) = window() {
+            let _ = win.add_event_listener_with_callback("resize", on_chat_resize.as_ref().unchecked_ref());
+        }
+        on_chat_resize.forget();
+    }
 
     let write_clipboard = |text: &str| {
         if let Some(win) = window() {
@@ -804,6 +838,7 @@ fn App() -> impl IntoView {
         set_dm_unread.update(|u| {
             u.remove(&pubkey);
         });
+        dm_at_bottom.set_value(true);
         set_dm_open.set(Some(pubkey));
     };
     // Reading an open conversation clears its unread count.
@@ -820,13 +855,36 @@ fn App() -> impl IntoView {
         let (Some(peer), text) = (dm_open.get_untracked(), dm_input.get_untracked()) else {
             return;
         };
+        dm_at_bottom.set_value(true);
+        if let Some(el) = dm_thread_ref.get_untracked() {
+            el.set_scroll_top(el.scroll_height());
+        }
         let sent = session_ref.with_value(|s| s.as_ref().map(|s| s.send_dm(&peer, &text)));
         match sent {
-            Some(Ok(())) => set_dm_input.set(String::new()),
+            Some(Ok(())) => {
+                set_dm_input.set(String::new());
+                request_animation_frame(move || {
+                    if let Some(el) = dm_thread_ref.get_untracked() {
+                        el.set_scroll_top(el.scroll_height());
+                    }
+                });
+            }
             Some(Err(err)) => log::warn!("DM not sent: {err}"),
             None => {}
         }
     };
+    create_effect(move |_| {
+        if let Some(peer) = dm_open.get() {
+            let _ = dms.with(|d| d.get(&peer).map(|v| v.len()));
+            if dm_at_bottom.get_value() {
+                request_animation_frame(move || {
+                    if let Some(el) = dm_thread_ref.get_untracked() {
+                        el.set_scroll_top(el.scroll_height());
+                    }
+                });
+            }
+        }
+    });
     // @mentions: chime, and a "(n)" title badge while the tab is in the background.
     let base_title = window().and_then(|w| w.document()).map(|d| d.title()).unwrap_or_default();
     let page_hidden = || window().and_then(|w| w.document()).is_some_and(|d| d.hidden());
@@ -1504,7 +1562,18 @@ fn App() -> impl IntoView {
             })}
 
             <div class="room-body">
-                <main class="chat-container">
+                <main
+                    class="chat-container"
+                    node_ref=chat_container_ref
+                    on:scroll=move |_| {
+                        if let Some(el) = chat_container_ref.get_untracked() {
+                            let scroll_top = el.scroll_top();
+                            let scroll_height = el.scroll_height();
+                            let client_height = el.client_height();
+                            chat_at_bottom.set_value(scroll_height - scroll_top - client_height <= 60);
+                        }
+                    }
+                >
                     {move || {
                         if !has_messages.get() {
                             view! {
@@ -1760,7 +1829,18 @@ fn App() -> impl IntoView {
                             <h4 dir="auto">{move || t_replace_1(lang.get(), "dm_title", "{name}", &name.get())}</h4>
                             <button class="btn btn-secondary btn-sm" title=move || t(lang.get(), "title_close") on:click=move |_| set_dm_open.set(None)>"✕"</button>
                         </div>
-                        <div class="dm-thread">
+                        <div
+                            class="dm-thread"
+                            node_ref=dm_thread_ref
+                            on:scroll=move |_| {
+                                if let Some(el) = dm_thread_ref.get_untracked() {
+                                    let scroll_top = el.scroll_top();
+                                    let scroll_height = el.scroll_height();
+                                    let client_height = el.client_height();
+                                    dm_at_bottom.set_value(scroll_height - scroll_top - client_height <= 60);
+                                }
+                            }
+                        >
                             <p class="dm-empty">{move || t_replace_1(lang.get(), "dm_empty", "{name}", &name.get())}</p>
                             {move || dms.with(|d| d.get(&thread_peer).cloned().unwrap_or_default()).into_iter().map(|line| {
                                 if line.notice {

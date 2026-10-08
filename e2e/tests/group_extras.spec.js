@@ -83,8 +83,45 @@ test('private DMs reach only their recipient, also when relayed, and @mentions h
   await memberRow(bo.page, 'Ana').locator('.dm-btn').click();
   await expect(bo.page.locator('#dm-panel .dm-line.peer')).toContainText('psst, just between us');
   await expect(memberRow(bo.page, 'Ana').locator('.dm-unread')).toHaveCount(0);
+
+  // Send several DMs from Ana to overflow Bo's DM thread
+  for (let i = 1; i <= 10; i++) {
+    await ana.page.locator('#dm-input').fill(`dm count ${i}`);
+    await ana.page.locator('#dm-send-btn').click();
+  }
+  await expect(bo.page.locator('#dm-panel .dm-thread')).toContainText('dm count 10', { timeout: 10000 });
+
+  // Bo's DM thread should be auto-scrolled to the bottom (within 60px)
+  await bo.page.waitForFunction(() => {
+    const el = document.querySelector('.dm-thread');
+    return el && (el.scrollHeight - el.scrollTop - el.clientHeight <= 60);
+  });
+
+  // Bo scrolls up in the DM thread
+  await bo.page.evaluate(() => {
+    const el = document.querySelector('.dm-thread');
+    if (el) el.scrollTop = 0;
+  });
+
+  // Ana sends another DM while Bo is scrolled up
+  await ana.page.locator('#dm-input').fill('dm while scrolled up');
+  await ana.page.locator('#dm-send-btn').click();
+  await expect(bo.page.locator('#dm-panel .dm-thread')).toContainText('dm while scrolled up', { timeout: 10000 });
+
+  // Bo remains scrolled up (did not jump to bottom)
+  const boDmScroll = await bo.page.evaluate(() => {
+    const el = document.querySelector('.dm-thread');
+    return el ? el.scrollTop : -1;
+  });
+  expect(boDmScroll).toBeLessThan(100);
+
+  // Bo replies: sending should snap to bottom
   await bo.page.locator('#dm-input').fill('got it');
   await bo.page.locator('#dm-input').press('Enter');
+  await bo.page.waitForFunction(() => {
+    const el = document.querySelector('.dm-thread');
+    return el && (el.scrollHeight - el.scrollTop - el.clientHeight <= 60);
+  });
   await expect(ana.page.locator('#dm-panel .dm-line.peer')).toContainText('got it', { timeout: 10000 });
   await expect(cy.page.locator('body')).not.toContainText('psst');
 
