@@ -595,8 +595,9 @@ header {
   color: var(--text-muted);
 }
 
-/* Settings modal: microphone, speaker and camera pickers. */
-.device-pickers {
+/* Settings modal: microphone, speaker and camera pickers, and the file connections cap. */
+.device-pickers,
+.file-settings {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -757,6 +758,13 @@ header {
 .file-status-text {
   font-size: 0.8rem;
   color: var(--text-muted);
+}
+
+.file-summary {
+  margin-top: 4px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .file-status-text.completed {

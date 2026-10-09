@@ -33,7 +33,7 @@ use session::{save_finished, start_save, RoomSession, SessionSignals};
 use state::{
     admin_url, create_room, current_fragment, format_file_size, host_download_url, fragment_relay_choice, invite_url, read_credentials,
     selectable_devices, AudioSettings, DeviceChoice, DeviceEntry, RelayMode, CAMERA_KIND, MIC_KIND, SPEAKER_KIND,
-    ChatMessageUi, ConnectionStatus, DmUi, FileOfferInfo, FileTransferStatus, LinkUi,
+    ChatMessageUi, ConnectionStatus, DmUi, DownloadSummary, FileOfferInfo, FileTransferStatus, LinkUi,
     LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RekeyTarget, RoomCaps, ControlUi, ControlPromptUi,
 };
 use std::collections::{HashMap, HashSet};
@@ -163,6 +163,9 @@ fn App() -> impl IntoView {
     // Microphone, speaker and camera (None: the system default). RAM only, kept across
     // voice rejoins and rekeys.
     let (device_choice, set_device_choice) = create_signal(DeviceChoice::default());
+    // Most connections one of our uploads may use (1 = the main link only). RAM only, kept
+    // across rekeys.
+    let (file_connections, set_file_connections) = create_signal(protocol::transfer::MAX_FILE_CONNECTIONS);
     // What the browser lists, refreshed while the settings are open.
     let (device_list, set_device_list) = create_signal(Vec::<DeviceEntry>::new());
     // A speaker picked in the browser's own chooser (Firefox), which it may not list.
@@ -242,6 +245,7 @@ fn App() -> impl IntoView {
                 session.set_audio_settings(audio_settings.get_untracked());
                 session.set_video_presets(video_presets.get_untracked());
                 session.set_devices(device_choice.get_untracked());
+                session.set_file_connections(file_connections.get_untracked());
                 set_screen.set(Screen::Room);
                 Some(session)
             }
@@ -839,7 +843,9 @@ fn App() -> impl IntoView {
             set_messages.update(|msgs| {
                 if let Some(msg) = msgs.iter_mut().find(|m| m.id == file_id) {
                     if let Some(file) = msg.file.as_mut() {
-                        file.status = FileTransferStatus::Completed;
+                        if let FileTransferStatus::ReadyToSave { summary, withdrawn } = file.status {
+                            file.status = FileTransferStatus::Completed { summary, withdrawn };
+                        }
                         msg.rev += 1;
                     }
                 }
@@ -849,7 +855,6 @@ fn App() -> impl IntoView {
     let file_action = move |action: FileAction, file_id: String| match action {
         FileAction::Download => download_file(file_id),
         FileAction::Save => save_file(file_id),
-        FileAction::Decline => with_session(&|s| s.decline_file(&file_id)),
         FileAction::Cancel => with_session(&|s| s.cancel_download(&file_id)),
         FileAction::Withdraw => with_session(&|s| s.withdraw_file(&file_id)),
     };
@@ -1309,7 +1314,13 @@ fn App() -> impl IntoView {
         let author = msg.author.clone();
         let is_file = msg.file.is_some();
         let body = match msg.file {
-            Some(file) => file_card(lang, file, msg.text.clone(), msg.author.clone(), members, file_action).into_view(),
+            Some(file) => {
+                let file_id = file.file_id.clone();
+                let live = create_memo(move |_| {
+                    messages.with(|msgs| msgs.iter().find(|m| m.id == file_id).and_then(|m| m.file.as_ref().map(|f| f.status.clone())))
+                });
+                file_card(lang, file, live, msg.text.clone(), msg.author.clone(), members, file_action).into_view()
+            }
             None => view! { <div class="message-bubble" dir="auto">{msg.text.clone()}</div> }.into_view(),
         };
         let id = msg.id.clone();
@@ -2070,6 +2081,28 @@ fn App() -> impl IntoView {
                             <h4 class="settings-section">{move || t(lang.get(), "settings_video")}</h4>
                             {preset_group(lang, QualitySource::Camera, video_presets, apply_video_presets)}
                             {screen_supported.then(|| preset_group(lang, QualitySource::Screen, video_presets, apply_video_presets))}
+                            <h4 class="settings-section">{move || t(lang.get(), "settings_files")}</h4>
+                            <div class="file-settings">
+                                <label class="device-picker" for="file-connections-select">
+                                    <span class="device-picker-label">{move || t(lang.get(), "file_connections_label")}</span>
+                                    <select
+                                        id="file-connections-select"
+                                        class="lobby-input device-select"
+                                        prop:value=move || file_connections.get().to_string()
+                                        on:change=move |ev| {
+                                            if let Ok(cap) = event_target_value(&ev).parse::<usize>() {
+                                                set_file_connections.set(cap);
+                                                with_session(&|s| s.set_file_connections(cap));
+                                            }
+                                        }
+                                    >
+                                        {FILE_CONNECTION_CHOICES.into_iter().map(|n| view! {
+                                            <option value=n.to_string() selected=move || file_connections.get() == n>{n}</option>
+                                        }).collect_view()}
+                                    </select>
+                                </label>
+                                <p class="settings-hint">{move || t(lang.get(), "file_connections_hint")}</p>
+                            </div>
                             <h4 class="settings-section">{move || t(lang.get(), "settings_typing")}</h4>
                             <div class="audio-options">
                                 {audio_option_row(
@@ -2262,15 +2295,17 @@ fn App() -> impl IntoView {
 enum FileAction {
     Download,
     Save,
-    Decline,
     Cancel,
     Withdraw,
 }
 
 /// A shared file card. Rendered again whenever its status changes (it is part of the key).
+/// `live`: this card's current status. A progress update changes it without rebuilding the
+/// card (see `set_file_status`); a change of state rebuilds it.
 fn file_card(
     lang: ReadSignal<Language>,
     file: FileOfferInfo,
+    live: Memo<Option<FileTransferStatus>>,
     caption: String,
     author: String,
     members: ReadSignal<Vec<MemberUi>>,
@@ -2298,25 +2333,28 @@ fn file_card(
     };
     let reachable = move || members.with(|m| m.iter().any(|x| x.pubkey == author && x.link == LinkUi::Direct));
     let actions = match file.status {
-        FileTransferStatus::Sharing { active, waiting, done, active_peers, queued_peers } => {
-            let active_list = if active_peers.is_empty() {
-                None
-            } else {
-                Some(view! {
+        FileTransferStatus::Sharing { .. } => {
+            // Progress updates arrive several times a second: only these parts follow them,
+            // so the Withdraw button is never rebuilt under the pointer.
+            let sharing = move || match live.get() {
+                Some(FileTransferStatus::Sharing { active, waiting, done, active_peers, queued_peers }) => {
+                    (active, waiting, done, active_peers, queued_peers)
+                }
+                _ => Default::default(),
+            };
+            let active_list = move || {
+                let active_peers = sharing().3;
+                (!active_peers.is_empty()).then(|| view! {
                     <div class="file-active-transfers">
                         {active_peers.into_iter().map(|p| {
                             let peer_name = display_name(&p.peer);
-                            let speed = if p.speed_kb > 1024 {
-                                format!("{:.1} MB/s", p.speed_kb as f64 / 1024.0)
-                            } else {
-                                format!("{} KB/s", p.speed_kb)
-                            };
                             let progress = p.progress;
+                            let rate = move || transfer_rate(lang.get(), p.speed_kb, p.connections);
                             view! {
                                 <div class="file-peer-transfer">
                                     <div class="file-peer-meta">
                                         <span class="file-peer-name" dir="auto">{peer_name}</span>
-                                        <span class="file-peer-stats">{format!("{progress}% ({speed})")}</span>
+                                        <span class="file-peer-stats">{move || format!("{progress}% ({})", rate())}</span>
                                     </div>
                                     <div class="file-progress-bar">
                                         <div class="file-progress-fill" style=format!("width: {progress}%;")></div>
@@ -2327,11 +2365,9 @@ fn file_card(
                     </div>
                 })
             };
-
-            let queued_list = if queued_peers.is_empty() {
-                None
-            } else {
-                Some(view! {
+            let queued_list = move || {
+                let queued_peers = sharing().4;
+                (!queued_peers.is_empty()).then(|| view! {
                     <div class="file-queued-transfers">
                         {queued_peers.into_iter().map(|q| {
                             let peer_name = display_name(&q.peer);
@@ -2353,9 +2389,9 @@ fn file_card(
                     {button(FileAction::Withdraw, "btn btn-sm btn-danger file-withdraw-btn", "file_withdraw")}
                 </div>
                 <div class="file-share-counts">
-                    <span class="file-count-active">{move || t_replace_1(lang.get(), "file_sending", "{n}", &active.to_string())}</span>
-                    <span class="file-count-waiting">{move || t_replace_1(lang.get(), "file_waiting_count", "{n}", &waiting.to_string())}</span>
-                    <span class="file-count-done">{move || t_replace_1(lang.get(), "file_done_count", "{n}", &done.to_string())}</span>
+                    <span class="file-count-active">{move || t_replace_1(lang.get(), "file_sending", "{n}", &sharing().0.to_string())}</span>
+                    <span class="file-count-waiting">{move || t_replace_1(lang.get(), "file_waiting_count", "{n}", &sharing().1.to_string())}</span>
+                    <span class="file-count-done">{move || t_replace_1(lang.get(), "file_done_count", "{n}", &sharing().2.to_string())}</span>
                 </div>
                 {active_list}
                 {queued_list}
@@ -2364,7 +2400,6 @@ fn file_card(
         }
         FileTransferStatus::Offered => {
             let download = button(FileAction::Download, "btn btn-sm btn-primary file-download-btn", "file_download");
-            let decline = button(FileAction::Decline, "btn btn-sm btn-secondary file-decline-btn", "file_decline");
             view! {
                 <div class="file-status-row">
                     {move || if reachable() {
@@ -2372,7 +2407,6 @@ fn file_card(
                     } else {
                         view! { <span class="file-status-text cancelled file-unreachable">{move || t(lang.get(), "file_unreachable")}</span> }.into_view()
                     }}
-                    {decline}
                 </div>
             }
             .into_view()
@@ -2384,16 +2418,23 @@ fn file_card(
             </div>
         }
         .into_view(),
-        FileTransferStatus::Downloading { progress, speed_kb } => {
-            let speed = if speed_kb > 1024 { format!("{:.1} MB/s", speed_kb as f64 / 1024.0) } else { format!("{speed_kb} KB/s") };
+        FileTransferStatus::Downloading { .. } => {
+            // As for Sharing: the numbers follow the live status, the Cancel button stays put.
+            let numbers = move || match live.get() {
+                Some(FileTransferStatus::Downloading { progress, speed_kb, connections }) => (progress, speed_kb, connections),
+                _ => (0, 0, 1),
+            };
             view! {
                 <div class="file-progress-container">
                     <div class="file-progress-bar">
-                        <div class="file-progress-fill" style=format!("width: {progress}%;")></div>
+                        <div class="file-progress-fill" style=move || format!("width: {}%;", numbers().0)></div>
                     </div>
                     <div class="file-progress-meta">
                         <span class="file-progress-label">
-                            {move || format!("{}: {}% ({})", t(lang.get(), "file_downloading"), progress, speed)}
+                            {move || {
+                                let (progress, speed_kb, connections) = numbers();
+                                format!("{}: {}% ({})", t(lang.get(), "file_downloading"), progress, transfer_rate(lang.get(), speed_kb, connections))
+                            }}
                         </span>
                         {button(FileAction::Cancel, "btn btn-sm btn-danger file-cancel-btn", "btn_cancel")}
                     </div>
@@ -2401,15 +2442,26 @@ fn file_card(
             }
             .into_view()
         }
-        FileTransferStatus::ReadyToSave => view! {
+        FileTransferStatus::ReadyToSave { summary, .. } => view! {
             <div class="file-status-row">
                 {status_line("file_ready_to_save", "completed")}
                 {button(FileAction::Save, "btn btn-sm btn-primary file-save-btn", "file_save")}
             </div>
+            <div class="file-summary">{move || download_summary(lang.get(), summary)}</div>
         }
         .into_view(),
-        FileTransferStatus::Completed => status_line("file_download_complete", "completed"),
-        FileTransferStatus::Declined => status_line("file_declined", "cancelled"),
+        // The offer still stands (unless withdrawn): the file can be downloaded again.
+        FileTransferStatus::Completed { summary, withdrawn } => {
+            let again = button(FileAction::Download, "btn btn-sm btn-secondary file-download-again-btn", "file_download_again");
+            view! {
+                <div class="file-status-row">
+                    {status_line("file_download_complete", "completed")}
+                    {move || (!withdrawn && reachable()).then(|| again.clone())}
+                </div>
+                <div class="file-summary">{move || download_summary(lang.get(), summary)}</div>
+            }
+            .into_view()
+        }
         // The offer still stands: the download can be started again.
         status @ (FileTransferStatus::Cancelled | FileTransferStatus::Interrupted) => {
             let key = if status == FileTransferStatus::Cancelled { "file_cancelled" } else { "file_interrupted" };
@@ -3066,6 +3118,33 @@ fn device_picker(
                 {options}
             </select>
         </label>
+    }
+}
+
+/// The settings' choices for the most connections an upload may use.
+const FILE_CONNECTION_CHOICES: [usize; 4] = [1, 2, 4, protocol::transfer::MAX_FILE_CONNECTIONS];
+
+/// "146.5 MB in 23.4 s · 6.3 MB/s average": a finished download's size, time and speed.
+fn download_summary(lang: Language, summary: DownloadSummary) -> String {
+    let seconds = summary.millis / 1000;
+    let time = if seconds < 60 {
+        format!("{:.1} s", summary.millis as f64 / 1000.0)
+    } else {
+        format!("{} min {:02} s", seconds / 60, seconds % 60)
+    };
+    t(lang, "file_download_summary")
+        .replace("{size}", &format_file_size(summary.bytes))
+        .replace("{time}", &time)
+        .replace("{speed}", &transfer_rate(lang, summary.speed_kb(), 1))
+}
+
+/// "12.3 MB/s", followed by "· 4 connections" when a transfer uses more than one.
+fn transfer_rate(lang: Language, speed_kb: u64, connections: u8) -> String {
+    let speed = if speed_kb > 1024 { format!("{:.1} MB/s", speed_kb as f64 / 1024.0) } else { format!("{speed_kb} KB/s") };
+    if connections > 1 {
+        format!("{speed} · {}", t_replace_1(lang, "file_connections", "{n}", &connections.to_string()))
+    } else {
+        speed
     }
 }
 

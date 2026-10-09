@@ -33,7 +33,6 @@
     "check_zero_storage": "🚫 Zero Storage: Strictly in volatile Wasm RAM",
     "check_destruction": "💥 Instant Destruction: Refresh or close tab wipes all history",
     "file_download": "⬇️ Download",
-    "file_decline": "Decline",
     "file_downloading": "Downloading",
     "file_download_complete": "✅ Download complete",
     "file_ready_to_save": "Ready to save",
@@ -113,7 +112,6 @@
     "file_unreachable": "Sender not directly reachable",
     "file_withdraw": "Withdraw",
     "file_withdrawn": "Withdrawn by sender",
-    "file_declined": "Declined",
     "file_cancelled": "Cancelled",
     "file_sender_left": "⚠️ Sender left the room",
     "toast_file_request_failed": "Could not request the file.",
@@ -297,7 +295,13 @@
     "join_link_invalid": "That isn't a dchat room link: it needs #room=…&key=…",
     "install_app": "📲 Install app",
     "install_hint_apple": "To install dchat: Share → Add to Home Screen (iPhone, iPad), or File → Add to Dock in Safari (Mac).",
-    "confirm_switch_room": "Leave this room and open the new link? This room's chat is not kept."
+    "confirm_switch_room": "Leave this room and open the new link? This room's chat is not kept.",
+    "settings_files": "📁 Files",
+    "file_connections_label": "Connections per transfer (at most)",
+    "file_connections_hint": "Each upload starts on one connection and adds more, one at a time, while the speed keeps rising. Several connections fill fast internet lines that one connection cannot. The cap also limits the connections others open to you, and it applies at once. 1 turns this off.",
+    "file_connections": "{n} connections",
+    "file_download_again": "⬇️ Download again",
+    "file_download_summary": "{size} in {time} · {speed} average"
   },
   "zh": {
     "scan_qr": "📱 扫描二维码",
@@ -333,7 +337,6 @@
     "check_zero_storage": "🚫 零存储：仅保存在易失性 Wasm 内存中",
     "check_destruction": "💥 瞬间销毁：刷新或关闭标签页将立即擦除所有历史记录",
     "file_download": "⬇️ 下载",
-    "file_decline": "拒绝",
     "file_downloading": "正在下载",
     "file_download_complete": "✅ 下载完成",
     "file_ready_to_save": "可以保存",
@@ -413,7 +416,6 @@
     "file_unreachable": "与发送者无直接连接",
     "file_withdraw": "撤回",
     "file_withdrawn": "发送者已撤回",
-    "file_declined": "已拒绝",
     "file_cancelled": "已取消",
     "file_sender_left": "⚠️ 发送者已离开房间",
     "toast_file_request_failed": "无法请求该文件。",
@@ -597,7 +599,13 @@
     "join_link_invalid": "这不是 dchat 房间链接：需要包含 #room=…&key=…",
     "install_app": "📲 安装应用",
     "install_hint_apple": "安装 dchat：分享 → 添加到主屏幕（iPhone、iPad），或在 Safari 中选择 文件 → 添加到程序坞（Mac）。",
-    "confirm_switch_room": "离开当前房间并打开新链接？当前房间的聊天记录不会保留。"
+    "confirm_switch_room": "离开当前房间并打开新链接？当前房间的聊天记录不会保留。",
+    "settings_files": "📁 文件",
+    "file_connections_label": "每次传输的连接数（上限）",
+    "file_connections_hint": "每次上传先用一个连接，只要速度还在提升，就逐个增加连接。多个连接能用满单个连接用不满的高速网络。上限同样限制别人向你建立的连接，并立即生效。设为 1 即关闭。",
+    "file_connections": "{n} 个连接",
+    "file_download_again": "⬇️ 再次下载",
+    "file_download_summary": "{size}，用时 {time}，平均 {speed}"
   },
   "hi": {
     "scan_qr": "📱 क्यूआर स्कैन करें",
@@ -633,7 +641,6 @@
     "check_zero_storage": "🚫 शून्य भंडारण: केवल अस्थायी Wasm RAM में",
     "check_destruction": "💥 त्वरित विनाश: रीफ़्रेश या टैब बंद करने पर सब कुछ मिट जाता है",
     "file_download": "⬇️ डाउनलोड",
-    "file_decline": "अस्वीकार",
     "file_downloading": "डाउनलोड हो रहा है",
     "file_download_complete": "✅ डाउनलोड पूर्ण",
     "file_ready_to_save": "सहेजने के लिए तैयार",
@@ -713,7 +720,6 @@
     "file_unreachable": "भेजने वाले से सीधा कनेक्शन नहीं",
     "file_withdraw": "वापस लें",
     "file_withdrawn": "भेजने वाले ने वापस ले लिया",
-    "file_declined": "अस्वीकार किया गया",
     "file_cancelled": "रद्द किया गया",
     "file_sender_left": "⚠️ भेजने वाले ने कमरा छोड़ दिया",
     "toast_file_request_failed": "फ़ाइल का अनुरोध नहीं किया जा सका।",
@@ -897,7 +903,13 @@
     "join_link_invalid": "यह dchat कमरे का लिंक नहीं है: इसमें #room=…&key=… होना चाहिए",
     "install_app": "📲 ऐप इंस्टॉल करें",
     "install_hint_apple": "dchat इंस्टॉल करने के लिए: शेयर → होम स्क्रीन में जोड़ें (iPhone, iPad), या Safari में फ़ाइल → Dock में जोड़ें (Mac)।",
-    "confirm_switch_room": "इस कमरे को छोड़कर नया लिंक खोलें? इस कमरे की चैट सहेजी नहीं जाती।"
+    "confirm_switch_room": "इस कमरे को छोड़कर नया लिंक खोलें? इस कमरे की चैट सहेजी नहीं जाती।",
+    "settings_files": "📁 फ़ाइलें",
+    "file_connections_label": "प्रति ट्रांसफ़र कनेक्शन (अधिकतम)",
+    "file_connections_hint": "हर अपलोड एक कनेक्शन से शुरू होता है और जब तक गति बढ़ती रहे, एक-एक करके और कनेक्शन जोड़ता है। कई कनेक्शन तेज़ इंटरनेट लाइन को भर देते हैं, जो एक कनेक्शन नहीं कर पाता। यह सीमा दूसरों द्वारा आपसे खोले गए कनेक्शनों पर भी लागू होती है और तुरंत प्रभावी होती है। 1 चुनने पर यह बंद हो जाता है।",
+    "file_connections": "{n} कनेक्शन",
+    "file_download_again": "⬇️ फिर से डाउनलोड करें",
+    "file_download_summary": "{size}, {time} में · औसत {speed}"
   },
   "es": {
     "scan_qr": "📱 Escanear QR",
@@ -933,7 +945,6 @@
     "check_zero_storage": "🚫 Cero almacenamiento: estrictamente en RAM Wasm volátil",
     "check_destruction": "💥 Destrucción instantánea: recargar o cerrar la pestaña borra todo el historial",
     "file_download": "⬇️ Descargar",
-    "file_decline": "Rechazar",
     "file_downloading": "Descargando",
     "file_download_complete": "✅ Descarga completada",
     "file_ready_to_save": "Listo para guardar",
@@ -1013,7 +1024,6 @@
     "file_unreachable": "Sin conexión directa con el remitente",
     "file_withdraw": "Retirar",
     "file_withdrawn": "Retirado por el remitente",
-    "file_declined": "Rechazado",
     "file_cancelled": "Cancelado",
     "file_sender_left": "⚠️ El remitente salió de la sala",
     "toast_file_request_failed": "No se pudo solicitar el archivo.",
@@ -1197,7 +1207,13 @@
     "join_link_invalid": "Ese no es un enlace de sala de dchat: necesita #room=…&key=…",
     "install_app": "📲 Instalar la app",
     "install_hint_apple": "Para instalar dchat: Compartir → Añadir a pantalla de inicio (iPhone, iPad), o Archivo → Añadir al Dock en Safari (Mac).",
-    "confirm_switch_room": "¿Salir de esta sala y abrir el nuevo enlace? El chat de esta sala no se conserva."
+    "confirm_switch_room": "¿Salir de esta sala y abrir el nuevo enlace? El chat de esta sala no se conserva.",
+    "settings_files": "📁 Archivos",
+    "file_connections_label": "Conexiones por transferencia (máximo)",
+    "file_connections_hint": "Cada envío empieza con una conexión y añade más, una a una, mientras la velocidad siga subiendo. Varias conexiones llenan líneas de internet rápidas que una sola no puede. El límite también se aplica a las conexiones que otros abren contigo, y tiene efecto al instante. 1 lo desactiva.",
+    "file_connections": "{n} conexiones",
+    "file_download_again": "⬇️ Descargar de nuevo",
+    "file_download_summary": "{size} en {time} · {speed} de media"
   },
   "fr": {
     "scan_qr": "📱 Scanner QR",
@@ -1233,7 +1249,6 @@
     "check_zero_storage": "🚫 Aucun stockage : strictement dans la RAM Wasm volatile",
     "check_destruction": "💥 Destruction instantanée : rafraîchir ou fermer l'onglet efface tout",
     "file_download": "⬇️ Télécharger",
-    "file_decline": "Refuser",
     "file_downloading": "Téléchargement",
     "file_download_complete": "✅ Téléchargement terminé",
     "file_ready_to_save": "Prêt à enregistrer",
@@ -1313,7 +1328,6 @@
     "file_unreachable": "Pas de connexion directe avec l'expéditeur",
     "file_withdraw": "Retirer",
     "file_withdrawn": "Retiré par l'expéditeur",
-    "file_declined": "Refusé",
     "file_cancelled": "Annulé",
     "file_sender_left": "⚠️ L'expéditeur a quitté le salon",
     "toast_file_request_failed": "Impossible de demander le fichier.",
@@ -1497,7 +1511,13 @@
     "join_link_invalid": "Ce n'est pas un lien de salon dchat : il doit contenir #room=…&key=…",
     "install_app": "📲 Installer l'application",
     "install_hint_apple": "Pour installer dchat : Partager → Sur l'écran d'accueil (iPhone, iPad), ou Fichier → Ajouter au Dock dans Safari (Mac).",
-    "confirm_switch_room": "Quitter ce salon et ouvrir le nouveau lien ? La discussion de ce salon n'est pas conservée."
+    "confirm_switch_room": "Quitter ce salon et ouvrir le nouveau lien ? La discussion de ce salon n'est pas conservée.",
+    "settings_files": "📁 Fichiers",
+    "file_connections_label": "Connexions par transfert (au plus)",
+    "file_connections_hint": "Chaque envoi commence sur une connexion et en ajoute d'autres, une à une, tant que la vitesse augmente. Plusieurs connexions remplissent des lignes internet rapides qu'une seule ne peut pas remplir. La limite s'applique aussi aux connexions que les autres ouvrent vers vous, et prend effet immédiatement. 1 désactive cette option.",
+    "file_connections": "{n} connexions",
+    "file_download_again": "⬇️ Télécharger à nouveau",
+    "file_download_summary": "{size} en {time} · {speed} en moyenne"
   },
   "ar": {
     "scan_qr": "📱 مسح رمز QR",
@@ -1533,7 +1553,6 @@
     "check_zero_storage": "🚫 انعدام التخزين: الذاكرة متطايرة تماماً في Wasm RAM",
     "check_destruction": "💥 تدمير فوري: تحديث الصفحة أو إغلاقها يمسح السجل بالكامل",
     "file_download": "⬇️ تنزيل",
-    "file_decline": "رفض",
     "file_downloading": "جارٍ التنزيل",
     "file_download_complete": "✅ اكتمل التنزيل",
     "file_ready_to_save": "جاهز للحفظ",
@@ -1613,7 +1632,6 @@
     "file_unreachable": "لا يوجد اتصال مباشر بالمرسل",
     "file_withdraw": "سحب",
     "file_withdrawn": "سحبه المرسل",
-    "file_declined": "تم الرفض",
     "file_cancelled": "تم الإلغاء",
     "file_sender_left": "⚠️ غادر المرسل الغرفة",
     "toast_file_request_failed": "تعذر طلب الملف.",
@@ -1797,7 +1815,13 @@
     "join_link_invalid": "هذا ليس رابط غرفة dchat: يجب أن يحتوي على #room=…&key=…",
     "install_app": "📲 تثبيت التطبيق",
     "install_hint_apple": "لتثبيت dchat: مشاركة ← إضافة إلى الشاشة الرئيسية (iPhone و iPad)، أو ملف ← إضافة إلى Dock في Safari (Mac).",
-    "confirm_switch_room": "هل تريد مغادرة هذه الغرفة وفتح الرابط الجديد؟ لا يتم الاحتفاظ بمحادثة هذه الغرفة."
+    "confirm_switch_room": "هل تريد مغادرة هذه الغرفة وفتح الرابط الجديد؟ لا يتم الاحتفاظ بمحادثة هذه الغرفة.",
+    "settings_files": "📁 الملفات",
+    "file_connections_label": "الاتصالات لكل نقل (الحد الأقصى)",
+    "file_connections_hint": "يبدأ كل رفع باتصال واحد ويضيف اتصالات أخرى واحدًا تلو الآخر ما دامت السرعة تزداد. تملأ عدة اتصالات خطوط الإنترنت السريعة التي لا يستطيع اتصال واحد ملأها. يحدّ هذا الحد أيضًا من الاتصالات التي يفتحها الآخرون إليك، ويسري فورًا. القيمة 1 توقف ذلك.",
+    "file_connections": "{n} اتصالات",
+    "file_download_again": "⬇️ التنزيل مرة أخرى",
+    "file_download_summary": "{size} في {time} · بمتوسط {speed}"
   },
   "bn": {
     "scan_qr": "📱 কিউআর স্ক্যান",
@@ -1833,7 +1857,6 @@
     "check_zero_storage": "🚫 শূন্য স্টোরেজ: সম্পূর্ণ পরিবর্তনশীল Wasm RAM-এ",
     "check_destruction": "💥 তাৎক্ষণিক ধ্বংস: রিলোড বা ট্যাব বন্ধ করলে সব মুছে যায়",
     "file_download": "⬇️ ডাউনলোড",
-    "file_decline": "প্রত্যাখ্যান",
     "file_downloading": "ডাউনলোড হচ্ছে",
     "file_download_complete": "✅ ডাউনলোড সম্পন্ন",
     "file_ready_to_save": "সংরক্ষণের জন্য প্রস্তুত",
@@ -1913,7 +1936,6 @@
     "file_unreachable": "প্রেরকের সাথে সরাসরি সংযোগ নেই",
     "file_withdraw": "প্রত্যাহার",
     "file_withdrawn": "প্রেরক প্রত্যাহার করেছেন",
-    "file_declined": "প্রত্যাখ্যান করা হয়েছে",
     "file_cancelled": "বাতিল করা হয়েছে",
     "file_sender_left": "⚠️ প্রেরক রুম ছেড়ে চলে গেছেন",
     "toast_file_request_failed": "ফাইলটির অনুরোধ করা সম্ভব হয়নি।",
@@ -2097,7 +2119,13 @@
     "join_link_invalid": "এটি dchat রুমের লিঙ্ক নয়: এতে #room=…&key=… থাকতে হবে",
     "install_app": "📲 অ্যাপ ইনস্টল করুন",
     "install_hint_apple": "dchat ইনস্টল করতে: শেয়ার → হোম স্ক্রিনে যোগ করুন (iPhone, iPad), অথবা Safari-তে ফাইল → Dock-এ যোগ করুন (Mac)।",
-    "confirm_switch_room": "এই রুম ছেড়ে নতুন লিঙ্কটি খুলবেন? এই রুমের চ্যাট রাখা হয় না।"
+    "confirm_switch_room": "এই রুম ছেড়ে নতুন লিঙ্কটি খুলবেন? এই রুমের চ্যাট রাখা হয় না।",
+    "settings_files": "📁 ফাইল",
+    "file_connections_label": "প্রতি ট্রান্সফারে সংযোগ (সর্বোচ্চ)",
+    "file_connections_hint": "প্রতিটি আপলোড একটি সংযোগ দিয়ে শুরু হয় এবং গতি বাড়তে থাকলে একে একে আরও সংযোগ যোগ করে। একাধিক সংযোগ দ্রুত ইন্টারনেট লাইন পূর্ণ করে, যা একটি সংযোগ পারে না। এই সীমা অন্যরা আপনার দিকে যে সংযোগ খোলে তাতেও প্রযোজ্য, এবং সঙ্গে সঙ্গে কার্যকর হয়। 1 দিলে এটি বন্ধ থাকে।",
+    "file_connections": "{n}টি সংযোগ",
+    "file_download_again": "⬇️ আবার ডাউনলোড করুন",
+    "file_download_summary": "{size}, {time} সময়ে · গড়ে {speed}"
   },
   "pt": {
     "scan_qr": "📱 Escanear QR",
@@ -2133,7 +2161,6 @@
     "check_zero_storage": "🚫 Zero armazenamento: estritamente em RAM volátil Wasm",
     "check_destruction": "💥 Destruição instantânea: atualizar ou fechar a aba apaga todo o histórico",
     "file_download": "⬇️ Baixar",
-    "file_decline": "Recusar",
     "file_downloading": "Baixando",
     "file_download_complete": "✅ Download concluído",
     "file_ready_to_save": "Pronto para salvar",
@@ -2213,7 +2240,6 @@
     "file_unreachable": "Sem conexão direta com o remetente",
     "file_withdraw": "Retirar",
     "file_withdrawn": "Retirado pelo remetente",
-    "file_declined": "Recusado",
     "file_cancelled": "Cancelado",
     "file_sender_left": "⚠️ O remetente saiu da sala",
     "toast_file_request_failed": "Não foi possível solicitar o arquivo.",
@@ -2397,7 +2423,13 @@
     "join_link_invalid": "Isso não é um link de sala do dchat: ele precisa de #room=…&key=…",
     "install_app": "📲 Instalar app",
     "install_hint_apple": "Para instalar o dchat: Compartilhar → Adicionar à Tela de Início (iPhone, iPad), ou Arquivo → Adicionar ao Dock no Safari (Mac).",
-    "confirm_switch_room": "Sair desta sala e abrir o novo link? O chat desta sala não é guardado."
+    "confirm_switch_room": "Sair desta sala e abrir o novo link? O chat desta sala não é guardado.",
+    "settings_files": "📁 Arquivos",
+    "file_connections_label": "Conexões por transferência (no máximo)",
+    "file_connections_hint": "Cada envio começa com uma conexão e adiciona outras, uma de cada vez, enquanto a velocidade continuar subindo. Várias conexões preenchem linhas de internet rápidas que uma só não consegue. O limite também vale para as conexões que outras pessoas abrem com você e entra em vigor na hora. 1 desativa isso.",
+    "file_connections": "{n} conexões",
+    "file_download_again": "⬇️ Baixar novamente",
+    "file_download_summary": "{size} em {time} · média de {speed}"
   },
   "ru": {
     "scan_qr": "📱 Сканировать QR",
@@ -2433,7 +2465,6 @@
     "check_zero_storage": "🚫 Ноль хранилища: строго в энергозависимой памяти Wasm RAM",
     "check_destruction": "💥 Мгновенное уничтожение: обновление или закрытие вкладки стирает всю историю",
     "file_download": "⬇️ Скачать",
-    "file_decline": "Отклонить",
     "file_downloading": "Скачивание",
     "file_download_complete": "✅ Скачивание завершено",
     "file_ready_to_save": "Готово к сохранению",
@@ -2513,7 +2544,6 @@
     "file_unreachable": "Нет прямого соединения с отправителем",
     "file_withdraw": "Отозвать",
     "file_withdrawn": "Отозвано отправителем",
-    "file_declined": "Отклонено",
     "file_cancelled": "Отменено",
     "file_sender_left": "⚠️ Отправителя больше нет в комнате",
     "toast_file_request_failed": "Не удалось запросить файл.",
@@ -2697,7 +2727,13 @@
     "join_link_invalid": "Это не ссылка на комнату dchat: в ней должно быть #room=…&key=…",
     "install_app": "📲 Установить приложение",
     "install_hint_apple": "Чтобы установить dchat: Поделиться → На экран «Домой» (iPhone, iPad) или Файл → Добавить в Dock в Safari (Mac).",
-    "confirm_switch_room": "Покинуть эту комнату и открыть новую ссылку? Чат этой комнаты не сохраняется."
+    "confirm_switch_room": "Покинуть эту комнату и открыть новую ссылку? Чат этой комнаты не сохраняется.",
+    "settings_files": "📁 Файлы",
+    "file_connections_label": "Соединений на передачу (не больше)",
+    "file_connections_hint": "Каждая отправка начинается с одного соединения и добавляет новые по одному, пока скорость растёт. Несколько соединений загружают быстрый интернет-канал, который одно соединение заполнить не может. Ограничение действует и на соединения, которые открывают к вам другие, и применяется сразу. 1 отключает это.",
+    "file_connections": "соединений: {n}",
+    "file_download_again": "⬇️ Скачать снова",
+    "file_download_summary": "{size} за {time} · в среднем {speed}"
   },
   "de": {
     "scan_qr": "📱 QR scannen",
@@ -2733,7 +2769,6 @@
     "check_zero_storage": "🚫 Null Speicherung: Rein im flüchtigen Wasm-RAM",
     "check_destruction": "💥 Sofortige Zerstörung: Neuladen oder Schließen löscht den gesamten Verlauf",
     "file_download": "⬇️ Herunterladen",
-    "file_decline": "Ablehnen",
     "file_downloading": "Herunterladen",
     "file_download_complete": "✅ Download abgeschlossen",
     "file_ready_to_save": "Bereit zum Speichern",
@@ -2813,7 +2848,6 @@
     "file_unreachable": "Keine Direktverbindung zum Absender",
     "file_withdraw": "Zurückziehen",
     "file_withdrawn": "Vom Absender zurückgezogen",
-    "file_declined": "Abgelehnt",
     "file_cancelled": "Abgebrochen",
     "file_sender_left": "⚠️ Der Absender hat den Raum verlassen",
     "toast_file_request_failed": "Datei konnte nicht angefordert werden.",
@@ -2997,6 +3031,12 @@
     "join_link_invalid": "Das ist kein dchat-Raumlink: Er braucht #room=…&key=…",
     "install_app": "📲 App installieren",
     "install_hint_apple": "So installierst du dchat: Teilen → Zum Home-Bildschirm (iPhone, iPad) oder in Safari Ablage → Zum Dock hinzufügen (Mac).",
-    "confirm_switch_room": "Diesen Raum verlassen und den neuen Link öffnen? Der Chat dieses Raums wird nicht aufbewahrt."
+    "confirm_switch_room": "Diesen Raum verlassen und den neuen Link öffnen? Der Chat dieses Raums wird nicht aufbewahrt.",
+    "settings_files": "📁 Dateien",
+    "file_connections_label": "Verbindungen pro Übertragung (höchstens)",
+    "file_connections_hint": "Jeder Upload beginnt mit einer Verbindung und fügt nacheinander weitere hinzu, solange die Geschwindigkeit steigt. Mehrere Verbindungen lasten schnelle Internetleitungen aus, die eine allein nicht füllt. Die Grenze gilt auch für Verbindungen, die andere zu dir öffnen, und greift sofort. 1 schaltet das ab.",
+    "file_connections": "{n} Verbindungen",
+    "file_download_again": "⬇️ Erneut herunterladen",
+    "file_download_summary": "{size} in {time} · im Schnitt {speed}"
   }
 }

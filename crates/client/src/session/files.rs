@@ -1,13 +1,16 @@
 //! Room-wide file sharing. The author posts a file card to the room; every member who
-//! wants the file pulls it from the author over their own direct link. Chunks are sealed
-//! with the room key (ChaCha20-Poly1305, authenticated header) and never relayed. All
-//! transfer state lives in RAM and dies with the link.
+//! wants the file pulls it from the author over their own direct link, and over extra file
+//! links to them when those raise the rate (`file_links.rs`). Chunks are sealed with the
+//! room key (ChaCha20-Poly1305, authenticated header) and never relayed; the downloader puts
+//! them back in order and confirms progress (`protocol::transfer`). All transfer state lives
+//! in RAM and dies with the link.
 
 use super::RoomSession;
-#[cfg(feature = "e2e-hooks")]
 use crate::media::sleep_ms;
-use crate::state::{current_time_string, ChatMessageUi, FileOfferInfo, FileTransferStatus};
+use crate::mesh::{wait_for_room, ChunkRoute};
+use crate::state::{current_time_string, ChatMessageUi, DownloadSummary, FileOfferInfo, FileTransferStatus};
 use leptos::*;
+use protocol::transfer::{in_send_window, AckPacer, Growth, LinkGrowth, RateMeter, Reorder};
 use protocol::{
     decrypt_chunk, encrypt_chunk, QueueDecision, RoomBody, RoomEnvelope, Upload, UploadQueue,
     CHUNK_SIZE, MAX_CONCURRENT_UPLOADS,
@@ -19,8 +22,22 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{window, HtmlAnchorElement};
 
-/// Pause sending while this much is still queued on the file channel.
+/// Pause sending on a connection while this much is still queued on it.
 const BACKPRESSURE_HIGH: u32 = 2 * 1024 * 1024;
+/// How often an upload that has sent all it may checks for new confirmations.
+const ACK_POLL_MS: i32 = 20;
+/// The speed shown on the cards: averaged over this long, and changed at most this often,
+/// so it reads calmly while connections ramp up and chunks arrive out of order.
+const SPEED_WINDOW_MS: f64 = 5000.0;
+const SPEED_REFRESH_MS: f64 = 1000.0;
+/// Both cards count the connections that carried a chunk this recently, so they agree.
+const CARRIED_RECENTLY_MS: f64 = 2000.0;
+
+/// How many of `last_used` (when each route last carried a chunk) did so lately; at least 1.
+fn recently_used<K>(last_used: &mut HashMap<K, f64>, now: f64) -> u8 {
+    last_used.retain(|_, at| now - *at <= CARRIED_RECENTLY_MS);
+    last_used.len().clamp(1, u8::MAX as usize) as u8
+}
 /// Batch size when reading file from disk into memory before chunking.
 const READ_BATCH_SIZE: usize = 2 * 1024 * 1024;
 /// Without a save picker, received chunks are merged into one Blob every this many bytes,
@@ -50,7 +67,22 @@ struct Download {
     started: f64,
     last_ui_update: f64,
     received: u64,
-    next_index: u32,
+    /// Chunks arrive over several connections: early ones wait here for the gap to fill.
+    reorder: Reorder<Vec<u8>>,
+    /// Chunk count, from the first chunk; every other must agree.
+    total: Option<u32>,
+    acks: AckPacer,
+    /// Recent rate, for the progress label, and the speed it shows.
+    meter: RateMeter,
+    speed_kb: u64,
+    speed_at: f64,
+    /// When the first chunk arrived: the summary's clock starts there, not at the request,
+    /// which may have waited in the sender's queue.
+    first_chunk_at: Option<f64>,
+    /// When each of the author's connections (`None`: the main link; else a file link)
+    /// last delivered a chunk, and how many ever did.
+    routes_seen: HashMap<Option<(bool, u32)>, f64>,
+    most_routes: usize,
 }
 
 impl Download {
@@ -77,10 +109,40 @@ struct ActiveUpload {
     /// Tells this run apart from a later request for the same file by the same member.
     id: u64,
     started: f64,
-    sent_bytes: u64,
+    /// Chunks the requester confirmed (see `protocol::transfer`).
+    acked: u32,
     last_ui_update: f64,
     progress: u8,
+    /// The speed shown on our card (see `SPEED_WINDOW_MS`).
+    meter: RateMeter,
     speed_kb: u64,
+    speed_at: f64,
+    connections: u8,
+}
+
+/// The part of the file read into memory, `READ_BATCH_SIZE` at a time.
+#[derive(Default)]
+struct ReadBatch {
+    first: u32,
+    bytes: Vec<u8>,
+}
+
+impl ReadBatch {
+    /// Chunk `index` of `file`, reading the batch that holds it when needed.
+    async fn chunk(&mut self, file: &web_sys::File, index: u32) -> Option<&[u8]> {
+        let held = self.bytes.len().div_ceil(CHUNK_SIZE) as u32;
+        if index < self.first || index >= self.first + held {
+            let start = index as f64 * CHUNK_SIZE as f64;
+            let end = (start + READ_BATCH_SIZE as f64).min(file.size());
+            let blob = file.slice_with_f64_and_f64(start, end).ok()?;
+            let buffer = JsFuture::from(blob.array_buffer()).await.ok()?;
+            self.first = index;
+            self.bytes = js_sys::Uint8Array::new(&buffer).to_vec();
+        }
+        // An empty file is one empty chunk.
+        let offset = (index - self.first) as usize * CHUNK_SIZE;
+        self.bytes.get(offset..(offset + CHUNK_SIZE).min(self.bytes.len()))
+    }
 }
 
 pub(super) struct Files {
@@ -206,16 +268,20 @@ impl RoomSession {
             ActiveUpload {
                 id,
                 started: js_sys::Date::now(),
-                sent_bytes: 0,
+                acked: 0,
                 last_ui_update: js_sys::Date::now(),
                 progress: 0,
+                meter: RateMeter::new(SPEED_WINDOW_MS),
                 speed_kb: 0,
+                speed_at: js_sys::Date::now(),
+                connections: 1,
             },
         );
         self.refresh_sharing_card(&file_id);
         let s = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let completed = s.upload(&file, &file_id, &peer, id).await;
+            s.file_links_idle_later(&peer);
             let upload = (file_id.clone(), peer.clone());
             let mut active = s.inner.files.active_transfers.borrow_mut();
             // A cancelled or lost upload was already taken out of the queue, and a new
@@ -232,13 +298,19 @@ impl RoomSession {
         });
     }
 
+    /// Whether an upload to `peer` is running.
+    pub(super) fn uploading_to(&self, peer: &str) -> bool {
+        self.inner.files.active_transfers.borrow().keys().any(|(_, p)| p == peer)
+    }
+
     /// Whether upload run `id` should keep sending (not cancelled, lost or withdrawn).
     fn upload_running(&self, upload: &Upload, id: u64) -> bool {
         let files = &self.inner.files;
         files.active_transfers.borrow().get(upload).is_some_and(|a| a.id == id) && !files.withdrawn.borrow().contains(&upload.0)
     }
 
-    /// Stream `file` to `peer` in sealed chunks; returns whether every chunk was sent.
+    /// Stream `file` to `peer` in sealed chunks over every connection in use; returns
+    /// whether the peer confirmed them all.
     async fn upload(&self, file: &web_sys::File, file_id: &str, peer: &str, id: u64) -> bool {
         let Ok(file_uuid) = uuid::Uuid::parse_str(file_id) else {
             return false;
@@ -246,77 +318,118 @@ impl RoomSession {
         let total_size = file.size();
         let total_chunks = ((total_size / CHUNK_SIZE as f64).ceil() as u32).max(1);
         let upload = (file_id.to_string(), peer.to_string());
+        let forced = self.forced_file_links(peer);
+        let mut cap = self.file_connection_cap();
+        let grow_to = |cap| if forced { 1 } else { cap };
+        let mut growth = LinkGrowth::new(grow_to(cap), js_sys::Date::now());
+        // When each route last carried a chunk, for the count on our card.
+        let mut carried: HashMap<Option<u32>, f64> = HashMap::new();
+        let mut batch = ReadBatch::default();
+        let mut next: u32 = 0;
+        let mut turn = 0;
+        let mut lost = self.file_links_lost(peer);
+        // Bytes handed to the connections, resent ones included.
+        let mut sent: u64 = 0;
 
-        let mut chunk_index: u32 = 0;
-        let mut file_offset: f64 = 0.0;
-
-        while file_offset < total_size {
+        loop {
             if !self.upload_running(&upload, id) {
                 return false;
             }
-
-            let batch_end = (file_offset + READ_BATCH_SIZE as f64).min(total_size);
-            let Ok(blob) = file.slice_with_f64_and_f64(file_offset, batch_end) else {
+            let acked = self.inner.files.active_transfers.borrow().get(&upload).map_or(0, |a| a.acked.min(total_chunks));
+            if acked == total_chunks {
+                return true;
+            }
+            // A lost file link took the chunks queued on it along: send again from the
+            // first one not confirmed.
+            if self.file_links_lost(peer) != lost {
+                lost = self.file_links_lost(peer);
+                next = acked;
+            }
+            next = next.max(acked);
+            // A new cap applies at once, and growth starts over from there.
+            if self.file_connection_cap() != cap {
+                cap = self.file_connection_cap();
+                growth = LinkGrowth::new(grow_to(cap), js_sys::Date::now());
+            }
+            let routes = self.chunk_routes(peer, cap);
+            let taken = sent.saturating_sub(self.queued_to(peer));
+            let shown = recently_used(&mut carried, js_sys::Date::now());
+            self.steer_upload(&upload, &mut growth, taken, total_size, routes.len(), shown);
+            if next == total_chunks || !in_send_window(next, acked) {
+                sleep_ms(ACK_POLL_MS).await;
+                continue;
+            }
+            let Some(route) = wait_for_room(&routes, BACKPRESSURE_HIGH, turn).await else {
                 return false;
             };
-            let Ok(buffer) = JsFuture::from(blob.array_buffer()).await else {
+            turn = route + 1;
+            let Some(chunk_slice) = batch.chunk(file, next).await else {
                 return false;
             };
-            let batch_bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-            file_offset = batch_end;
-
-            for chunk_slice in batch_bytes.chunks(CHUNK_SIZE) {
-                let Some(link) = self.link(peer) else {
-                    return false;
-                };
-                if !link.wait_file_buffer_drain(BACKPRESSURE_HIGH).await {
-                    return false;
-                }
-                // Checked after the last await: a stopped run sends nothing more.
-                if !self.upload_running(&upload, id) {
-                    return false;
-                }
-
-                let Ok(packet) = encrypt_chunk(&self.inner.key, file_uuid.as_bytes(), chunk_index, total_chunks, chunk_slice) else {
-                    return false;
-                };
-                if !link.send_bytes(&packet) {
+            // Checked after the last await: a stopped run sends nothing more.
+            if !self.upload_running(&upload, id) {
+                return false;
+            }
+            let Ok(packet) = encrypt_chunk(&self.inner.key, file_uuid.as_bytes(), next, total_chunks, chunk_slice) else {
+                return false;
+            };
+            if routes[route].send(&packet) {
+                sent += packet.len() as u64;
+                carried.insert(routes[route].key(), js_sys::Date::now());
+            } else {
+                // A file link that just closed: the next round sends this chunk elsewhere.
+                // Losing the main link ends the upload (`on_file_peer_lost`).
+                if matches!(routes[route], ChunkRoute::Main(_)) {
                     return false;
                 }
+                continue;
+            }
+            next += 1;
 
-                chunk_index += 1;
-
-                let now = js_sys::Date::now();
-                let mut should_refresh = false;
-                {
-                    let mut active_transfers = self.inner.files.active_transfers.borrow_mut();
-                    if let Some(state) = active_transfers.get_mut(&upload) {
-                        state.sent_bytes += chunk_slice.len() as u64;
-                        let elapsed = (now - state.started) / 1000.0;
-                        if elapsed > 0.0 {
-                            state.speed_kb = (state.sent_bytes as f64 / 1024.0 / elapsed) as u64;
-                        }
-                        state.progress = ((chunk_index as f64 / total_chunks as f64) * 100.0).min(100.0) as u8;
-                        if now - state.last_ui_update >= 100.0 || chunk_index == total_chunks {
-                            state.last_ui_update = now;
-                            should_refresh = true;
-                        }
-                    }
-                }
-                if should_refresh {
-                    self.refresh_sharing_card(file_id);
-                }
-
-                #[cfg(feature = "e2e-hooks")]
-                {
-                    let delay = self.inner.files.chunk_delay_ms.get();
-                    if delay > 0 {
-                        sleep_ms(delay).await;
-                    }
+            #[cfg(feature = "e2e-hooks")]
+            {
+                let delay = self.inner.files.chunk_delay_ms.get();
+                if delay > 0 {
+                    sleep_ms(delay).await;
                 }
             }
         }
-        true
+    }
+
+    /// Grow or shrink the connections an upload uses, and refresh its line on our card.
+    /// `taken`: bytes the connections took from our send queues so far; `connections`: the
+    /// routes open for it; `shown`: those that carried chunks lately.
+    fn steer_upload(&self, upload: &Upload, growth: &mut LinkGrowth, taken: u64, total_size: f64, connections: usize, shown: u8) {
+        let now = js_sys::Date::now();
+        let total = total_size as u64;
+        let decision = growth.update(now, taken, connections, total.saturating_sub(taken));
+        if decision != Growth::Hold {
+            let rate = growth.rate().unwrap_or(0.0) / 1_048_576.0;
+            log::info!("Upload to {}: {decision:?} at {rate:.1} MB/s over {connections} connections", crate::names::pubkey_tag(&upload.1));
+        }
+        match decision {
+            Growth::AddLink => self.add_file_link(&upload.1),
+            Growth::DropLink => self.set_aside_file_link(&upload.1),
+            Growth::Hold => {}
+        }
+        let mut refresh = false;
+        if let Some(state) = self.inner.files.active_transfers.borrow_mut().get_mut(upload) {
+            state.meter.record(now, taken);
+            if now - state.speed_at >= SPEED_REFRESH_MS {
+                state.speed_at = now;
+                let average = taken as f64 / ((now - state.started) / 1000.0).max(0.001);
+                state.speed_kb = (state.meter.rate().unwrap_or(average) / 1024.0) as u64;
+            }
+            state.progress = (taken.min(total) as f64 / total.max(1) as f64 * 100.0) as u8;
+            state.connections = shown;
+            if now - state.last_ui_update >= 250.0 {
+                state.last_ui_update = now;
+                refresh = true;
+            }
+        }
+        if refresh {
+            self.refresh_sharing_card(&upload.0);
+        }
     }
 
     fn refresh_sharing_card(&self, file_id: &str) {
@@ -335,6 +448,7 @@ impl RoomSession {
                 peer: peer.clone(),
                 progress: state.progress,
                 speed_kb: state.speed_kb,
+                connections: state.connections,
             })
             .collect();
 
@@ -401,10 +515,18 @@ impl RoomSession {
                     started: js_sys::Date::now(),
                     last_ui_update: js_sys::Date::now(),
                     received: 0,
-                    next_index: 0,
+                    reorder: Reorder::default(),
+                    total: None,
+                    acks: AckPacer::default(),
+                    meter: RateMeter::new(SPEED_WINDOW_MS),
+                    speed_kb: 0,
+                    speed_at: js_sys::Date::now(),
+                    first_chunk_at: None,
+                    routes_seen: HashMap::new(),
+                    most_routes: 1,
                 },
             );
-            s.set_file_status(&file_id, FileTransferStatus::Downloading { progress: 0, speed_kb: 0 });
+            s.set_file_status(&file_id, FileTransferStatus::Downloading { progress: 0, speed_kb: 0, connections: 1 });
             let request = RoomBody::FileRequest { to: author.clone(), file_id: file_id.clone() };
             if !s.send_direct(&author, request) {
                 s.abort_download(&file_id, FileTransferStatus::Interrupted);
@@ -422,11 +544,6 @@ impl RoomSession {
         self.abort_download(file_id, FileTransferStatus::Cancelled);
     }
 
-    /// Hide the download buttons for an offer we don't want; nobody is told.
-    pub fn decline_file(&self, file_id: &str) {
-        self.set_file_status(file_id, FileTransferStatus::Declined);
-    }
-
     fn abort_download(&self, file_id: &str, status: FileTransferStatus) {
         if let Some(download) = self.inner.files.downloads.borrow_mut().remove(file_id) {
             if let Some(writable) = download.writable {
@@ -441,7 +558,10 @@ impl RoomSession {
         self.set_file_status(file_id, status);
     }
 
-    pub(super) fn on_file_chunk(&self, from: &str, packet: &[u8]) {
+    /// A packet on one of `from`'s file connections: a chunk of a file we download from
+    /// them, or their confirmation of chunks of a file we offered.
+    /// `route`: `None` for the main link, else `(dialed by us, number)` of a file link.
+    pub(super) fn on_file_chunk(&self, from: &str, route: Option<(bool, u32)>, packet: &[u8]) {
         let Ok((header, plaintext)) = decrypt_chunk(&self.inner.key, packet) else {
             log::warn!("Dropping undecryptable file chunk");
             return;
@@ -450,67 +570,108 @@ impl RoomSession {
             return;
         };
         let file_id = file_uuid.to_string();
+        // About a file we offered: `from` confirms what it received so far.
+        if self.inner.files.outgoing.borrow().contains_key(&file_id) {
+            if let Some(state) = self.inner.files.active_transfers.borrow_mut().get_mut(&(file_id, from.to_string())) {
+                state.acked = state.acked.max(header.chunk_index);
+            }
+            return;
+        }
         let mut downloads = self.inner.files.downloads.borrow_mut();
-        // Only the file's author may feed its download, in order.
+        // Only the file's author may feed its download, over their own connections.
         let Some(download) = downloads.get_mut(&file_id).filter(|d| d.author == from) else {
             return;
         };
-        if header.total_chunks == 0 {
+        let total = header.total_chunks;
+        if total == 0 || header.chunk_index >= total || download.total.is_some_and(|t| t != total) {
             drop(downloads);
             self.abort_download(&file_id, FileTransferStatus::Interrupted);
             return;
         }
-        // The channel is ordered, so anything else is left over from a run we cancelled
-        // before asking again (same file, same bytes per index): drop it.
-        if header.chunk_index != download.next_index {
-            return;
-        }
-        download.next_index += 1;
-        download.received += plaintext.len() as u64;
-        match &download.writable {
-            Some(writable) => {
-                let writable = writable.clone();
-                let bytes = js_sys::Uint8Array::from(&plaintext[..]);
-                let prev = download.write_promise.take();
-                let next = wasm_bindgen_futures::future_to_promise(async move {
-                    if let Some(p) = prev {
-                        let _ = JsFuture::from(p).await;
+        download.total = Some(total);
+        download.first_chunk_at.get_or_insert_with(js_sys::Date::now);
+        download.routes_seen.insert(route, js_sys::Date::now());
+        // Early chunks wait for the gap before them. Stale ones are dropped: duplicates, and
+        // leftovers from a run we cancelled before asking again (same file, same bytes per index).
+        let mut failed = false;
+        for chunk in download.reorder.accept(header.chunk_index, plaintext) {
+            download.received += chunk.len() as u64;
+            match &download.writable {
+                Some(writable) => {
+                    let writable = writable.clone();
+                    let bytes = js_sys::Uint8Array::from(&chunk[..]);
+                    let prev = download.write_promise.take();
+                    let next = wasm_bindgen_futures::future_to_promise(async move {
+                        if let Some(p) = prev {
+                            let _ = JsFuture::from(p).await;
+                        }
+                        let _ = call_stream_method(&writable, "write", Some(&bytes.into())).await;
+                        Ok(JsValue::UNDEFINED)
+                    });
+                    download.write_promise = Some(next);
+                }
+                None => {
+                    download.pending.push(js_sys::Uint8Array::from(&chunk[..]));
+                    download.pending_bytes += chunk.len();
+                    if download.pending_bytes >= FOLD_BYTES && download.fold().is_err() {
+                        failed = true;
+                        break;
                     }
-                    let _ = call_stream_method(&writable, "write", Some(&bytes.into())).await;
-                    Ok(JsValue::UNDEFINED)
-                });
-                download.write_promise = Some(next);
-            }
-            None => {
-                download.pending.push(js_sys::Uint8Array::from(&plaintext[..]));
-                download.pending_bytes += plaintext.len();
-                if download.pending_bytes >= FOLD_BYTES && download.fold().is_err() {
-                    drop(downloads);
-                    self.abort_download(&file_id, FileTransferStatus::Interrupted);
-                    return;
                 }
             }
         }
+        if failed {
+            drop(downloads);
+            self.abort_download(&file_id, FileTransferStatus::Interrupted);
+            return;
+        }
 
-        if header.chunk_index + 1 < header.total_chunks {
-            let now = js_sys::Date::now();
-            if now - download.last_ui_update >= 100.0 {
-                download.last_ui_update = now;
-                let elapsed = (now - download.started) / 1000.0;
-                let speed_kb = if elapsed > 0.0 { (download.received as f64 / 1024.0 / elapsed) as u64 } else { 0 };
-                let progress = ((header.chunk_index + 1) as f64 / header.total_chunks as f64 * 100.0) as u8;
-                drop(downloads);
-                self.set_file_status(&file_id, FileTransferStatus::Downloading { progress, speed_kb });
+        let next = download.reorder.next();
+        let done = next == total;
+        let now = js_sys::Date::now();
+        let ack = download.acks.due(now, next, done);
+        download.meter.record(now, download.received);
+        let progress = (!done && now - download.last_ui_update >= 100.0).then(|| {
+            download.last_ui_update = now;
+            if now - download.speed_at >= SPEED_REFRESH_MS {
+                download.speed_at = now;
+                let average = download.received as f64 / ((now - download.started) / 1000.0).max(0.001);
+                download.speed_kb = (download.meter.rate().unwrap_or(average) / 1024.0) as u64;
+            }
+            let connections = recently_used(&mut download.routes_seen, now);
+            download.most_routes = download.most_routes.max(connections as usize);
+            ((next as f64 / total as f64 * 100.0) as u8, download.speed_kb, connections)
+        });
+        drop(downloads);
+        if ack {
+            let packet = encrypt_chunk(&self.inner.key, file_uuid.as_bytes(), next, total, &[]);
+            if let (Ok(packet), Some(link)) = (packet, self.link(from)) {
+                link.send_bytes(&packet);
+            }
+        }
+        if !done {
+            if let Some((progress, speed_kb, connections)) = progress {
+                self.set_file_status(&file_id, FileTransferStatus::Downloading { progress, speed_kb, connections });
             }
             return;
         }
 
-        let Some(mut done) = downloads.remove(&file_id) else {
+        let Some(mut done) = self.inner.files.downloads.borrow_mut().remove(&file_id) else {
             return;
         };
-        drop(downloads);
+        let summary = DownloadSummary {
+            bytes: done.received,
+            millis: (now - done.first_chunk_at.unwrap_or(now)).max(0.0) as u64,
+        };
+        log::info!(
+            "Downloaded {} bytes in {:.1} s ({:.2} MB/s, up to {} connections)",
+            summary.bytes,
+            summary.millis as f64 / 1000.0,
+            summary.speed_kb() as f64 / 1024.0,
+            done.most_routes
+        );
         let Some(writable) = done.writable.take() else {
-            self.finish_in_memory(&file_id, done);
+            self.finish_in_memory(&file_id, done, summary);
             return;
         };
         let s = self.clone();
@@ -519,7 +680,7 @@ impl RoomSession {
                 let _ = JsFuture::from(p).await;
             }
             let _ = call_stream_method(&writable, "close", None).await;
-            s.set_file_status(&file_id, FileTransferStatus::Completed);
+            s.set_file_status(&file_id, FileTransferStatus::Completed { summary, withdrawn: false });
             s.toast("file_download_complete");
         });
     }
@@ -527,7 +688,7 @@ impl RoomSession {
     /// The whole file is in RAM. On iOS it waits for a tap on Save: the share sheet needs
     /// that tap, and a download started unasked opens the file in another app, which
     /// suspends dchat and drops it from the room. Elsewhere the browser saves it right away.
-    fn finish_in_memory(&self, file_id: &str, mut done: Download) {
+    fn finish_in_memory(&self, file_id: &str, mut done: Download, summary: DownloadSummary) {
         let Ok(blob) = done.fold() else {
             self.set_file_status(file_id, FileTransferStatus::Interrupted);
             return;
@@ -542,11 +703,11 @@ impl RoomSession {
             self.inner.signals.ready_files.update_value(|ready| {
                 ready.insert(file_id.to_string(), file);
             });
-            self.set_file_status(file_id, FileTransferStatus::ReadyToSave);
+            self.set_file_status(file_id, FileTransferStatus::ReadyToSave { summary, withdrawn: false });
             self.toast("toast_file_ready");
         } else {
             let _ = download_blob(&blob, &done.name);
-            self.set_file_status(file_id, FileTransferStatus::Completed);
+            self.set_file_status(file_id, FileTransferStatus::Completed { summary, withdrawn: false });
             self.toast("file_download_complete");
         }
     }
@@ -631,6 +792,7 @@ impl RoomSession {
 
     /// The direct link to `remote` is gone: its transfers in either direction stop.
     pub(super) fn on_file_peer_lost(&self, remote: &str) {
+        self.close_file_links(remote);
         let files = &self.inner.files;
         files.active_transfers.borrow_mut().retain(|(_, peer), _| peer != remote);
         let downloads: Vec<String> = files
@@ -682,10 +844,25 @@ impl RoomSession {
         self.inner.signals.messages.update(|msgs| {
             if let Some(msg) = msgs.iter_mut().find(|m| m.id == file_id) {
                 if let Some(file) = msg.file.as_mut() {
-                    // A finished transfer stays finished.
-                    let finished = matches!(file.status, FileTransferStatus::Completed | FileTransferStatus::ReadyToSave);
-                    if !finished || matches!(status, FileTransferStatus::Sharing { .. }) {
-                        file.status = status;
+                    use FileTransferStatus::*;
+                    let next = match (&file.status, status) {
+                        // A finished transfer stays finished: a withdrawal only means it
+                        // can't be downloaded again, and a new download starts over.
+                        (Completed { summary, .. }, Withdrawn) => Completed { summary: *summary, withdrawn: true },
+                        (ReadyToSave { summary, .. }, Withdrawn) => ReadyToSave { summary: *summary, withdrawn: true },
+                        (Completed { .. }, status @ Downloading { .. }) => status,
+                        (Completed { .. } | ReadyToSave { .. }, status @ Sharing { .. }) => status,
+                        (Completed { .. } | ReadyToSave { .. }, _) => return,
+                        (_, status) => status,
+                    };
+                    // New numbers for the same state don't rebuild the card (its buttons would
+                    // be replaced under the pointer several times a second); the card reads them.
+                    let same_state = matches!(
+                        (&file.status, &next),
+                        (Downloading { .. }, Downloading { .. }) | (Sharing { .. }, Sharing { .. })
+                    );
+                    file.status = next;
+                    if !same_state {
                         msg.rev += 1;
                     }
                 }

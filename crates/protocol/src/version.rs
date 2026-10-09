@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Never change how a plain room's relay topic is derived (`hash_room_topic`): members on
 /// different versions only notice each other (and show the reload banner) on a shared topic.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// What travels through the relays (encrypted with the room key): the sender's protocol
 /// version and its signal. Every version must keep `v` readable, whatever `payload` becomes.
@@ -53,6 +53,7 @@ pub fn decode_signal(json: &[u8], version: u32) -> DecodedSignal {
 mod tests {
     use super::*;
     use crate::crypto::{encrypt_chunk, EncryptedPayload, CHUNK_SIZE};
+    use crate::transfer;
     use crate::messages::*;
     use crate::nostr::hash_room_topic;
     use crate::input::{encode_events, seal_input, InputEvent, InputLane};
@@ -62,7 +63,7 @@ mod tests {
 
     /// The wire fingerprint recorded for the current version. When the test below fails,
     /// bump `PROTOCOL_VERSION` and record the new pair here.
-    const RECORDED: (u32, &str) = (4, "f7d7d32502cfb3a8c69465d407abb838821b2930ddb72199ef685e78d2ef2dc3");
+    const RECORDED: (u32, &str) = (5, "ab61e6101ae9fa708befe0e4d944c6755ab3e0cee5d5c6d34d2dddc0b1c986aa");
 
     fn sealed() -> EncryptedPayload {
         EncryptedPayload { nonce: "n".into(), ciphertext: "c".into() }
@@ -147,6 +148,12 @@ mod tests {
             RoomBody::FileRequest { to: "b".into(), file_id: "f".into() },
             RoomBody::FileCancel { to: Some("b".into()), file_id: "f".into() },
             RoomBody::FileQueued { to: "b".into(), file_id: "f".into(), position: 1 },
+            RoomBody::FileLinkSignal {
+                to: "b".into(),
+                link: 1,
+                from_dialer: true,
+                signal: SignalPayload::Offer { to: "b".into(), sdp: "v=0".into() },
+            },
             RoomBody::HistoryRequest { to: "b".into() },
             RoomBody::HistoryChunk { to: "b".into(), envelopes: vec![envelope] },
             RoomBody::Typing,
@@ -177,6 +184,7 @@ mod tests {
             RoomBody::FileRequest { .. } => "FileRequest",
             RoomBody::FileCancel { .. } => "FileCancel",
             RoomBody::FileQueued { .. } => "FileQueued",
+            RoomBody::FileLinkSignal { .. } => "FileLinkSignal",
             RoomBody::HistoryRequest { .. } => "HistoryRequest",
             RoomBody::HistoryChunk { .. } => "HistoryChunk",
             RoomBody::Typing => "Typing",
@@ -222,6 +230,14 @@ mod tests {
         // File chunks: the header layout (the rest is a random nonce and ciphertext).
         let packet = encrypt_chunk(&[7; 32], &[1; 16], 2, 3, b"data").unwrap();
         wire.push(format!("{:?} {} {}", &packet[..24], packet.len(), CHUNK_SIZE));
+        // Parallel transfers: limits and acknowledgement pace every member applies alike.
+        wire.push(format!(
+            "{} {} {} {}",
+            transfer::MAX_FILE_CONNECTIONS,
+            transfer::SEND_WINDOW_CHUNKS,
+            transfer::ACK_EVERY_CHUNKS,
+            transfer::ACK_EVERY_MS
+        ));
         hex::encode(Sha256::digest(wire.join("\n").as_bytes()))
     }
 

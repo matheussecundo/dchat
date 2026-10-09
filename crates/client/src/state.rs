@@ -223,6 +223,8 @@ pub struct PeerDownloadProgress {
     pub peer: String,
     pub progress: u8,
     pub speed_kb: u64,
+    /// Connections the upload uses (the main link included).
+    pub connections: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -237,12 +239,13 @@ pub enum FileTransferStatus {
     /// Someone else's offer we may download.
     Offered,
     Queued { position: usize },
-    Downloading { progress: u8, speed_kb: u64 },
+    /// `connections`: the main link plus the sender's open file links to us.
+    Downloading { progress: u8, speed_kb: u64, connections: u8 },
     /// Received in full and waiting in RAM for a tap on Save (iOS: the share sheet needs
     /// one, and handing the file over unasked would take the person out of dchat).
-    ReadyToSave,
-    Completed,
-    Declined,
+    /// `withdrawn`: the sender withdrew the offer since, so it can't be downloaded again.
+    ReadyToSave { summary: DownloadSummary, withdrawn: bool },
+    Completed { summary: DownloadSummary, withdrawn: bool },
     Cancelled,
     Withdrawn,
     SenderLeft,
@@ -256,6 +259,20 @@ pub enum FileTransferStatus {
         active_peers: Vec<PeerDownloadProgress>,
         queued_peers: Vec<PeerQueuedInfo>,
     },
+}
+
+/// How a finished download went: its size, and the time from its first chunk to its last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DownloadSummary {
+    pub bytes: u64,
+    pub millis: u64,
+}
+
+impl DownloadSummary {
+    /// Average speed in KB/s.
+    pub fn speed_kb(&self) -> u64 {
+        (self.bytes as f64 / 1024.0 / (self.millis.max(1) as f64 / 1000.0)) as u64
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
