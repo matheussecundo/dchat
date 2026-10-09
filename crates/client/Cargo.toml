@@ -79,6 +79,7 @@ features = [
   "ServiceWorker",
   "File",
   "FileList",
+  "FilePropertyBag",
   "Blob",
   "BlobPropertyBag",
   "FileReader",

@@ -23,6 +23,9 @@ use web_sys::{window, HtmlAnchorElement};
 const BACKPRESSURE_HIGH: u32 = 2 * 1024 * 1024;
 /// Batch size when reading file from disk into memory before chunking.
 const READ_BATCH_SIZE: usize = 2 * 1024 * 1024;
+/// Without a save picker, received chunks are merged into one Blob every this many bytes,
+/// so finishing a download never holds the file twice.
+const FOLD_BYTES: usize = 8 * 1024 * 1024;
 
 struct Offer {
     author: String,
@@ -35,8 +38,11 @@ struct Download {
     author: String,
     name: String,
     mime_type: String,
-    /// In-memory fallback when the File System Access API is unavailable.
-    chunks: Vec<js_sys::Uint8Array>,
+    /// In-memory fallback when the File System Access API is unavailable: the chunks
+    /// received since the last fold, and everything before them as one Blob.
+    pending: Vec<js_sys::Uint8Array>,
+    pending_bytes: usize,
+    folded: Option<web_sys::Blob>,
     /// `FileSystemWritableFileStream` when the user picked a save location.
     writable: Option<JsValue>,
     /// Sequential promise chain for disk writes.
@@ -45,6 +51,26 @@ struct Download {
     last_ui_update: f64,
     received: u64,
     next_index: u32,
+}
+
+impl Download {
+    /// Merge the pending chunks into the Blob held so far and return it. A Blob made from
+    /// another refers to its bytes instead of copying them: one copy of the file in RAM.
+    fn fold(&mut self) -> Result<web_sys::Blob, JsValue> {
+        let parts: js_sys::Array = self
+            .folded
+            .take()
+            .map(JsValue::from)
+            .into_iter()
+            .chain(self.pending.drain(..).map(JsValue::from))
+            .collect();
+        self.pending_bytes = 0;
+        let bag = web_sys::BlobPropertyBag::new();
+        bag.set_type(blob_type(&self.mime_type));
+        let blob = web_sys::Blob::new_with_blob_sequence_and_options(&parts, &bag)?;
+        self.folded = Some(blob.clone());
+        Ok(blob)
+    }
 }
 
 struct ActiveUpload {
@@ -367,7 +393,9 @@ impl RoomSession {
                     author: author.clone(),
                     name,
                     mime_type,
-                    chunks: Vec::new(),
+                    pending: Vec::new(),
+                    pending_bytes: 0,
+                    folded: None,
                     writable,
                     write_promise: None,
                     started: js_sys::Date::now(),
@@ -453,7 +481,15 @@ impl RoomSession {
                 });
                 download.write_promise = Some(next);
             }
-            None => download.chunks.push(js_sys::Uint8Array::from(&plaintext[..])),
+            None => {
+                download.pending.push(js_sys::Uint8Array::from(&plaintext[..]));
+                download.pending_bytes += plaintext.len();
+                if download.pending_bytes >= FOLD_BYTES && download.fold().is_err() {
+                    drop(downloads);
+                    self.abort_download(&file_id, FileTransferStatus::Interrupted);
+                    return;
+                }
+            }
         }
 
         if header.chunk_index + 1 < header.total_chunks {
@@ -469,26 +505,50 @@ impl RoomSession {
             return;
         }
 
-        let Some(done) = downloads.remove(&file_id) else {
+        let Some(mut done) = downloads.remove(&file_id) else {
             return;
         };
         drop(downloads);
+        let Some(writable) = done.writable.take() else {
+            self.finish_in_memory(&file_id, done);
+            return;
+        };
         let s = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
             if let Some(p) = done.write_promise {
                 let _ = JsFuture::from(p).await;
             }
-            match done.writable {
-                Some(writable) => {
-                    let _ = call_stream_method(&writable, "close", None).await;
-                }
-                None => {
-                    let _ = trigger_blob_download(&done.name, &done.mime_type, &done.chunks);
-                }
-            }
+            let _ = call_stream_method(&writable, "close", None).await;
             s.set_file_status(&file_id, FileTransferStatus::Completed);
             s.toast("file_download_complete");
         });
+    }
+
+    /// The whole file is in RAM. On iOS it waits for a tap on Save: the share sheet needs
+    /// that tap, and a download started unasked opens the file in another app, which
+    /// suspends dchat and drops it from the room. Elsewhere the browser saves it right away.
+    fn finish_in_memory(&self, file_id: &str, mut done: Download) {
+        let Ok(blob) = done.fold() else {
+            self.set_file_status(file_id, FileTransferStatus::Interrupted);
+            return;
+        };
+        if crate::pwa::is_ios() {
+            let bag = web_sys::FilePropertyBag::new();
+            bag.set_type(blob_type(&done.mime_type));
+            let Ok(file) = web_sys::File::new_with_blob_sequence_and_options(&js_sys::Array::of1(&blob), &done.name, &bag) else {
+                self.set_file_status(file_id, FileTransferStatus::Interrupted);
+                return;
+            };
+            self.inner.signals.ready_files.update_value(|ready| {
+                ready.insert(file_id.to_string(), file);
+            });
+            self.set_file_status(file_id, FileTransferStatus::ReadyToSave);
+            self.toast("toast_file_ready");
+        } else {
+            let _ = download_blob(&blob, &done.name);
+            self.set_file_status(file_id, FileTransferStatus::Completed);
+            self.toast("file_download_complete");
+        }
     }
 
     // ---- Messages ---------------------------------------------------------------------
@@ -623,7 +683,8 @@ impl RoomSession {
             if let Some(msg) = msgs.iter_mut().find(|m| m.id == file_id) {
                 if let Some(file) = msg.file.as_mut() {
                     // A finished transfer stays finished.
-                    if !matches!(file.status, FileTransferStatus::Completed) || matches!(status, FileTransferStatus::Sharing { .. }) {
+                    let finished = matches!(file.status, FileTransferStatus::Completed | FileTransferStatus::ReadyToSave);
+                    if !finished || matches!(status, FileTransferStatus::Sharing { .. }) {
                         file.status = status;
                         msg.rev += 1;
                     }
@@ -656,12 +717,66 @@ async fn call_stream_method(writable: &JsValue, method: &str, arg: Option<&JsVal
     Ok(())
 }
 
-fn trigger_blob_download(name: &str, mime_type: &str, chunks: &[js_sys::Uint8Array]) -> Result<(), JsValue> {
-    let parts: js_sys::Array = chunks.iter().collect();
-    let bag = web_sys::BlobPropertyBag::new();
-    bag.set_type(if mime_type.is_empty() { "application/octet-stream" } else { mime_type });
-    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &bag)?;
-    let url = web_sys::Url::create_object_url_with_blob(&blob)?;
+fn blob_type(mime_type: &str) -> &str {
+    if mime_type.is_empty() {
+        "application/octet-stream"
+    } else {
+        mime_type
+    }
+}
+
+/// What a tap on Save started.
+pub enum SaveStart {
+    /// The share sheet is open: the promise resolves once shared and rejects with
+    /// `AbortError` when the person closes the sheet.
+    Sharing(js_sys::Promise),
+    /// No share sheet for files here: the browser took it as a download.
+    Downloaded,
+    Failed,
+}
+
+/// Hand a finished file to the person: the share sheet (Save to Files, AirDrop, …) opens
+/// over dchat. Call it straight from the tap, which the share sheet requires.
+pub fn start_save(file: &web_sys::File) -> SaveStart {
+    let Some(win) = window() else {
+        return SaveStart::Failed;
+    };
+    let nav: JsValue = win.navigator().into();
+    let data = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&data, &"files".into(), &js_sys::Array::of1(file));
+    let method = |name: &str| js_sys::Reflect::get(&nav, &name.into()).ok().and_then(|f| f.dyn_into::<js_sys::Function>().ok());
+    let can_share = method("canShare").and_then(|f| f.call1(&nav, &data).ok()).and_then(|v| v.as_bool()) == Some(true);
+    if let Some(share) = method("share").filter(|_| can_share) {
+        if let Some(promise) = share.call1(&nav, &data).ok().and_then(|p| p.dyn_into::<js_sys::Promise>().ok()) {
+            return SaveStart::Sharing(promise);
+        }
+    }
+    match download_blob(file, &file.name()) {
+        Ok(()) => SaveStart::Downloaded,
+        Err(_) => SaveStart::Failed,
+    }
+}
+
+/// Whether the file was handed over. A closed share sheet is not: Save stays.
+pub async fn save_finished(start: SaveStart) -> bool {
+    match start {
+        SaveStart::Sharing(promise) => match JsFuture::from(promise).await {
+            Ok(_) => true,
+            Err(err) => {
+                let name = js_sys::Reflect::get(&err, &"name".into()).ok().and_then(|n| n.as_string()).unwrap_or_default();
+                if name != "AbortError" {
+                    log::warn!("Sharing the file failed: {name}");
+                }
+                false
+            }
+        },
+        SaveStart::Downloaded => true,
+        SaveStart::Failed => false,
+    }
+}
+
+fn download_blob(blob: &web_sys::Blob, name: &str) -> Result<(), JsValue> {
+    let url = web_sys::Url::create_object_url_with_blob(blob)?;
     let win = window().ok_or("No window")?;
     let doc = win.document().ok_or("No document")?;
     let a: HtmlAnchorElement = doc.create_element("a")?.dyn_into()?;

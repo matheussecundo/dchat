@@ -29,7 +29,7 @@ use agent::{AgentLink, AgentSignals, AgentStatus};
 use qr::generate_qr_svg;
 use remote_input::{InputCapture, InputSink, PadPoller};
 use std::rc::Rc;
-use session::{RoomSession, SessionSignals};
+use session::{save_finished, start_save, RoomSession, SessionSignals};
 use state::{
     admin_url, create_room, current_fragment, format_file_size, host_download_url, fragment_relay_choice, invite_url, read_credentials,
     selectable_devices, AudioSettings, DeviceChoice, DeviceEntry, RelayMode, CAMERA_KIND, MIC_KIND, SPEAKER_KIND,
@@ -189,6 +189,9 @@ fn App() -> impl IntoView {
     // File sharing
     let (staged_file, set_staged_file) = create_signal(Option::<web_sys::File>::None);
     let (large_file_warning, set_large_file_warning) = create_signal(Option::<(String, String)>::None);
+    // Finished downloads waiting for a tap on Save (iOS), by file id: RAM only, kept across
+    // rekeys, dropped once handed over or when this tab leaves the room.
+    let ready_files = store_value(HashMap::<String, web_sys::File>::new());
     let (show_audio_settings, set_show_audio_settings) = create_signal(false);
 
     let session_ref = store_value(None::<RoomSession>);
@@ -227,6 +230,7 @@ fn App() -> impl IntoView {
             no_turn: set_no_turn,
             control: set_control,
             devices: set_device_choice,
+            ready_files,
         };
         set_room_id_sig.set(room_id.clone());
         match RoomSession::start(room_id, key, my_name.get_value(), signals, migrated, host_ice.get_value()) {
@@ -294,6 +298,7 @@ fn App() -> impl IntoView {
     });
     create_effect(move |_| {
         if removed.get() {
+            ready_files.update_value(|ready| ready.clear());
             set_screen.set(Screen::Removed);
         }
     });
@@ -818,8 +823,32 @@ fn App() -> impl IntoView {
             _ => with_session(&|s| s.download_file(&file_id)),
         }
     };
+    // Straight from the tap: the share sheet needs it.
+    let save_file = move |file_id: String| {
+        let Some(file) = ready_files.with_value(|ready| ready.get(&file_id).cloned()) else {
+            return;
+        };
+        let started = start_save(&file);
+        wasm_bindgen_futures::spawn_local(async move {
+            if !save_finished(started).await {
+                return;
+            }
+            ready_files.update_value(|ready| {
+                ready.remove(&file_id);
+            });
+            set_messages.update(|msgs| {
+                if let Some(msg) = msgs.iter_mut().find(|m| m.id == file_id) {
+                    if let Some(file) = msg.file.as_mut() {
+                        file.status = FileTransferStatus::Completed;
+                        msg.rev += 1;
+                    }
+                }
+            });
+        });
+    };
     let file_action = move |action: FileAction, file_id: String| match action {
         FileAction::Download => download_file(file_id),
+        FileAction::Save => save_file(file_id),
         FileAction::Decline => with_session(&|s| s.decline_file(&file_id)),
         FileAction::Cancel => with_session(&|s| s.cancel_download(&file_id)),
         FileAction::Withdraw => with_session(&|s| s.withdraw_file(&file_id)),
@@ -2232,6 +2261,7 @@ fn App() -> impl IntoView {
 #[derive(Clone, Copy)]
 enum FileAction {
     Download,
+    Save,
     Decline,
     Cancel,
     Withdraw,
@@ -2371,6 +2401,13 @@ fn file_card(
             }
             .into_view()
         }
+        FileTransferStatus::ReadyToSave => view! {
+            <div class="file-status-row">
+                {status_line("file_ready_to_save", "completed")}
+                {button(FileAction::Save, "btn btn-sm btn-primary file-save-btn", "file_save")}
+            </div>
+        }
+        .into_view(),
         FileTransferStatus::Completed => status_line("file_download_complete", "completed"),
         FileTransferStatus::Declined => status_line("file_declined", "cancelled"),
         // The offer still stands: the download can be started again.

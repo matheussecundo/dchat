@@ -156,7 +156,7 @@ dchat/
 │           ├── mesh.rs         # PeerLink: one RTCPeerConnection per member (chat + file-transfer channels), perfect negotiation, batched ICE, tracks
 │           ├── names.rs        # Random session names, name sanitizing, pubkey tags
 │           ├── nostr_pool.rs   # Multi-relay pool, fan-out broadcast, deduplication, recipient filtering
-│           ├── pwa.rs          # Installed app glue: install offer, Apple hint, app badge, launchQueue links (all feature-detected)
+│           ├── pwa.rs          # Installed app glue: install offer, Apple hint, app badge, launchQueue links (all feature-detected), iOS detection (unit-tested)
 │           ├── qr.rs           # On-the-fly SVG QR code generation
 │           ├── remote_input.rs # Viewer capture over a shared screen: pointer (letterbox-aware, sent at once, 4 ms spacing), keys, wheel, heartbeat
 │           ├── stats.rs        # On-demand tile stats (getStats deltas, requestVideoFrameCallback); no addresses shown, nothing stored
@@ -165,7 +165,7 @@ dchat/
 │           │   ├── admin.rs    # Kick / rotate link: ECDH-sealed AdminRekey, migration to the new room
 │           │   ├── control.rs  # Remote control: requests and grants, input gate to dchat-host, sealed input as a viewer
 │           │   ├── extras.rs   # Typing, reactions, edit/delete, ECDH-sealed DMs, @mention detection
-│           │   ├── files.rs    # Room-wide file cards, per-requester pulls, upload queue, chunk I/O
+│           │   ├── files.rs    # Room-wide file cards, per-requester pulls, upload queue, chunk I/O, in-memory downloads folded into one Blob, iOS Save (share sheet)
 │           │   ├── history.rs  # Opt-in history (&hist=1): signed shareable messages for late joiners
 │           │   ├── quality.rs  # Video presets applied: capture, complete setParameters per sender, codec choice, camera re-sync via jitterBufferTarget
 │           │   └── lounge.rs   # Voice lounge: seats, per-link senders, voice/video caps, speaking, controls
@@ -193,6 +193,7 @@ dchat/
 │       ├── screen_share.spec.js# Screen share, switch to camera on the same sender, stop
 │       ├── video_quality.spec.js # Presets: sender parameters per link, live switch, caps, stale state cleared, own msid + camera re-sync, lifetime across rekey, stats panel, glass-to-glass latency
 │       ├── file_sharing.spec.js# Room-wide file cards: parallel pulls, decline/withdraw, upload queue, unreachable sender, sender leaving
+│       ├── ios_save.spec.js    # iPhone user agent + stubbed share sheet: no download unasked, 💾 Save shares exact bytes, closed sheet keeps Save, download fallback, survives a rotated link, 20 MB byte-exact
 │       ├── audio_settings.spec.js # Mic processing checkboxes, live track swap in voice, carry-over, reload reset
 │       ├── devices.spec.js     # Mic/speaker/camera pickers (two fake cameras): live mic swap keeping the mute, camera switch keeping the preset, 🔄 to the next camera, setSinkId, missing device fallback, RAM only
 │       ├── pwa.spec.js         # Manifest/icons cached, Join with a link (any site, bare fragment, key never requested), launchQueue (lobby joins, live room asks), install offer, Apple hint, app badge
@@ -243,7 +244,8 @@ dchat/
 - **Phase 4: Peer-to-Peer Encrypted File Sharing (Completed)**
   - Dedicated binary `RTCDataChannel` (`"file-transfer"`) with 64 KB chunking and backpressure control.
   - Per-chunk ChaCha20-Poly1305 AEAD authenticated encryption with header authentication (AAD).
-  - Direct disk streaming via File System Access API (`showSaveFilePicker`) with fallback to in-memory Blob download.
+  - Direct disk streaming via File System Access API (`showSaveFilePicker`) with fallback to in-memory Blob download. The fallback merges chunks into one Blob every 8 MB (`FOLD_BYTES`), so finishing never holds the file twice.
+  - iOS (every iPhone/iPad browser, `pwa::is_ios`): a finished in-memory download is never handed over unasked (iOS would open it in another app and suspend dchat). It waits as `ReadyToSave` in the app-level `ready_files` map (kept across rekeys, cleared on the removed screen) until the person taps 💾 Save, which opens the share sheet (`navigator.share({ files })`, `<a download>` where files can't be shared). A closed sheet keeps the button; a successful share frees the bytes.
   - Staging attachment chip, interactive file cards in chat, progress bars, real-time speed calculation, and decline/cancel controls.
   - Strict zero-persistence invariant: transfers abort and memory vanishes on peer disconnect or reload.
 
@@ -369,6 +371,7 @@ When writing or reviewing code, check off every item:
 - [ ] `LinkSignal` is applied only from the link's own remote (direct-only), and only for offers, answers and ICE addressed to us.
 - [ ] Direct-only room messages (`RoomBody::recipient()` is `Some`) are applied only when `to` is us and the envelope came straight from its author; they are never relayed.
 - [ ] File chunks are accepted only from the offer's author over that author's own link, strictly in order; anything else aborts or is dropped.
+- [ ] On iOS a finished download leaves dchat only through the person's 💾 Save tap (share sheet); its bytes stay in RAM (`ready_files`) and are dropped once shared or when the tab leaves the room.
 - [ ] `AdminRekey` is honored only from a member whose Hello carried a valid admin proof; grants are sealed per recipient (never the room key in clear).
 - [ ] Remote control: nothing is granted without the sharer's click; input is accepted only from current holders, over their own direct link, sealed with the input AAD; dchat-host stays loopback-only with Host/Origin checks and mutual pairing, releases held input on every exit path, and logs no input.
 - [ ] DM plaintext is only ever sealed with `seal_json` to the recipient's session key; DMs carry no recipient field; the recipient never relays a DM; no DM text in logs.

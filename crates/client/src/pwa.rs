@@ -84,13 +84,25 @@ pub fn apple_install_hint() -> bool {
     !is_installed() && !install_available() && apple_webkit(&nav.user_agent().unwrap_or_default(), nav.max_touch_points())
 }
 
+/// Whether this is an iPhone or iPad, in any browser (all of them are WebKit there).
+pub fn is_ios() -> bool {
+    window().is_some_and(|w| {
+        let nav = w.navigator();
+        ios_device(&nav.user_agent().unwrap_or_default(), nav.max_touch_points())
+    })
+}
+
+/// An iPhone or iPad. iPadOS says it is a Mac: only touch tells it apart.
+fn ios_device(user_agent: &str, touch_points: i32) -> bool {
+    ["iPhone", "iPad", "iPod"].iter().any(|d| user_agent.contains(d)) || (user_agent.contains("Macintosh") && touch_points > 1)
+}
+
 /// An iPhone or iPad (every browser there is WebKit and installs from Share → Add to Home
-/// Screen; iPadOS says it is a Mac with touch), or Safari on a Mac (File → Add to Dock).
+/// Screen), or Safari on a Mac (File → Add to Dock).
 fn apple_webkit(user_agent: &str, touch_points: i32) -> bool {
     let mac = user_agent.contains("Macintosh");
-    let ios = ["iPhone", "iPad", "iPod"].iter().any(|d| user_agent.contains(d)) || (mac && touch_points > 1);
     let other_engine = ["Chrome/", "Chromium/", "Edg/", "OPR/", "Firefox/"].iter().any(|b| user_agent.contains(b));
-    ios || (mac && user_agent.contains("Safari/") && !other_engine)
+    ios_device(user_agent, touch_points) || (mac && user_agent.contains("Safari/") && !other_engine)
 }
 
 /// Show `count` on the installed app's icon, or no badge at 0. Ignored where unsupported or
@@ -130,16 +142,32 @@ pub fn on_launch(on_link: impl Fn(String) + 'static) {
 
 #[cfg(test)]
 mod tests {
-    use super::apple_webkit;
+    use super::{apple_webkit, ios_device};
+
+    const IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
+    const IPHONE_CHROME: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/130.0 Mobile/15E148 Safari/604.1";
+    const MAC_SAFARI: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
+    const MAC_CHROME: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+    const MAC_FIREFOX: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:131.0) Gecko/20100101 Firefox/131.0";
+    const ANDROID: &str = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36";
+
+    #[test]
+    fn ios_is_iphone_or_ipad_in_any_browser() {
+        assert!(ios_device(IPHONE, 5));
+        assert!(ios_device(IPHONE_CHROME, 5));
+        // iPadOS reports a Mac (Safari or Chrome); only touch tells it apart.
+        assert!(ios_device(MAC_SAFARI, 5));
+        assert!(ios_device(MAC_CHROME, 5));
+        assert!(!ios_device(MAC_SAFARI, 0));
+        assert!(!ios_device(MAC_CHROME, 0));
+        assert!(!ios_device(MAC_FIREFOX, 0));
+        assert!(!ios_device(ANDROID, 5));
+    }
 
     #[test]
     fn apple_hint_only_where_there_is_no_install_offer() {
-        let iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
-        let iphone_chrome = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/130.0 Mobile/15E148 Safari/604.1";
-        let mac_safari = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
-        let mac_chrome = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
-        let mac_firefox = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:131.0) Gecko/20100101 Firefox/131.0";
-        let android = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36";
+        let (iphone, iphone_chrome, mac_safari, mac_chrome, mac_firefox, android) =
+            (IPHONE, IPHONE_CHROME, MAC_SAFARI, MAC_CHROME, MAC_FIREFOX, ANDROID);
         assert!(apple_webkit(iphone, 5));
         assert!(apple_webkit(iphone_chrome, 5));
         assert!(apple_webkit(mac_safari, 0));
