@@ -206,6 +206,11 @@ pub enum RoomBody {
     FileCancel { to: Option<String>, file_id: String },
     /// The author tells a requester its 1-based place in the upload queue.
     FileQueued { to: String, file_id: String, position: usize },
+    /// Offer, answer or ICE for extra file link `link` between the author and `to` (a second
+    /// `RTCPeerConnection` that only carries file chunks), sent over their open main link.
+    /// `from_dialer`: the author opened that link (otherwise `to` did); each side numbers
+    /// the links it opens.
+    FileLinkSignal { to: String, link: u32, from_dialer: bool, signal: SignalPayload },
     /// A late joiner asks a neighbor for the shareable recent messages it holds.
     HistoryRequest { to: String },
     /// Signed originals of recent shareable chat messages, oldest first.
@@ -249,6 +254,7 @@ impl RoomBody {
         match self {
             RoomBody::FileRequest { to, .. }
             | RoomBody::FileQueued { to, .. }
+            | RoomBody::FileLinkSignal { to, .. }
             | RoomBody::HistoryRequest { to }
             | RoomBody::HistoryChunk { to, .. }
             | RoomBody::LinkSignal { to, .. }

@@ -49,7 +49,7 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
    - Binary WebRTC data channel with 64 KB chunking and backpressure throttling.
    - Streaming disk write via File System Access API with automatic Blob download fallback; on iPhone and iPad, a 💾 Save tap opens the share sheet instead.
    - Per-chunk ChaCha20-Poly1305 authenticated encryption with AEAD header authentication.
-   - Interactive file cards in chat with real-time transfer progress, speed metrics, and cancel/decline controls.
+   - Interactive file cards in chat with real-time transfer progress, speed metrics, and cancel controls.
    - Completely ephemeral: files are never stored on any server or persistent browser storage; downloads cease if sender disconnects.
 
 5. **Phase 5: UI Localization & Multi-Language Support (Completed)**
@@ -80,7 +80,7 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 8. **Phase 8: Discord-like Group Rooms over a Serverless Mesh (Completed)**
    - **8a Mesh core (Completed)**: one `RTCPeerConnection` per member pair with perfect negotiation; recipient-addressed signaling; session nicknames shown with a short key tag; live member list; room messages signed by their author and gossip-relayed to members without a direct link; per-room member cap with deterministic "latest joiner loses" and an admin seat; admin link vs invite link; optional TURN server in the URL.
    - **8b Voice lounge (Completed)**: Discord-style drop-in voice/video lounge replacing the 1:1 ring flow; per-person mic, speaker, camera (with front/rear flip) and screen-share toggles; video grid with fullscreen; speaking indicator; "X joined voice" prompt; per-room voice and video limits; audio processing settings carry over.
-   - **8c Group file sharing (Completed)**: room-wide file cards; each member pulls the file straight from the sender over their own direct link; the sender uploads to at most 2 members at once and queues the rest; decline, cancel and withdraw; transfers stop if the sender leaves.
+   - **8c Group file sharing (Completed)**: room-wide file cards; each member pulls the file straight from the sender over their own direct link; the sender uploads to at most 2 members at once and queues the rest; cancel and withdraw; transfers stop if the sender leaves.
    - **8d Moderation & history (Completed)**: admins can kick a member or move everyone to a new link (the room ID and key change, sealed to each remaining member); opt-in history so late joiners see the last 200 messages.
    - **8e Chat extras (Completed)**: typing indicator, emoji reactions, editing and deleting your own messages, private DMs sealed end-to-end between two members, and @mentions with a highlight, a title badge and a chime.
 
@@ -92,6 +92,9 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 
 11. **Phase 11: Installable App (Completed)**
    - Install dchat as an app (PWA) on desktop, Android, iPhone and iPad: its own window and icon, room links that open in the app, **Join with a link** in the lobby, and @mentions counted on the app icon. Still nothing stored; remote control still uses `dchat-host`.
+
+12. **Phase 12: Parallel File Connections (Experiment)**
+   - Uploads add extra WebRTC connections to the downloader while each one raises the speed, up to a cap set in ⚙️ Settings, for internet links where one connection can't fill the line.
 
 ---
 
@@ -151,8 +154,10 @@ Each room has one drop-in voice lounge. Nobody is rung:
 Tap **📎**, pick a file, optionally add a caption and send. Everyone in the room sees the card:
 - Each member who taps **⬇️ Download** pulls the file **directly from the sender** over their own WebRTC link. Every 64 KB chunk is sealed with ChaCha20-Poly1305 using the room key. Files are never relayed through other members or any server.
 - The sender uploads to at most **2 members at a time**; others see *⏳ Queued (#n)* until a slot frees up. The sender's card shows how many are sending, waiting and done.
-- **Decline** just hides the buttons for you. The sender can **Withdraw** the offer for everyone, which also stops transfers in progress.
+- **Parallel connections (experimental).** Over the internet, one WebRTC connection usually fills only a few MB/s of a much faster line: it slows down sharply with round-trip time and packet loss. Large uploads therefore start on the normal link and add extra connections to the downloader, one at a time, while each one still raises the speed, up to the cap in **⚙️ Settings → Files** (1 turns this off; the default allows 8). The cap works from either computer and applies at once, even mid-transfer. Both cards show the live speed and how many connections carry it, and the browser console logs each step (`Upload to …: AddLink at 5.1 MB/s over 1 connections`). The extra connections carry file chunks only, use the room's STUN/TURN settings, and close 15 s after the last upload to that member.
+- The sender can **Withdraw** the offer for everyone, which also stops transfers in progress.
 - Downloads stream to disk when the browser supports the File System Access API; otherwise they are assembled in memory (with a warning above 250 MB).
+- A finished download shows its size, how long it took (from the first byte) and its average speed, and offers **⬇️ Download again** while the sender still offers the file. During a transfer, the speed shown is averaged over the last 5 s.
 - On iPhone and iPad a finished download waits on the card: tap **💾 Save** to open the share sheet (Save to Files, AirDrop, …) over dchat. Closing the sheet keeps the button. dchat never hands the file over unasked, because iOS would open it in another app and suspend dchat, which drops you from the room.
 - If you have no direct link to the sender (`via` in the member list), the card says *Sender not directly reachable*. If the sender leaves, pending offers are marked unavailable and running transfers stop.
 

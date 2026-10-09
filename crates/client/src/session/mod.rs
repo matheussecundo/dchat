@@ -5,6 +5,7 @@
 mod admin;
 mod control;
 mod extras;
+mod file_links;
 mod files;
 mod history;
 mod lounge;
@@ -20,6 +21,7 @@ use crate::state::{
     DmUi, LinkUi, LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RekeyTarget,
 };
 use control::Control;
+use file_links::FileLinks;
 use files::Files;
 use lounge::{Lounge, VoiceInfo};
 use leptos::*;
@@ -130,6 +132,7 @@ struct Inner {
     closed: Cell<bool>,
     lounge: Lounge,
     files: Files,
+    file_links: FileLinks,
     /// Shareable recent messages for late joiners (only kept when the room has `hist=1`).
     history: RefCell<HistoryBuffer>,
     history_requests: Cell<usize>,
@@ -206,6 +209,7 @@ impl RoomSession {
                 closed: Cell::new(false),
                 lounge: Lounge::default(),
                 files: Files::default(),
+                file_links: FileLinks::default(),
                 history: RefCell::new(HistoryBuffer::new(HISTORY_LIMIT)),
                 history_requests: Cell::new(0),
                 history_noted: Cell::new(false),
@@ -288,6 +292,7 @@ impl RoomSession {
         }
         self.publish(RoomBody::Leave);
         self.inner.closed.set(true);
+        self.close_all_file_links();
         for (_, link) in self.inner.links.borrow_mut().drain() {
             link.close();
         }
@@ -445,7 +450,7 @@ impl RoomSession {
             LinkEvent::Track(track, _stream, receiver) => self.on_remote_track(remote, track, receiver),
             // The codecs this link negotiated are known now: pick ours among them.
             LinkEvent::Negotiated => self.apply_video_params(remote),
-            LinkEvent::Chunk(packet) => self.on_file_chunk(remote, &packet),
+            LinkEvent::Chunk(packet) => self.on_file_chunk(remote, None, &packet),
             LinkEvent::Input { lane, packet } => self.on_input_packet(remote, lane, &packet),
         }
     }
@@ -651,6 +656,9 @@ impl RoomSession {
             RoomBody::AdminRekey { kicked, grants } => self.on_admin_rekey(author, kicked.as_deref(), grants),
             RoomBody::FileRequest { .. } | RoomBody::FileQueued { .. } | RoomBody::FileCancel { .. } => {
                 self.on_file_message(author, &envelope.body);
+            }
+            RoomBody::FileLinkSignal { link, from_dialer, signal, .. } => {
+                self.on_file_link_signal(author, *link, *from_dialer, signal);
             }
             RoomBody::LinkSignal { signal, .. } => {
                 // Only offers, answers and ICE addressed to us (presence and departures have
@@ -966,6 +974,7 @@ impl RoomSession {
         }) as Box<dyn Fn(i32)>);
         let _ = js_sys::Reflect::set(&hooks, &"throttleUploads".into(), throttle.as_ref());
         throttle.forget();
+        self.install_file_link_hooks(&hooks);
 
         // Send remote-control input (JSON `InputEvent`s) to a sharer, bypassing our own rights.
         let s = self.clone();

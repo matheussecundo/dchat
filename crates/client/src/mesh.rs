@@ -2,6 +2,7 @@
 //! so either side can (re)negotiate at any time without signaling glare.
 
 use protocol::{IceCandidateData, InputLane, SignalPayload, INPUT_EVENTS_LABEL, INPUT_STATE_LABEL};
+use futures::channel::oneshot;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
@@ -52,6 +53,8 @@ pub type LinkEventHandler = Rc<dyn Fn(&str, u64, LinkEvent)>;
 /// once it is open, otherwise through the Nostr relays.
 pub type SignalOut = Rc<dyn Fn(&str, SignalPayload)>;
 
+type DrainNotify = Rc<RefCell<Vec<oneshot::Sender<()>>>>;
+
 pub struct PeerLink {
     pub remote: String,
     pub id: u64,
@@ -64,7 +67,7 @@ pub struct PeerLink {
     chat: Rc<RefCell<Option<RtcDataChannel>>>,
     /// Binary channel for encrypted file chunks, separate so transfers never delay chat.
     files: Rc<RefCell<Option<RtcDataChannel>>>,
-    file_drain_notify: Rc<RefCell<Vec<futures::channel::oneshot::Sender<()>>>>,
+    file_drain_notify: DrainNotify,
     /// Remote-control input: keys and clicks (reliable) and pointer/controller states
     /// (unordered, never retransmitted), so neither waits behind chat or files.
     input_events: Rc<RefCell<Option<RtcDataChannel>>>,
@@ -117,9 +120,13 @@ impl PeerLink {
         });
 
         let notify_closed = link.closed_notifier(on_event.clone());
-        link.install_ice_batching();
+        {
+            let signal_out = link.signal_out.clone();
+            let remote = link.remote.clone();
+            batch_ice(&link.pc, Rc::new(move |candidates| signal_out(&remote, SignalPayload::IceBatch { to: remote.clone(), candidates })));
+        }
         link.install_negotiation();
-        link.install_state_watch(notify_closed.clone());
+        watch_state(&link.pc, notify_closed.clone());
         link.install_track_handler(on_event.clone());
 
         if initiator {
@@ -203,6 +210,9 @@ impl PeerLink {
 
     /// Bytes queued on the file channel (for backpressure); `None` when it is not open.
     pub fn file_buffered_amount(&self) -> Option<u32> {
+        if self.closed.get() {
+            return None;
+        }
         self.files
             .borrow()
             .as_ref()
@@ -210,26 +220,11 @@ impl PeerLink {
             .map(|dc| dc.buffered_amount())
     }
 
-    /// Wait until the file channel has less than `high_water` bytes queued.
-    /// Returns `false` if the channel is closed or lost.
-    pub async fn wait_file_buffer_drain(&self, high_water: u32) -> bool {
-        use futures::FutureExt;
-        loop {
-            if self.closed.get() {
-                return false;
-            }
-            match self.file_buffered_amount() {
-                None => return false,
-                Some(buffered) if buffered < high_water => return true,
-                Some(_) => {}
-            }
-            let (tx, rx) = futures::channel::oneshot::channel();
-            self.file_drain_notify.borrow_mut().push(tx);
-            futures::select! {
-                _ = rx.fuse() => {},
-                _ = crate::media::sleep_ms(100).fuse() => {},
-            }
-        }
+    /// Resolves when the file channel's queue drops below `FILE_BUFFER_LOW_THRESHOLD`.
+    fn file_drained(&self) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        self.file_drain_notify.borrow_mut().push(tx);
+        rx
     }
 
     /// Send a sealed remote-control packet. State packets are dropped instead of queued
@@ -348,15 +343,7 @@ impl PeerLink {
     }
 
     async fn add_candidate(&self, c: IceCandidateData) {
-        let init = RtcIceCandidateInit::new(&c.candidate);
-        init.set_sdp_mid(c.sdp_mid.as_deref());
-        init.set_sdp_m_line_index(c.sdp_m_line_index);
-        let Ok(candidate) = RtcIceCandidate::new(&init) else {
-            return;
-        };
-        let result =
-            JsFuture::from(self.pc.add_ice_candidate_with_opt_rtc_ice_candidate(Some(&candidate))).await;
-        if result.is_err() && !self.ignore_offer.get() {
+        if !add_ice_candidate(&self.pc, c).await && !self.ignore_offer.get() {
             log::warn!("Failed to add ICE candidate from {}", self.remote);
         }
     }
@@ -384,35 +371,6 @@ impl PeerLink {
         }) as Box<dyn FnMut(RtcTrackEvent)>);
         self.pc.set_ontrack(Some(on_track.as_ref().unchecked_ref()));
         on_track.forget();
-    }
-
-    fn install_state_watch(&self, notify_closed: Rc<dyn Fn()>) {
-        let pc = self.pc.clone();
-        let on_state = Closure::wrap(Box::new(move || match pc.connection_state() {
-            RtcPeerConnectionState::Failed | RtcPeerConnectionState::Closed => notify_closed(),
-            RtcPeerConnectionState::Disconnected => {
-                let pc = pc.clone();
-                let notify_closed = notify_closed.clone();
-                let check = Closure::once(move || {
-                    if matches!(
-                        pc.connection_state(),
-                        RtcPeerConnectionState::Disconnected | RtcPeerConnectionState::Failed
-                    ) {
-                        notify_closed();
-                    }
-                });
-                if let Some(w) = window() {
-                    let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(
-                        check.as_ref().unchecked_ref(),
-                        DISCONNECT_GRACE_MS,
-                    );
-                }
-                check.forget();
-            }
-            _ => {}
-        }) as Box<dyn FnMut()>);
-        self.pc.set_onconnectionstatechange(Some(on_state.as_ref().unchecked_ref()));
-        on_state.forget();
     }
 
     fn install_negotiation(&self) {
@@ -450,63 +408,6 @@ impl PeerLink {
         }) as Box<dyn FnMut()>);
         self.pc.set_onnegotiationneeded(Some(on_needed.as_ref().unchecked_ref()));
         on_needed.forget();
-    }
-
-    /// Batch local ICE candidates (100 ms or 10 candidates) to stay under relay rate limits.
-    fn install_ice_batching(&self) {
-        let signal_out = self.signal_out.clone();
-        let remote = self.remote.clone();
-        let batch = Rc::new(RefCell::new(Vec::<IceCandidateData>::new()));
-        let timer = Rc::new(Cell::new(None::<i32>));
-
-        let flush: Rc<dyn Fn()> = {
-            let batch = batch.clone();
-            Rc::new(move || {
-                let candidates = std::mem::take(&mut *batch.borrow_mut());
-                if !candidates.is_empty() {
-                    signal_out(
-                        &remote,
-                        SignalPayload::IceBatch {
-                            to: remote.clone(),
-                            candidates,
-                        },
-                    );
-                }
-            })
-        };
-
-        let on_ice = Closure::wrap(Box::new(move |ev: RtcPeerConnectionIceEvent| {
-            let Some(candidate) = ev.candidate() else {
-                // Gathering complete.
-                flush();
-                return;
-            };
-            batch.borrow_mut().push(IceCandidateData {
-                candidate: candidate.candidate(),
-                sdp_mid: candidate.sdp_mid(),
-                sdp_m_line_index: candidate.sdp_m_line_index(),
-            });
-            if let (Some(handle), Some(w)) = (timer.take(), window()) {
-                w.clear_timeout_with_handle(handle);
-            }
-            if batch.borrow().len() >= ICE_BATCH_MAX {
-                flush();
-                return;
-            }
-            let flush = flush.clone();
-            let cb = Closure::once(move || flush());
-            if let Some(w) = window() {
-                if let Ok(handle) = w.set_timeout_with_callback_and_timeout_and_arguments_0(
-                    cb.as_ref().unchecked_ref(),
-                    ICE_BATCH_DELAY_MS,
-                ) {
-                    timer.set(Some(handle));
-                }
-            }
-            cb.forget();
-        }) as Box<dyn FnMut(RtcPeerConnectionIceEvent)>);
-        self.pc.set_onicecandidate(Some(on_ice.as_ref().unchecked_ref()));
-        on_ice.forget();
     }
 }
 
@@ -548,7 +449,7 @@ fn attach_file_callbacks(
     remote: &str,
     id: u64,
     on_event: LinkEventHandler,
-    drain_notify: Rc<RefCell<Vec<futures::channel::oneshot::Sender<()>>>>,
+    drain_notify: DrainNotify,
 ) {
     dc.set_binary_type(RtcDataChannelType::Arraybuffer);
     let remote = remote.to_string();
@@ -560,6 +461,11 @@ fn attach_file_callbacks(
     dc.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
     on_message.forget();
 
+    notify_on_drain(dc, drain_notify);
+}
+
+/// Wake everyone waiting in `drain_notify` whenever `dc`'s queue drops below its threshold.
+fn notify_on_drain(dc: &RtcDataChannel, drain_notify: DrainNotify) {
     let on_low = Closure::wrap(Box::new(move || {
         for tx in drain_notify.borrow_mut().drain(..) {
             let _ = tx.send(());
@@ -588,4 +494,355 @@ async fn set_local_description_implicit(pc: &RtcPeerConnection) -> Result<(), Js
     let promise: js_sys::Promise = method.call0(pc)?.dyn_into()?;
     JsFuture::from(promise).await?;
     Ok(())
+}
+
+/// Batch local ICE candidates (100 ms or 10 candidates) to stay under relay rate limits;
+/// `out` sends each batch.
+fn batch_ice(pc: &RtcPeerConnection, out: Rc<dyn Fn(Vec<IceCandidateData>)>) {
+    let batch = Rc::new(RefCell::new(Vec::<IceCandidateData>::new()));
+    let timer = Rc::new(Cell::new(None::<i32>));
+
+    let flush: Rc<dyn Fn()> = {
+        let batch = batch.clone();
+        Rc::new(move || {
+            let candidates = std::mem::take(&mut *batch.borrow_mut());
+            if !candidates.is_empty() {
+                out(candidates);
+            }
+        })
+    };
+
+    let on_ice = Closure::wrap(Box::new(move |ev: RtcPeerConnectionIceEvent| {
+        let Some(candidate) = ev.candidate() else {
+            // Gathering complete.
+            flush();
+            return;
+        };
+        batch.borrow_mut().push(IceCandidateData {
+            candidate: candidate.candidate(),
+            sdp_mid: candidate.sdp_mid(),
+            sdp_m_line_index: candidate.sdp_m_line_index(),
+        });
+        if let (Some(handle), Some(w)) = (timer.take(), window()) {
+            w.clear_timeout_with_handle(handle);
+        }
+        if batch.borrow().len() >= ICE_BATCH_MAX {
+            flush();
+            return;
+        }
+        let flush = flush.clone();
+        let cb = Closure::once(move || flush());
+        if let Some(w) = window() {
+            if let Ok(handle) = w.set_timeout_with_callback_and_timeout_and_arguments_0(
+                cb.as_ref().unchecked_ref(),
+                ICE_BATCH_DELAY_MS,
+            ) {
+                timer.set(Some(handle));
+            }
+        }
+        cb.forget();
+    }) as Box<dyn FnMut(RtcPeerConnectionIceEvent)>);
+    pc.set_onicecandidate(Some(on_ice.as_ref().unchecked_ref()));
+    on_ice.forget();
+}
+
+/// Call `notify_closed` when the connection fails or closes, or stays "disconnected" for
+/// `DISCONNECT_GRACE_MS`.
+fn watch_state(pc: &RtcPeerConnection, notify_closed: Rc<dyn Fn()>) {
+    let pc_c = pc.clone();
+    let on_state = Closure::wrap(Box::new(move || match pc_c.connection_state() {
+        RtcPeerConnectionState::Failed | RtcPeerConnectionState::Closed => notify_closed(),
+        RtcPeerConnectionState::Disconnected => {
+            let pc = pc_c.clone();
+            let notify_closed = notify_closed.clone();
+            let check = Closure::once(move || {
+                if matches!(
+                    pc.connection_state(),
+                    RtcPeerConnectionState::Disconnected | RtcPeerConnectionState::Failed
+                ) {
+                    notify_closed();
+                }
+            });
+            if let Some(w) = window() {
+                let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(
+                    check.as_ref().unchecked_ref(),
+                    DISCONNECT_GRACE_MS,
+                );
+            }
+            check.forget();
+        }
+        _ => {}
+    }) as Box<dyn FnMut()>);
+    pc.set_onconnectionstatechange(Some(on_state.as_ref().unchecked_ref()));
+    on_state.forget();
+}
+
+/// Returns whether the browser took the candidate.
+async fn add_ice_candidate(pc: &RtcPeerConnection, c: IceCandidateData) -> bool {
+    let init = RtcIceCandidateInit::new(&c.candidate);
+    init.set_sdp_mid(c.sdp_mid.as_deref());
+    init.set_sdp_m_line_index(c.sdp_m_line_index);
+    let Ok(candidate) = RtcIceCandidate::new(&init) else {
+        return false;
+    };
+    JsFuture::from(pc.add_ice_candidate_with_opt_rtc_ice_candidate(Some(&candidate))).await.is_ok()
+}
+
+// ---- Extra file links --------------------------------------------------------------------
+
+pub enum FileLinkEvent {
+    Open,
+    /// Failed or closed by the other side; chunks still queued on it are lost.
+    Closed,
+    Chunk(Vec<u8>),
+}
+
+/// Receives `(remote pubkey, link number, dialed by us, event)`.
+pub type FileLinkEventHandler = Rc<dyn Fn(&str, u32, bool, FileLinkEvent)>;
+
+/// Delivers a file link's offer, answer or ICE to its member, over their main link.
+pub type FileLinkSignalOut = Rc<dyn Fn(SignalPayload)>;
+
+/// An extra connection to a member that only carries file chunks: one ordered channel, no
+/// media, negotiated once over the open main link. Several of them carry one upload in
+/// parallel, each with its own congestion control (see `protocol::transfer`). The side that
+/// dials a file link sends on it; the other side only receives.
+pub struct FileLink {
+    pub remote: String,
+    pub id: u32,
+    pub dialed: bool,
+    /// Open but given no new chunks: it did not raise the rate. Another upload may take it back.
+    pub set_aside: Cell<bool>,
+    pc: RtcPeerConnection,
+    dc: RtcDataChannel,
+    drain_notify: DrainNotify,
+    pending_ice: RefCell<Vec<IceCandidateData>>,
+    described: Cell<bool>,
+    closed: Rc<Cell<bool>>,
+    signal_out: FileLinkSignalOut,
+}
+
+impl FileLink {
+    /// Open file link `id` to `remote`. The dialer sends its offer right away; the other
+    /// side creates its end when that offer arrives.
+    pub fn new(
+        remote: &str,
+        id: u32,
+        dialed: bool,
+        config: &RtcConfiguration,
+        signal_out: FileLinkSignalOut,
+        on_event: FileLinkEventHandler,
+    ) -> Result<Rc<Self>, JsValue> {
+        let pc = RtcPeerConnection::new_with_configuration(config)?;
+        // Negotiated with the same id on both ends: no `datachannel` event to wait for.
+        let init = RtcDataChannelInit::new();
+        init.set_ordered(true);
+        init.set_negotiated(true);
+        init.set_id(0);
+        let dc = pc.create_data_channel_with_data_channel_dict(FILE_LABEL, &init);
+        dc.set_buffered_amount_low_threshold(FILE_BUFFER_LOW_THRESHOLD);
+        dc.set_binary_type(RtcDataChannelType::Arraybuffer);
+        let link = Rc::new(Self {
+            remote: remote.to_string(),
+            id,
+            dialed,
+            set_aside: Cell::new(false),
+            pc,
+            dc,
+            drain_notify: Rc::new(RefCell::new(Vec::new())),
+            pending_ice: RefCell::new(Vec::new()),
+            described: Cell::new(false),
+            closed: Rc::new(Cell::new(false)),
+            signal_out,
+        });
+
+        let notify_closed: Rc<dyn Fn()> = {
+            let remote = link.remote.clone();
+            let on_event = on_event.clone();
+            let notified = Cell::new(false);
+            Rc::new(move || {
+                if !notified.replace(true) {
+                    on_event(&remote, id, dialed, FileLinkEvent::Closed);
+                }
+            })
+        };
+        {
+            let signal_out = link.signal_out.clone();
+            let remote = link.remote.clone();
+            batch_ice(&link.pc, Rc::new(move |candidates| signal_out(SignalPayload::IceBatch { to: remote.clone(), candidates })));
+        }
+        watch_state(&link.pc, notify_closed.clone());
+        {
+            let remote = link.remote.clone();
+            let on_event = on_event.clone();
+            let on_open = Closure::wrap(Box::new(move || on_event(&remote, id, dialed, FileLinkEvent::Open)) as Box<dyn FnMut()>);
+            link.dc.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+            on_open.forget();
+        }
+        {
+            let notify_closed = notify_closed.clone();
+            let on_close = Closure::wrap(Box::new(move || notify_closed()) as Box<dyn FnMut()>);
+            link.dc.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+            on_close.forget();
+        }
+        {
+            let remote = link.remote.clone();
+            let on_message = Closure::wrap(Box::new(move |ev: MessageEvent| {
+                if let Ok(buffer) = ev.data().dyn_into::<js_sys::ArrayBuffer>() {
+                    on_event(&remote, id, dialed, FileLinkEvent::Chunk(js_sys::Uint8Array::new(&buffer).to_vec()));
+                }
+            }) as Box<dyn FnMut(MessageEvent)>);
+            link.dc.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+            on_message.forget();
+        }
+        notify_on_drain(&link.dc, link.drain_notify.clone());
+
+        if dialed {
+            let pc = link.pc.clone();
+            let signal_out = link.signal_out.clone();
+            let remote = link.remote.clone();
+            let closed = link.closed.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                match set_local_description_implicit(&pc).await {
+                    Ok(()) => {
+                        if let Some(local) = pc.local_description().filter(|_| !closed.get()) {
+                            signal_out(SignalPayload::Offer { to: remote.clone(), sdp: local.sdp() });
+                        }
+                    }
+                    Err(err) => {
+                        log::warn!("Failed to create a file link offer: {:?}", err);
+                        notify_closed();
+                    }
+                }
+            });
+        }
+        Ok(link)
+    }
+
+    pub fn is_open(&self) -> bool {
+        !self.closed.get() && self.dc.ready_state() == RtcDataChannelState::Open
+    }
+
+    /// Apply the other side's offer (we did not dial) or answer (we did). Each file link is
+    /// negotiated exactly once; anything else is ignored.
+    pub async fn handle_description(&self, is_offer: bool, sdp: String) {
+        if self.closed.get() || is_offer == self.dialed || self.described.replace(true) {
+            return;
+        }
+        let desc = RtcSessionDescriptionInit::new(if is_offer { RtcSdpType::Offer } else { RtcSdpType::Answer });
+        desc.set_sdp(&sdp);
+        if let Err(err) = JsFuture::from(self.pc.set_remote_description(&desc)).await {
+            log::warn!("Failed to apply a file link description: {:?}", err);
+            return;
+        }
+        let pending = std::mem::take(&mut *self.pending_ice.borrow_mut());
+        for candidate in pending {
+            add_ice_candidate(&self.pc, candidate).await;
+        }
+        if !is_offer {
+            return;
+        }
+        if let Err(err) = set_local_description_implicit(&self.pc).await {
+            log::warn!("Failed to answer a file link: {:?}", err);
+            return;
+        }
+        if let Some(local) = self.pc.local_description().filter(|_| !self.closed.get()) {
+            (self.signal_out)(SignalPayload::Answer { to: self.remote.clone(), sdp: local.sdp() });
+        }
+    }
+
+    pub async fn add_candidates(&self, candidates: Vec<IceCandidateData>) {
+        if self.pc.remote_description().is_none() {
+            self.pending_ice.borrow_mut().extend(candidates);
+            return;
+        }
+        for candidate in candidates {
+            add_ice_candidate(&self.pc, candidate).await;
+        }
+    }
+
+    /// Close both ends (the other side sees the channel close). No event fires here.
+    pub fn close(&self) {
+        self.closed.set(true);
+        for tx in self.drain_notify.borrow_mut().drain(..) {
+            let _ = tx.send(());
+        }
+        self.dc.close();
+        self.pc.close();
+    }
+}
+
+/// Where a file chunk can go: the main link's file channel or one of our file links.
+#[derive(Clone)]
+pub enum ChunkRoute {
+    Main(Rc<PeerLink>),
+    Extra(Rc<FileLink>),
+}
+
+impl ChunkRoute {
+    /// Tells routes apart: `None` for the main link, else the file link's number.
+    pub fn key(&self) -> Option<u32> {
+        match self {
+            Self::Main(_) => None,
+            Self::Extra(link) => Some(link.id),
+        }
+    }
+
+    /// Bytes queued; `None` when it can't take chunks.
+    pub fn buffered(&self) -> Option<u32> {
+        match self {
+            Self::Main(link) => link.file_buffered_amount(),
+            Self::Extra(link) => link.is_open().then(|| link.dc.buffered_amount()),
+        }
+    }
+
+    /// Returns whether the browser took the chunk.
+    pub fn send(&self, bytes: &[u8]) -> bool {
+        match self {
+            Self::Main(link) => link.send_bytes(bytes),
+            Self::Extra(link) => link.is_open() && link.dc.send_with_u8_array(bytes).is_ok(),
+        }
+    }
+
+    fn drained(&self) -> oneshot::Receiver<()> {
+        match self {
+            Self::Main(link) => link.file_drained(),
+            Self::Extra(link) => {
+                let (tx, rx) = oneshot::channel();
+                link.drain_notify.borrow_mut().push(tx);
+                rx
+            }
+        }
+    }
+}
+
+/// Wait until one of `routes` has less than `high_water` queued and return the emptiest
+/// (ties go round-robin from `turn`, so chunks spread even when every queue is empty).
+/// `None` when none of them is open.
+pub async fn wait_for_room(routes: &[ChunkRoute], high_water: u32, turn: usize) -> Option<usize> {
+    use futures::FutureExt;
+    loop {
+        let mut best: Option<(u32, usize)> = None;
+        let mut any_open = false;
+        for k in 0..routes.len() {
+            let i = (turn + k) % routes.len();
+            if let Some(buffered) = routes[i].buffered() {
+                any_open = true;
+                if buffered < high_water && best.is_none_or(|(least, _)| buffered < least) {
+                    best = Some((buffered, i));
+                }
+            }
+        }
+        if let Some((_, i)) = best {
+            return Some(i);
+        }
+        if !any_open {
+            return None;
+        }
+        let drained = futures::future::select_all(routes.iter().map(ChunkRoute::drained));
+        futures::select! {
+            _ = drained.fuse() => {},
+            _ = crate::media::sleep_ms(100).fuse() => {},
+        }
+    }
 }
