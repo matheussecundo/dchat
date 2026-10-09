@@ -10,6 +10,8 @@ mod history;
 mod lounge;
 mod quality;
 
+pub use files::{save_finished, start_save};
+
 use crate::mesh::{LinkEvent, LinkEventHandler, PeerLink, SignalOut};
 use crate::names::pubkey_tag;
 use crate::nostr_pool::{protocol_version, NostrRelayPool, PoolEvents};
@@ -87,6 +89,9 @@ pub struct SessionSignals {
     /// The device choice, when the session changes it (a chosen device was missing, or 🔄
     /// moved to the next camera).
     pub devices: WriteSignal<crate::state::DeviceChoice>,
+    /// Finished downloads waiting for a tap on Save (iOS), by file id. App level, so a
+    /// rekey keeps them; the Save button takes them out.
+    pub ready_files: StoredValue<HashMap<String, web_sys::File>>,
 }
 
 #[derive(Clone)]

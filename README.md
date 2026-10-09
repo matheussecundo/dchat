@@ -47,7 +47,7 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 4. **Phase 4: Encrypted P2P File Sharing (Completed)**
    - Zero-knowledge end-to-end encrypted file sharing directly between peers.
    - Binary WebRTC data channel with 64 KB chunking and backpressure throttling.
-   - Streaming disk write via File System Access API with automatic Blob download fallback.
+   - Streaming disk write via File System Access API with automatic Blob download fallback; on iPhone and iPad, a 💾 Save tap opens the share sheet instead.
    - Per-chunk ChaCha20-Poly1305 authenticated encryption with AEAD header authentication.
    - Interactive file cards in chat with real-time transfer progress, speed metrics, and cancel/decline controls.
    - Completely ephemeral: files are never stored on any server or persistent browser storage; downloads cease if sender disconnects.
@@ -153,6 +153,7 @@ Tap **📎**, pick a file, optionally add a caption and send. Everyone in the ro
 - The sender uploads to at most **2 members at a time**; others see *⏳ Queued (#n)* until a slot frees up. The sender's card shows how many are sending, waiting and done.
 - **Decline** just hides the buttons for you. The sender can **Withdraw** the offer for everyone, which also stops transfers in progress.
 - Downloads stream to disk when the browser supports the File System Access API; otherwise they are assembled in memory (with a warning above 250 MB).
+- On iPhone and iPad a finished download waits on the card: tap **💾 Save** to open the share sheet (Save to Files, AirDrop, …) over dchat. Closing the sheet keeps the button. dchat never hands the file over unasked, because iOS would open it in another app and suspend dchat, which drops you from the room.
 - If you have no direct link to the sender (`via` in the member list), the card says *Sender not directly reachable*. If the sender leaves, pending offers are marked unavailable and running transfers stop.
 
 ### Remote Control

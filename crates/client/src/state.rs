@@ -238,6 +238,9 @@ pub enum FileTransferStatus {
     Offered,
     Queued { position: usize },
     Downloading { progress: u8, speed_kb: u64 },
+    /// Received in full and waiting in RAM for a tap on Save (iOS: the share sheet needs
+    /// one, and handing the file over unasked would take the person out of dchat).
+    ReadyToSave,
     Completed,
     Declined,
     Cancelled,
