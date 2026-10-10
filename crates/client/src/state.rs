@@ -22,6 +22,17 @@ pub enum ConnectionStatus {
 }
 
 impl ConnectionStatus {
+    /// In the room (alone or not): from the first relay connection attempt until leaving.
+    pub fn in_room(&self) -> bool {
+        matches!(
+            self,
+            ConnectionStatus::ConnectingRelay
+                | ConnectionStatus::WaitingForPeer
+                | ConnectionStatus::NegotiatingWebRtc
+                | ConnectionStatus::Connected
+        )
+    }
+
     pub fn label_i18n(&self, lang: Language) -> &'static str {
         match self {
             ConnectionStatus::Idle => t(lang, "status_idle"),
@@ -282,6 +293,8 @@ pub struct FileOfferInfo {
     pub name: String,
     pub size: u64,
     pub mime_type: String,
+    /// What the author says about an image, video, audio file or voice message.
+    pub media: Option<protocol::media::MediaInfo>,
     pub status: FileTransferStatus,
 }
 

@@ -10,6 +10,7 @@ use crate::media::sleep_ms;
 use crate::mesh::{wait_for_room, ChunkRoute};
 use crate::state::{current_time_string, ChatMessageUi, DownloadSummary, FileOfferInfo, FileTransferStatus};
 use leptos::*;
+use protocol::media::{mime_from_name, preview_type, MediaInfo};
 use protocol::transfer::{in_send_window, AckPacer, Growth, LinkGrowth, RateMeter, Reorder};
 use protocol::{
     decrypt_chunk, encrypt_chunk, QueueDecision, RoomBody, RoomEnvelope, Upload, UploadQueue,
@@ -51,10 +52,23 @@ struct Offer {
     mime_type: String,
 }
 
+/// What a download is for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    /// Saved as a file (save picker, else the browser's downloads), as before previews.
+    Save,
+    /// Shown in the chat: held in RAM (`HeldMedia`), nothing saved.
+    View,
+    /// Shown in the chat, then saved (Download on media not loaded yet).
+    ViewThenSave,
+}
+
 struct Download {
     author: String,
     name: String,
+    /// For a preview, the allow-listed type (`preview_type`), never the declared one.
     mime_type: String,
+    purpose: Purpose,
     /// In-memory fallback when the File System Access API is unavailable: the chunks
     /// received since the last fold, and everything before them as one Blob.
     pending: Vec<js_sys::Uint8Array>,
@@ -161,6 +175,9 @@ pub(super) struct Files {
     /// Test-only pause between chunks, so queues and interruptions are observable.
     #[cfg(feature = "e2e-hooks")]
     pub chunk_delay_ms: std::cell::Cell<i32>,
+    /// Test-only count of the files this tab asked for (a save from RAM asks for nothing).
+    #[cfg(feature = "e2e-hooks")]
+    pub requests_sent: std::cell::Cell<u32>,
 }
 
 impl Default for Files {
@@ -176,6 +193,8 @@ impl Default for Files {
             next_upload_id: Cell::new(0),
             #[cfg(feature = "e2e-hooks")]
             chunk_delay_ms: std::cell::Cell::new(0),
+            #[cfg(feature = "e2e-hooks")]
+            requests_sent: std::cell::Cell::new(0),
         }
     }
 }
@@ -183,21 +202,26 @@ impl Default for Files {
 impl RoomSession {
     // ---- Author side ------------------------------------------------------------------
 
-    /// Post a file card to the room; members then request it individually.
-    pub fn share_file(&self, file: web_sys::File, caption: Option<String>) -> Result<(), String> {
-        if !self.has_open_link() {
-            return Err("No member is connected yet".into());
-        }
+    /// Post a file card to the room; members then request it individually. `media`: what
+    /// the card shows before anyone pulls the file (thumbnail, size, waveform). Returns the
+    /// file id. Alone in the room, the card waits in the chat log for whoever joins, who can
+    /// pull the file from us while we stay.
+    pub fn share_file(&self, file: web_sys::File, caption: Option<String>, media: Option<MediaInfo>) -> Result<String, String> {
         let file_id = uuid::Uuid::new_v4().to_string();
+        let declared = file.type_();
+        let mime_type = if declared.is_empty() { mime_from_name(&file.name()).unwrap_or_default().to_string() } else { declared };
+        // A preview members would refuse is left out rather than losing the whole card.
+        let media = media.filter(|m| m.is_valid(&mime_type));
         let body = RoomBody::FileOffer {
             file_id: file_id.clone(),
             name: file.name(),
             size: file.size() as u64,
-            mime_type: file.type_(),
+            mime_type,
             caption,
+            media,
         };
-        self.inner.files.outgoing.borrow_mut().insert(file_id, file);
-        self.publish(body).map(|_| ()).ok_or_else(|| "Failed to sign file offer".into())
+        self.inner.files.outgoing.borrow_mut().insert(file_id.clone(), file);
+        self.publish(body).map(|_| file_id).ok_or_else(|| "Failed to sign file offer".into())
     }
 
     /// Stop offering a file to everyone, including transfers in progress.
@@ -481,7 +505,19 @@ impl RoomSession {
 
     /// Ask the author for the file (needs a direct link). Call from the Download click:
     /// the save-file picker requires the user gesture.
+    /// Download a file to disk (save picker where there is one).
     pub fn download_file(&self, file_id: &str) {
+        self.start_download(file_id, Purpose::Save);
+    }
+
+    /// Pull an image, video or audio file into RAM to show it in the chat (`then_save`: and
+    /// save it once loaded). No save picker, so it needs no tap: cards load small media as
+    /// soon as they are on screen.
+    pub fn load_media(&self, file_id: &str, then_save: bool) {
+        self.start_download(file_id, if then_save { Purpose::ViewThenSave } else { Purpose::View });
+    }
+
+    fn start_download(&self, file_id: &str, purpose: Purpose) {
         let Some((author, name, size, mime_type)) = self
             .inner
             .files
@@ -492,24 +528,42 @@ impl RoomSession {
         else {
             return;
         };
-        if self.inner.files.downloads.borrow().contains_key(file_id) {
+        if let Some(running) = self.inner.files.downloads.borrow_mut().get_mut(file_id) {
+            // Download tapped while the card loads its preview: save it once loaded.
+            if running.purpose == Purpose::View && purpose == Purpose::ViewThenSave {
+                running.purpose = Purpose::ViewThenSave;
+            }
             return;
         }
+        // Previews are built only with an allow-listed type, and only up to the inline limit.
+        let mime_type = match purpose {
+            Purpose::Save => mime_type,
+            Purpose::View | Purpose::ViewThenSave => match preview_type(&mime_type) {
+                Some(preview) if size <= crate::held_media::INLINE_MAX_BYTES => preview.to_string(),
+                _ => return,
+            },
+        };
         if !self.link(&author).is_some_and(|l| l.is_open()) {
-            self.toast("file_unreachable");
+            if purpose != Purpose::View {
+                self.toast("file_unreachable");
+            }
             return;
         }
         log::info!("Requesting {} ({} bytes)", name, size);
         let s = self.clone();
         let file_id = file_id.to_string();
         wasm_bindgen_futures::spawn_local(async move {
-            let writable = try_open_save_stream(&name).await;
+            let writable = match purpose {
+                Purpose::Save => try_open_save_stream(&name).await,
+                Purpose::View | Purpose::ViewThenSave => None,
+            };
             s.inner.files.downloads.borrow_mut().insert(
                 file_id.clone(),
                 Download {
                     author: author.clone(),
                     name,
                     mime_type,
+                    purpose,
                     pending: Vec::new(),
                     pending_bytes: 0,
                     folded: None,
@@ -530,6 +584,8 @@ impl RoomSession {
                 },
             );
             s.set_file_status(&file_id, FileTransferStatus::Downloading { progress: 0, speed_kb: 0, connections: 1 });
+            #[cfg(feature = "e2e-hooks")]
+            s.inner.files.requests_sent.set(s.inner.files.requests_sent.get() + 1);
             let request = RoomBody::FileRequest { to: author.clone(), file_id: file_id.clone() };
             if !s.send_direct(&author, request) {
                 s.abort_download(&file_id, FileTransferStatus::Interrupted);
@@ -696,6 +752,24 @@ impl RoomSession {
             self.set_file_status(file_id, FileTransferStatus::Interrupted);
             return;
         };
+        if done.purpose != Purpose::Save {
+            let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) else {
+                self.set_file_status(file_id, FileTransferStatus::Interrupted);
+                return;
+            };
+            // Finished first, then shown: a picture that fails to decode finds its card done.
+            self.set_file_status(file_id, FileTransferStatus::Completed { summary, withdrawn: false });
+            self.inner.signals.held_media.update(|held| held.insert(file_id, blob.clone(), url, &done.name, false));
+            if done.purpose == Purpose::ViewThenSave {
+                // iOS needs a fresh tap for the share sheet: the card's Download saves it.
+                if crate::pwa::is_ios() {
+                    self.toast("toast_file_ready");
+                } else {
+                    let _ = download_blob(&blob, &done.name);
+                }
+            }
+            return;
+        }
         if crate::pwa::is_ios() {
             let bag = web_sys::FilePropertyBag::new();
             bag.set_type(blob_type(&done.mime_type));
@@ -720,7 +794,7 @@ impl RoomSession {
     /// Register a file card (once) and build its row. `live`: posted just now; otherwise it
     /// comes from history and offers Download only while its author is in the room.
     pub(super) fn file_card_row(&self, envelope: &RoomEnvelope, withdrawn: bool, live: bool) -> Option<ChatMessageUi> {
-        let RoomBody::FileOffer { file_id, name, size, mime_type, caption } = &envelope.body else {
+        let RoomBody::FileOffer { file_id, name, size, mime_type, caption, media } = &envelope.body else {
             return None;
         };
         if self.inner.files.offers.borrow().contains_key(file_id) {
@@ -763,6 +837,7 @@ impl RoomSession {
                 name: name.clone(),
                 size: *size,
                 mime_type: mime_type.clone(),
+                media: media.clone(),
                 status,
             }),
             ..Default::default()
@@ -989,6 +1064,40 @@ pub async fn save_finished(start: SaveStart) -> bool {
         SaveStart::Downloaded => true,
         SaveStart::Failed => false,
     }
+}
+
+/// Save a file held in RAM (a viewed photo, a voice message): the save picker where there
+/// is one, the share sheet on iOS, else the browser's downloads. Call it from the tap.
+pub fn save_blob(blob: &web_sys::Blob, name: &str) {
+    if crate::pwa::is_ios() {
+        let bag = web_sys::FilePropertyBag::new();
+        bag.set_type(&blob.type_());
+        if let Ok(file) = web_sys::File::new_with_blob_sequence_and_options(&js_sys::Array::of1(blob), name, &bag) {
+            let started = start_save(&file);
+            wasm_bindgen_futures::spawn_local(async move {
+                save_finished(started).await;
+            });
+        }
+        return;
+    }
+    let has_picker = window()
+        .and_then(|w| js_sys::Reflect::get(&w, &"showSaveFilePicker".into()).ok())
+        .is_some_and(|f| f.is_function());
+    if !has_picker {
+        let _ = download_blob(blob, name);
+        return;
+    }
+    let (blob, name) = (blob.clone(), name.to_string());
+    wasm_bindgen_futures::spawn_local(async move {
+        // Closing the picker saves nothing, as for any download.
+        if let Some(writable) = try_open_save_stream(&name).await {
+            if call_stream_method(&writable, "write", Some(&blob.into())).await.is_ok() {
+                let _ = call_stream_method(&writable, "close", None).await;
+            } else {
+                let _ = call_stream_method(&writable, "abort", None).await;
+            }
+        }
+    });
 }
 
 fn download_blob(blob: &web_sys::Blob, name: &str) -> Result<(), JsValue> {

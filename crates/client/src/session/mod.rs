@@ -13,7 +13,7 @@ mod quality;
 mod succession;
 mod sync;
 
-pub use files::{save_finished, start_save};
+pub use files::{save_blob, save_finished, start_save};
 
 use crate::mesh::{LinkEvent, LinkEventHandler, PeerLink, SignalOut};
 use crate::names::pubkey_tag;
@@ -102,6 +102,8 @@ pub struct SessionSignals {
     pub chat_log: StoredValue<Rc<RefCell<ChatLog>>>,
     /// Earlier messages are being fetched from a member.
     pub history_loading: WriteSignal<bool>,
+    /// Media loaded for viewing in the chat (`held_media`). App level, so a rekey keeps it.
+    pub held_media: RwSignal<crate::held_media::HeldMedia>,
 }
 
 #[derive(Clone)]
@@ -281,10 +283,9 @@ impl RoomSession {
         Ok(session)
     }
 
+    /// Post a chat message. Alone in the room, it waits in the chat log: whoever joins gets
+    /// it with the history.
     pub fn send_chat(&self, text: &str) -> Result<(), String> {
-        if !self.has_open_link() {
-            return Err("No member is connected yet".into());
-        }
         self.publish(RoomBody::Chat { text: text.to_string() })
             .map(|_| ())
             .ok_or_else(|| "Failed to sign message".into())
@@ -1032,6 +1033,12 @@ impl RoomSession {
         }) as Box<dyn Fn(i32)>);
         let _ = js_sys::Reflect::set(&hooks, &"throttleUploads".into(), throttle.as_ref());
         throttle.forget();
+
+        // How many files this tab asked members for (Download of a viewed file asks for none).
+        let s = self.clone();
+        let requests = Closure::wrap(Box::new(move || s.inner.files.requests_sent.get()) as Box<dyn Fn() -> u32>);
+        let _ = js_sys::Reflect::set(&hooks, &"fileRequestsSent".into(), requests.as_ref());
+        requests.forget();
         self.install_file_link_hooks(&hooks);
 
         // Send remote-control input (JSON `InputEvent`s) to a sharer, bypassing our own rights.

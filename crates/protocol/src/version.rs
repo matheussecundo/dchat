@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Never change how a plain room's relay topic is derived (`hash_room_topic`): members on
 /// different versions only notice each other (and show the reload banner) on a shared topic.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// What travels through the relays (encrypted with the room key): the sender's protocol
 /// version and its signal. Every version must keep `v` readable, whatever `payload` becomes.
@@ -60,12 +60,13 @@ mod tests {
     use crate::keycodes::DomCode;
     use crate::password::{password_room_key, password_room_topic, stretch_password};
     use crate::chat_log;
+    use crate::media::{self, MediaInfo, MediaKind, Thumbnail, WAVEFORM_BARS};
     use crate::succession;
     use sha2::{Digest, Sha256};
 
     /// The wire fingerprint recorded for the current version. When the test below fails,
     /// bump `PROTOCOL_VERSION` and record the new pair here.
-    const RECORDED: (u32, &str) = (7, "78d759229b23867afaaf979da92e10b9dc5462fee98ccce8641dd0a8bf5e1672");
+    const RECORDED: (u32, &str) = (8, "457a259541985977773a6db246e8f87f375c9c3f61218f6aee1dd1b152d11d31");
 
     fn sealed() -> EncryptedPayload {
         EncryptedPayload { nonce: "n".into(), ciphertext: "c".into() }
@@ -147,10 +148,18 @@ mod tests {
             },
             RoomBody::FileOffer {
                 file_id: "f".into(),
-                name: "a.txt".into(),
+                name: "a.webm".into(),
                 size: 4,
-                mime_type: "text/plain".into(),
+                mime_type: "audio/webm;codecs=opus".into(),
                 caption: Some("c".into()),
+                media: Some(MediaInfo {
+                    kind: MediaKind::Voice,
+                    width: 1,
+                    height: 2,
+                    duration_ms: 3,
+                    thumb: Some(Thumbnail { mime_type: "image/webp".into(), data: "AAAA".into() }),
+                    waveform: Some(vec![5; WAVEFORM_BARS]),
+                }),
             },
             RoomBody::FileRequest { to: "b".into(), file_id: "f".into() },
             RoomBody::FileCancel { to: Some("b".into()), file_id: "f".into() },
@@ -268,6 +277,21 @@ mod tests {
             chat_log::SYNC_WANT_MAX,
             chat_log::entry_fingerprint("id")
         ));
+        // Media previews: what every member accepts in a file card.
+        for kind in [MediaKind::Image, MediaKind::Video, MediaKind::Audio, MediaKind::Voice] {
+            wire.push(serde_json::to_string(&kind).unwrap());
+        }
+        wire.push(format!(
+            "{} {:?} {} {} {}",
+            media::THUMB_MAX_BYTES,
+            media::THUMB_TYPES,
+            media::WAVEFORM_BARS,
+            media::MAX_MEDIA_DIMENSION,
+            media::MAX_MEDIA_DURATION_MS
+        ));
+        for mime in ["image/png", "image/jpg", "image/svg+xml", "video/quicktime", "audio/x-m4a", "audio/webm;codecs=opus"] {
+            wire.push(format!("{mime}={:?}", media::preview_type(mime)));
+        }
         hex::encode(Sha256::digest(wire.join("\n").as_bytes()))
     }
 

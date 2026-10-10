@@ -1,17 +1,22 @@
 mod agent;
+mod held_media;
 mod i18n;
 mod ice;
 mod layout;
 mod media;
+mod media_card;
 mod mesh;
 mod names;
 mod nostr_pool;
 mod pwa;
 mod qr;
+mod recorder;
 mod remote_input;
 mod session;
+mod staging;
 mod state;
 mod stats;
+mod voice_mp3;
 
 use i18n::{
     detect_browser_language, large_file_warning_desc, t, t_replace_1, update_document_direction,
@@ -29,7 +34,12 @@ use agent::{AgentLink, AgentSignals, AgentStatus};
 use qr::generate_qr_svg;
 use remote_input::{InputCapture, InputSink, PadPoller};
 use std::rc::Rc;
-use session::{save_finished, start_save, RoomSession, SessionSignals};
+use session::{save_blob, save_finished, start_save, RoomSession, SessionSignals};
+use held_media::HeldMedia;
+use media_card::{close_viewer, media_card, media_viewer, preview_of, MediaCtx, ViewerItem};
+use protocol::media::MediaKind;
+use recorder::{recording_panel, review_panel, MicPress, Phase, RecMode, Recorder};
+use staging::{staged_chip, StagedFile};
 use state::{
     admin_url, create_room, current_fragment, format_file_size, host_download_url, fragment_relay_choice, invite_url, read_credentials,
     selectable_devices, AudioSettings, DeviceChoice, DeviceEntry, RelayMode, CAMERA_KIND, MIC_KIND, SPEAKER_KIND,
@@ -194,8 +204,20 @@ fn App() -> impl IntoView {
     let (editing, set_editing) = create_signal(Option::<String>::None);
     let (react_picker, set_react_picker) = create_signal(Option::<String>::None);
 
-    // File sharing
-    let (staged_file, set_staged_file) = create_signal(Option::<web_sys::File>::None);
+    // File sharing: files waiting to be sent (picked, dropped or pasted).
+    let staged = create_rw_signal(Vec::<StagedFile>::new());
+    // Media loaded for viewing in the chat (RAM only, kept across rekeys), files this browser
+    // couldn't decode, and the fullscreen viewer.
+    let held_media = create_rw_signal(HeldMedia::default());
+    let failed_media = create_rw_signal(HashMap::<String, String>::new());
+    let viewer = create_rw_signal(None::<ViewerItem>);
+    let media_ctx = MediaCtx { lang, members, held: held_media, failed: failed_media, viewer, messages: set_messages };
+    media_card::install_playback_rules();
+    // Voice messages: app level, so a recording under review survives a rekey.
+    let recorder = Recorder::new();
+    // Files dragged over the window (a counter: enter and leave fire for every element).
+    let drag_depth = store_value(0_i32);
+    let (dragging, set_dragging) = create_signal(false);
     let (large_file_warning, set_large_file_warning) = create_signal(Option::<(String, String)>::None);
     // Finished downloads waiting for a tap on Save (iOS), by file id: RAM only, kept across
     // rekeys, dropped once handed over or when this tab leaves the room.
@@ -244,6 +266,7 @@ fn App() -> impl IntoView {
             ready_files,
             chat_log,
             history_loading: set_history_loading,
+            held_media,
         };
         set_room_id_sig.set(room_id.clone());
         match RoomSession::start(room_id, key, my_name.get_value(), signals, carry, host_ice.get_value()) {
@@ -313,6 +336,11 @@ fn App() -> impl IntoView {
     create_effect(move |_| {
         if removed.get() {
             ready_files.update_value(|ready| ready.clear());
+            viewer.set(None);
+            held_media.update(|held| held.clear());
+            failed_media.update(|failed| failed.clear());
+            recorder.reset();
+            staging::clear(staged);
             chat_log.with_value(|log| log.borrow_mut().clear());
             set_screen.set(Screen::Removed);
         }
@@ -355,8 +383,12 @@ fn App() -> impl IntoView {
             set_input_text.set(String::new());
             return;
         }
-        let staged = staged_file.get_untracked();
-        if text.is_empty() && staged.is_none() {
+        let files = staged.get_untracked();
+        if text.is_empty() && files.is_empty() {
+            return;
+        }
+        // Their previews are still being made (a moment, at most a few seconds).
+        if files.iter().any(|f| f.preparing) {
             return;
         }
         chat_at_bottom.set_value(true);
@@ -367,19 +399,82 @@ fn App() -> impl IntoView {
             let Some(session) = session else {
                 return;
             };
-            let result = match staged {
-                Some(file) => session.share_file(file, (!text.is_empty()).then_some(text)),
-                None => session.send_chat(&text),
-            };
-            match result {
-                Ok(()) => {
-                    set_input_text.set(String::new());
-                    set_staged_file.set(None);
+            if files.is_empty() {
+                match session.send_chat(&text) {
+                    Ok(()) => set_input_text.set(String::new()),
+                    Err(err) => log::warn!("Failed to send: {err}"),
                 }
-                Err(err) => log::warn!("Failed to send: {err}"),
+                return;
+            }
+            // One card per file, in order; the caption goes on the first.
+            let mut caption = (!text.is_empty()).then_some(text.clone());
+            for item in files {
+                match session.share_file(item.file.clone(), caption.clone(), item.media.clone()) {
+                    Ok(file_id) => {
+                        caption = None;
+                        set_input_text.set(String::new());
+                        // Our own card shows the file we picked (its URL moves to the store).
+                        staged.update(|s| s.retain(|i| i.key != item.key));
+                        if item.kind.is_some() {
+                            held_media.update(|held| held.insert_own(&file_id, &item.file, item.url.clone()));
+                        }
+                    }
+                    Err(err) => {
+                        log::warn!("Failed to send: {err}");
+                        set_toast.set(Some("toast_send_failed"));
+                        return;
+                    }
+                }
             }
         });
     };
+    // A voice message under review: offered like any file, pulled from this device.
+    let send_take = move || {
+        let Some(take) = recorder.take() else {
+            return;
+        };
+        let Some(file) = take.file() else {
+            recorder.phase.set(Phase::Review(take));
+            return;
+        };
+        chat_at_bottom.set_value(true);
+        let mut sent = false;
+        session_ref.with_value(|session| {
+            if let Some(session) = session {
+                match session.share_file(file.clone(), None, Some(take.media())) {
+                    Ok(file_id) => {
+                        held_media.update(|held| held.insert_own(&file_id, &file, Some(take.url.clone())));
+                        sent = true;
+                    }
+                    Err(err) => log::warn!("Failed to send the voice message: {err}"),
+                }
+            }
+        });
+        if !sent {
+            set_toast.set(Some("toast_send_failed"));
+            recorder.phase.set(Phase::Review(take));
+        }
+    };
+    // Picked, dropped or pasted files join the ones waiting to be sent.
+    let stage_files = move |files: Vec<web_sys::File>| {
+        if !files.is_empty() && staging::stage(staged, files) > 0 {
+            set_toast.set(Some("toast_too_many_files"));
+        }
+    };
+    // What the message bar shows of the recorder (changes only between modes, not with
+    // every level sample).
+    let rec_mode = create_memo(move |_| recorder.phase.with(RecMode::of));
+    // 🎤 stands in for Send while there is nothing to send.
+    let show_mic = move || {
+        rec_mode.get() == RecMode::Idle
+            && editing.with(|e| e.is_none())
+            && input_text.with(|t| t.trim().is_empty())
+            && staged.with(|s| s.is_empty())
+    };
+    let start_recording = move |held: bool| {
+        recorder.start(held, audio_settings.get_untracked(), device_choice.get_untracked().mic, set_toast);
+    };
+    let mic_press = MicPress::new(recorder, start_recording);
 
     create_effect(move |_| {
         let count = messages.with(|m| m.len());
@@ -444,6 +539,26 @@ fn App() -> impl IntoView {
             }
         });
     };
+    // Recording a voice message mutes our lounge mic (people in voice don't hear what is
+    // recorded for the chat), and puts it back as it was afterwards.
+    let capturing = create_memo(move |_| recorder.phase.with(Phase::capturing));
+    let unmute_after_recording = store_value(false);
+    create_effect(move |_| {
+        let voice = my_voice.get_untracked();
+        if capturing.get() {
+            if voice.in_voice && !voice.mic_muted {
+                with_session(&|s| s.toggle_mic());
+                unmute_after_recording.set_value(true);
+            }
+        } else if unmute_after_recording.get_value() {
+            unmute_after_recording.set_value(false);
+            if voice.in_voice && voice.mic_muted {
+                with_session(&|s| s.toggle_mic());
+            }
+        }
+    });
+    #[cfg(feature = "e2e-hooks")]
+    install_media_hooks(held_media, recorder);
 
     // ---- Remote control ------------------------------------------------------------------
     let connect_agent = move || {
@@ -740,6 +855,9 @@ fn App() -> impl IntoView {
             if ev.key() == "Escape" && quality_menu.with_untracked(Option::is_some) {
                 set_quality_menu.set(None);
             }
+            if ev.key() == "Escape" && viewer.with_untracked(Option::is_some) {
+                close_viewer(media_ctx);
+            }
         }) as Box<dyn FnMut(web_sys::KeyboardEvent)>);
         if let Some(doc) = window().and_then(|w| w.document()) {
             let _ = doc.add_event_listener_with_callback("fullscreenchange", on_change.as_ref().unchecked_ref());
@@ -747,6 +865,50 @@ fn App() -> impl IntoView {
         }
         on_change.forget();
         on_key.forget();
+    }
+    // Files dragged over the room: a full-window "Drop to attach". A file dropped anywhere in
+    // the room is never opened by the browser in place of it (that would wipe the room).
+    {
+        let can_attach = move || {
+            screen.get_untracked() == Screen::Room
+                && status.with_untracked(ConnectionStatus::in_room)
+                && recorder.phase.with_untracked(|p| *p == Phase::Idle)
+        };
+        let on_drag = wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::DragEvent| {
+            if screen.get_untracked() != Screen::Room {
+                return;
+            }
+            let Some(transfer) = ev.data_transfer().filter(staging::carries_files) else {
+                return;
+            };
+            ev.prevent_default();
+            match ev.type_().as_str() {
+                "dragenter" => {
+                    drag_depth.update_value(|d| *d += 1);
+                    set_dragging.set(can_attach());
+                }
+                "dragleave" => {
+                    drag_depth.update_value(|d| *d = (*d - 1).max(0));
+                    if drag_depth.get_value() == 0 {
+                        set_dragging.set(false);
+                    }
+                }
+                "dragover" => transfer.set_drop_effect(if can_attach() { "copy" } else { "none" }),
+                _ => {
+                    drag_depth.set_value(0);
+                    set_dragging.set(false);
+                    if can_attach() {
+                        stage_files(staging::files_of(&transfer));
+                    }
+                }
+            }
+        }) as Box<dyn FnMut(web_sys::DragEvent)>);
+        if let Some(win) = window() {
+            for name in ["dragenter", "dragover", "dragleave", "drop"] {
+                let _ = win.add_event_listener_with_callback(name, on_drag.as_ref().unchecked_ref());
+            }
+        }
+        on_drag.forget();
     }
     // The grid's content box, measured live so tiles always fit (resizes, fullscreen).
     let (grid_box, set_grid_box) = create_signal((0.0_f64, 0.0_f64));
@@ -822,6 +984,22 @@ fn App() -> impl IntoView {
     });
 
     let download_file = move |file_id: String| {
+        // Already here (viewed, or our own): save the copy in RAM, nothing is pulled again.
+        if let Some((blob, name)) = held_media.with_untracked(|held| held.blob(&file_id)) {
+            save_blob(&blob, &name);
+            return;
+        }
+        // Media that can be viewed here loads into the chat first, then saves.
+        let viewable = messages.with_untracked(|msgs| {
+            msgs.iter()
+                .find(|m| m.id == file_id)
+                .and_then(|m| m.file.as_ref())
+                .is_some_and(|f| failed_media.with_untracked(|failed| preview_of(f, failed)).is_some_and(|p| p.playable))
+        });
+        if viewable {
+            with_session(&|s| s.load_media(&file_id, true));
+            return;
+        }
         let large = messages.with(|msgs| {
             msgs.iter()
                 .find(|m| m.id == file_id)
@@ -867,6 +1045,7 @@ fn App() -> impl IntoView {
         FileAction::Save => save_file(file_id),
         FileAction::Cancel => with_session(&|s| s.cancel_download(&file_id)),
         FileAction::Withdraw => with_session(&|s| s.withdraw_file(&file_id)),
+        FileAction::Load => with_session(&|s| s.load_media(&file_id, false)),
     };
     let has_messages = create_memo(move |_| messages.with(|m| !m.is_empty()));
     let start_edit = move |id: String, text: String| {
@@ -1011,6 +1190,9 @@ fn App() -> impl IntoView {
     let has_password = move || session_ref.with_value(|s| s.as_ref().is_some_and(|s| s.has_password()));
 
     let is_connected = move || status.get() == ConnectionStatus::Connected;
+    // Messages and files can be posted from the moment we're in the room, even alone: they
+    // wait in the chat log, and whoever joins gets them with the history.
+    let can_post = move || status.with(ConnectionStatus::in_room);
     let display_name = move |pubkey: &str| {
         names.with(|n| n.get(pubkey).cloned()).unwrap_or_else(|| pubkey_tag(pubkey))
     };
@@ -1324,13 +1506,24 @@ fn App() -> impl IntoView {
                 let live = create_memo(move |_| {
                     messages.with(|msgs| msgs.iter().find(|m| m.id == file_id).and_then(|m| m.file.as_ref().map(|f| f.status.clone())))
                 });
-                file_card(lang, file, live, msg.text.clone(), msg.author.clone(), members, file_action).into_view()
+                match failed_media.with_untracked(|failed| preview_of(&file, failed)) {
+                    Some(preview) => {
+                        let actions = file_actions(lang, &file, live, msg.author.clone(), members, file_action, Some((held_media, preview.kind)));
+                        media_card(media_ctx, preview, file, live, msg.text.clone(), msg.author.clone(), msg.is_self, actions, file_action)
+                            .into_view()
+                    }
+                    None => file_card(lang, file, live, msg.text.clone(), msg.author.clone(), members, file_action).into_view(),
+                }
             }
             None => view! { <div class="message-bubble" dir="auto">{msg.text.clone()}</div> }.into_view(),
         };
         let id = msg.id.clone();
         let me = members.with_untracked(|m| m.iter().find(|x| x.link == LinkUi::Me).map(|x| x.pubkey.clone()));
-        let reactions = msg.reactions.clone();
+        // Read live: a reaction changes this, not the row (a video playing in it keeps playing).
+        let reactions = {
+            let id = id.clone();
+            create_memo(move |_| messages.with(|msgs| msgs.iter().find(|m| m.id == id).map(|m| m.reactions.clone()).unwrap_or_default()))
+        };
         let (id_pick, id_edit, id_delete, id_picker) = (id.clone(), id.clone(), id.clone(), id.clone());
         let text_for_edit = msg.text.clone();
         let is_self = msg.is_self;
@@ -1366,7 +1559,10 @@ fn App() -> impl IntoView {
                         </div>
                     }
                 })}
-                {(!reactions.is_empty()).then(|| view! {
+                {move || {
+                    let reactions = reactions.get();
+                    let (id, me) = (id.clone(), me.clone());
+                    (!reactions.is_empty()).then(move || view! {
                     <div class="reactions">
                         {reactions.into_iter().map(|(emoji, who)| {
                             let mine = me.as_ref().is_some_and(|me| who.contains(me));
@@ -1381,7 +1577,8 @@ fn App() -> impl IntoView {
                             }
                         }).collect_view()}
                     </div>
-                })}
+                    })
+                }}
                 <div class="message-meta">
                     <span class="message-author" dir="auto">{move || display_name(&author)}</span>
                     <span class="message-tag">{format!(" · {}", pubkey_tag(&msg.author))}</span>
@@ -1746,38 +1943,34 @@ fn App() -> impl IntoView {
                 <div class="editing-hint">{move || t(lang.get(), "editing_hint")}</div>
             })}
 
-            {move || staged_file.get().map(|file| view! {
-                <div class="attachment-chip">
-                    <span class="attachment-icon">"📎"</span>
-                    <span class="attachment-name">{file.name()}</span>
-                    <span class="attachment-size">{format!("({})", format_file_size(file.size() as u64))}</span>
-                    <button
-                        class="btn-remove-attachment"
-                        on:click=move |_| set_staged_file.set(None)
-                        title=move || t(lang.get(), "file_remove_title")
-                    >
-                        "✕"
-                    </button>
+            {move || staged.with(|s| !s.is_empty()).then(|| view! {
+                <div class="attachment-chips">
+                    <For
+                        each=move || staged.get()
+                        key=|item| (item.key, item.preparing, item.gps, item.url.clone())
+                        children=move |item| staged_chip(lang, staged, item)
+                    />
                 </div>
             })}
 
             <input
                 type="file"
                 id="file-input-hidden"
+                multiple=true
                 style="display: none;"
                 on:change=move |ev| {
                     let target: HtmlInputElement = event_target(&ev);
-                    if let Some(file) = target.files().and_then(|files| files.get(0)) {
-                        set_staged_file.set(Some(file));
-                    }
+                    let files = target.files().map(|list| (0..list.length()).filter_map(|i| list.get(i)).collect()).unwrap_or_default();
+                    stage_files(files);
                     target.set_value("");
                 }
             />
 
-            <footer class="input-bar">
+            <footer class="input-bar" class:recording=move || rec_mode.get().capturing() class:reviewing=move || rec_mode.get() == RecMode::Review>
                 <button
                     class="btn btn-secondary attach-btn"
-                    disabled=move || !is_connected()
+                    class:is-hidden=move || rec_mode.get() != RecMode::Idle
+                    disabled=move || !can_post()
                     on:click=move |_| {
                         if let Some(input) = window()
                             .and_then(|w| w.document())
@@ -1791,14 +1984,37 @@ fn App() -> impl IntoView {
                 >
                     "📎"
                 </button>
+                {move || match rec_mode.get() {
+                    RecMode::Idle => ().into_view(),
+                    RecMode::Review => match recorder.phase.get_untracked() {
+                        Phase::Review(take) => review_panel(lang, take, recorder, can_post, send_take).into_view(),
+                        _ => ().into_view(),
+                    },
+                    mode => recording_panel(lang, recorder, mode).into_view(),
+                }}
                 <input
                     type="text"
                     autocomplete="off"
+                    class:is-hidden=move || rec_mode.get() != RecMode::Idle
                     spellcheck=move || if spellcheck_on.get() { "true" } else { "false" }
+                    on:paste=move |ev| {
+                        // Pasted files (a screenshot, files copied in a file manager) are staged;
+                        // pasted text goes into the box as usual.
+                        let ev: web_sys::ClipboardEvent = ev.unchecked_into();
+                        let Some(transfer) = ev.clipboard_data() else {
+                            return;
+                        };
+                        let files = staging::files_of(&transfer);
+                        if files.is_empty() || !can_post() {
+                            return;
+                        }
+                        ev.prevent_default();
+                        stage_files(files.into_iter().map(staging::named_for_paste).collect());
+                    }
                     placeholder=move || {
                         if !is_connected() {
                             t(lang.get(), "placeholder_waiting")
-                        } else if staged_file.with(|f| f.is_some()) {
+                        } else if staged.with(|s| !s.is_empty()) {
                             t(lang.get(), "placeholder_caption")
                         } else {
                             t(lang.get(), "placeholder_connected")
@@ -1823,10 +2039,27 @@ fn App() -> impl IntoView {
                 />
                 <button
                     class="btn btn-primary send-btn"
-                    disabled=move || !is_connected() || (input_text.get().trim().is_empty() && staged_file.with(|f| f.is_none()))
+                    class:is-hidden=move || show_mic() || rec_mode.get() != RecMode::Idle
+                    disabled=move || !can_post() || staged.with(|s| s.iter().any(|f| f.preparing))
+                        || (input_text.get().trim().is_empty() && staged.with(|s| s.is_empty()))
                     on:click=move |_| send_message()
                 >
                     {move || if editing.get().is_some() { t(lang.get(), "btn_save") } else { t(lang.get(), "btn_send") }}
+                </button>
+                // One element from press to release: holding records, and the pointer stays
+                // captured by it while the bar around it changes.
+                <button
+                    class="btn btn-primary record-btn"
+                    class:is-hidden=move || !(show_mic() || rec_mode.get().capturing())
+                    class:held=move || rec_mode.get() == RecMode::Held
+                    title=move || t(lang.get(), if rec_mode.get() == RecMode::HandsFree { "rec_stop" } else { "title_record" })
+                    on:pointerdown=move |ev: web_sys::PointerEvent| mic_press.down(ev)
+                    on:pointermove=move |ev: web_sys::PointerEvent| mic_press.moved(ev)
+                    on:pointerup=move |_| mic_press.up(false)
+                    on:pointercancel=move |_| mic_press.up(true)
+                    on:click=move |_| mic_press.click()
+                >
+                    {move || if rec_mode.get() == RecMode::HandsFree { "⏹" } else { "🎤" }}
                 </button>
             </footer>
         }
@@ -2276,6 +2509,15 @@ fn App() -> impl IntoView {
             // Quick video quality menu (▾ next to the camera and screen buttons)
             {move || quality_menu.get().map(|menu| quality_menu_view(lang, menu, video_presets, pick_quality))}
 
+            // Images and videos opened from the chat, over everything.
+            {media_viewer(media_ctx, download_file)}
+            // Files dragged over the room.
+            {move || dragging.get().then(|| view! {
+                <div class="drop-overlay">
+                    <div class="drop-overlay-box">{move || format!("📎 {}", t(lang.get(), "drop_to_attach"))}</div>
+                </div>
+            })}
+
             <div id="overlay-layer" class="overlay-layer" node_ref=overlay_ref>
                 <div id="control-prompts" class="control-prompts">
                     <For
@@ -2301,6 +2543,8 @@ enum FileAction {
     Save,
     Cancel,
     Withdraw,
+    /// Pull an image, video or voice message into the chat to view it.
+    Load,
 }
 
 /// A shared file card. Rendered again whenever its status changes (it is part of the key).
@@ -2315,7 +2559,39 @@ fn file_card(
     members: ReadSignal<Vec<MemberUi>>,
     on_action: impl Fn(FileAction, String) + Copy + 'static,
 ) -> impl IntoView {
+    let actions = file_actions(lang, &file, live, author, members, on_action, None);
+    view! {
+        <div class="file-card" data-file-id=file.file_id.clone()>
+            <div class="file-card-header">
+                <span class="file-icon">"📦"</span>
+                <div class="file-info">
+                    <span class="file-name" dir="auto">{file.name}</span>
+                    <span class="file-size">{format_file_size(file.size)}</span>
+                </div>
+            </div>
+            {(!caption.is_empty()).then(|| view! { <div class="file-caption" dir="auto">{caption}</div> })}
+            <div class="file-card-actions">{actions}</div>
+        </div>
+    }
+}
+
+/// A file card's status line and buttons, for its status when the card was built. `media`:
+/// the card shows the file itself (media cards), so Download saves the copy held here, and
+/// images and videos show their progress over the picture instead.
+fn file_actions(
+    lang: ReadSignal<Language>,
+    file: &FileOfferInfo,
+    live: Memo<Option<FileTransferStatus>>,
+    author: String,
+    members: ReadSignal<Vec<MemberUi>>,
+    on_action: impl Fn(FileAction, String) + Copy + 'static,
+    media: Option<(RwSignal<HeldMedia>, MediaKind)>,
+) -> View {
     let id = file.file_id.clone();
+    let held = {
+        let id = id.clone();
+        create_memo(move |_| media.is_some_and(|(store, _)| store.with(|h| h.url(&id).is_some())))
+    };
     let button = move |action: FileAction, class: &'static str, key: &'static str| {
         let id = id.clone();
         view! {
@@ -2336,7 +2612,7 @@ fn file_card(
         })
     };
     let reachable = move || members.with(|m| m.iter().any(|x| x.pubkey == author && x.link == LinkUi::Direct));
-    let actions = match file.status {
+    match file.status.clone() {
         FileTransferStatus::Sharing { .. } => {
             // Progress updates arrive several times a second: only these parts follow them,
             // so the Withdraw button is never rebuilt under the pointer.
@@ -2387,9 +2663,13 @@ fn file_card(
                 })
             };
 
+            // A voice message exists only here: it can be saved.
+            let save = matches!(media, Some((_, MediaKind::Voice)))
+                .then(|| button(FileAction::Download, "btn btn-sm btn-secondary file-save-btn voice-save-btn", "file_save"));
             view! {
                 <div class="file-status-row">
                     <span class="file-status-text">{move || t(lang.get(), "file_shared_room")}</span>
+                    {save}
                     {button(FileAction::Withdraw, "btn btn-sm btn-danger file-withdraw-btn", "file_withdraw")}
                 </div>
                 <div class="file-share-counts">
@@ -2454,6 +2734,17 @@ fn file_card(
             <div class="file-summary">{move || download_summary(lang.get(), summary)}</div>
         }
         .into_view(),
+        // Viewed media: Download saves the copy held here (or loads it again, if released).
+        FileTransferStatus::Completed { summary, withdrawn } if media.is_some() => {
+            let download = button(FileAction::Download, "btn btn-sm btn-secondary file-download-btn media-download-btn", "file_download");
+            view! {
+                <div class="file-status-row">
+                    <span class="file-summary">{move || download_summary(lang.get(), summary)}</span>
+                    {move || (held.get() || (!withdrawn && reachable())).then(|| download.clone())}
+                </div>
+            }
+            .into_view()
+        }
         // The offer still stands (unless withdrawn): the file can be downloaded again.
         FileTransferStatus::Completed { summary, withdrawn } => {
             let again = button(FileAction::Download, "btn btn-sm btn-secondary file-download-again-btn", "file_download_again");
@@ -2478,21 +2769,18 @@ fn file_card(
             }
             .into_view()
         }
-        FileTransferStatus::Withdrawn => status_line("file_withdrawn", "cancelled"),
-        FileTransferStatus::SenderLeft => status_line("file_sender_left", "cancelled"),
-    };
-    view! {
-        <div class="file-card" data-file-id=file.file_id.clone()>
-            <div class="file-card-header">
-                <span class="file-icon">"📦"</span>
-                <div class="file-info">
-                    <span class="file-name" dir="auto">{file.name}</span>
-                    <span class="file-size">{format_file_size(file.size)}</span>
+        // Viewed before the sender withdrew or left: it can still be saved from here.
+        status @ (FileTransferStatus::Withdrawn | FileTransferStatus::SenderLeft) => {
+            let key = if status == FileTransferStatus::Withdrawn { "file_withdrawn" } else { "file_sender_left" };
+            let download = button(FileAction::Download, "btn btn-sm btn-secondary file-download-btn media-download-btn", "file_download");
+            view! {
+                <div class="file-status-row">
+                    {status_line(key, "cancelled")}
+                    {move || held.get().then(|| download.clone())}
                 </div>
-            </div>
-            {(!caption.is_empty()).then(|| view! { <div class="file-caption" dir="auto">{caption}</div> })}
-            <div class="file-card-actions">{actions}</div>
-        </div>
+            }
+            .into_view()
+        }
     }
 }
 
@@ -3296,4 +3584,29 @@ fn main() {
     console_error_panic_hook::set_once();
     let _ = console_log::init_with_level(log::Level::Debug);
     mount_to_body(|| view! { <App/> });
+}
+
+/// Test-only probes for media (`window.__dchatMedia`): the RAM budget, the recording cap,
+/// and which files are held. Never in release builds.
+#[cfg(feature = "e2e-hooks")]
+fn install_media_hooks(held: RwSignal<HeldMedia>, recorder: Recorder) {
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsValue;
+    let Some(win) = window() else {
+        return;
+    };
+    let hooks = js_sys::Object::new();
+    let budget = Closure::wrap(Box::new(move |bytes: f64| held.update(|h| h.set_budget(bytes as u64))) as Box<dyn Fn(f64)>);
+    let _ = js_sys::Reflect::set(&hooks, &"mediaBudget".into(), budget.as_ref());
+    budget.forget();
+    let ids = Closure::wrap(Box::new(move || {
+        let ids: js_sys::Array = held.with_untracked(|h| h.ids()).into_iter().map(JsValue::from).collect();
+        JsValue::from(ids)
+    }) as Box<dyn Fn() -> JsValue>);
+    let _ = js_sys::Reflect::set(&hooks, &"heldMedia".into(), ids.as_ref());
+    ids.forget();
+    let cap = Closure::wrap(Box::new(move |ms: f64| recorder.set_cap_ms(ms)) as Box<dyn Fn(f64)>);
+    let _ = js_sys::Reflect::set(&hooks, &"recordCapMs".into(), cap.as_ref());
+    cap.forget();
+    let _ = js_sys::Reflect::set(&win, &"__dchatMedia".into(), &hooks);
 }

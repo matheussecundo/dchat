@@ -48,7 +48,13 @@ impl RoomSession {
                 Effect::Edited(target) => self.refresh_text(&target),
                 Effect::Reacted(target) => {
                     let tally = self.inner.log.borrow().tally(&target);
-                    self.update_message(&target, |m| m.reactions = tally);
+                    // The row reads its reactions live, without being rebuilt: a video or
+                    // voice message playing in it keeps playing.
+                    self.inner.signals.messages.update(|msgs| {
+                        if let Some(m) = msgs.iter_mut().find(|m| m.id == target) {
+                            m.reactions = tally;
+                        }
+                    });
                 }
                 // Live withdrawals go through `on_file_message`, which also stops a download.
                 Effect::Withdrawn(target) if mode == Mode::History => self.set_file_status(&target, FileTransferStatus::Withdrawn),
