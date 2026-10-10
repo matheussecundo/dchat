@@ -20,7 +20,7 @@ pub async fn handle(socket: WebSocket, hub: Arc<Hub>, cfg: Arc<RelayConfig>, ip:
 
     let Some(id) = hub.register(&ip, tx.clone(), cfg.max_connections_per_ip) else {
         let notice = json!(["NOTICE", "rate-limited: too many connections from your address"]).to_string();
-        let _ = sink.send(Message::Text(notice)).await;
+        let _ = sink.send(Message::Text(notice.into())).await;
         let _ = sink.close().await;
         return;
     };
@@ -32,14 +32,14 @@ pub async fn handle(socket: WebSocket, hub: Arc<Hub>, cfg: Arc<RelayConfig>, ip:
             tokio::select! {
                 msg = rx.recv() => match msg {
                     Some(text) => {
-                        if sink.send(Message::Text(text)).await.is_err() {
+                        if sink.send(Message::Text(text.into())).await.is_err() {
                             break;
                         }
                     }
                     None => break,
                 },
                 _ = ping.tick() => {
-                    if sink.send(Message::Ping(Vec::new())).await.is_err() {
+                    if sink.send(Message::Ping(Default::default())).await.is_err() {
                         break;
                     }
                 }

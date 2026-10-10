@@ -8,7 +8,8 @@ use crate::config::{AgentConfig, TokenBucket};
 use crate::engine::{EngineCmd, EngineEvent, EngineHandle};
 use crate::inject::mock::Recording;
 use crate::pairing::{random_token, PairOutcome, Pairing, RESUME_GRACE};
-use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::rejection::WebSocketUpgradeRejection;
+use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -16,7 +17,6 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use protocol::{AgentCaps, AgentOs, AgentToTab, RefuseReason, TabToAgent, AGENT_PROTOCOL_VERSION};
-use std::borrow::Cow;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -174,12 +174,16 @@ impl Drop for UnauthSlot {
     }
 }
 
-async fn entry(State(state): State<Arc<AgentState>>, headers: HeaderMap, ws: Option<WebSocketUpgrade>) -> Response {
+async fn entry(
+    State(state): State<Arc<AgentState>>,
+    headers: HeaderMap,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Response {
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
     if !state.cfg.host_allowed(host) {
         return (StatusCode::FORBIDDEN, "host not allowed").into_response();
     }
-    let Some(ws) = ws else {
+    let Ok(ws) = ws else {
         return "dchat-host: connect from dchat's \"Remote control\" dialog\n".into_response();
     };
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
@@ -209,19 +213,19 @@ async fn connection(socket: WebSocket, state: Arc<AgentState>, slot: UnauthSlot)
             tokio::select! {
                 out = rx.recv() => match out {
                     Some(Outgoing::Text(t)) => {
-                        if sink.send(Message::Text(t)).await.is_err() {
+                        if sink.send(Message::Text(t.into())).await.is_err() {
                             break;
                         }
                     }
                     Some(Outgoing::Close(code, reason)) => {
-                        let frame = CloseFrame { code, reason: Cow::Borrowed(reason) };
+                        let frame = CloseFrame { code, reason: Utf8Bytes::from_static(reason) };
                         let _ = sink.send(Message::Close(Some(frame))).await;
                         break;
                     }
                     None => break,
                 },
                 _ = ping.tick() => {
-                    if sink.send(Message::Ping(Vec::new())).await.is_err() {
+                    if sink.send(Message::Ping(Default::default())).await.is_err() {
                         break;
                     }
                 }
@@ -284,7 +288,7 @@ async fn connection(socket: WebSocket, state: Arc<AgentState>, slot: UnauthSlot)
 async fn next_text(stream: &mut futures_util::stream::SplitStream<WebSocket>) -> Option<String> {
     loop {
         match stream.next().await? {
-            Ok(Message::Text(t)) => return Some(t),
+            Ok(Message::Text(t)) => return Some(t.as_str().to_owned()),
             Ok(Message::Ping(_) | Message::Pong(_)) => continue,
             _ => return None,
         }

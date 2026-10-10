@@ -29,7 +29,7 @@ async fn connect(addr: SocketAddr) -> Ws {
 }
 
 async fn send(ws: &mut Ws, value: Value) {
-    ws.send(Message::Text(value.to_string())).await.unwrap();
+    ws.send(Message::Text(value.to_string().into())).await.unwrap();
 }
 
 /// Next JSON message, skipping pings; panics after 3 s.
@@ -218,7 +218,7 @@ async fn serves_the_nip11_information_document() {
 async fn rejects_oversized_messages() {
     let addr = start(RelayConfig { max_message_bytes: 1024, ..RelayConfig::default() }).await;
     let mut ws = connect(addr).await;
-    let _ = ws.send(Message::Text("x".repeat(4096))).await;
+    let _ = ws.send(Message::Text("x".repeat(4096).into())).await;
     // The relay closes the connection instead of processing it.
     let ended = tokio::time::timeout(Duration::from_secs(3), async {
         loop {

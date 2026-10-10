@@ -10,6 +10,8 @@ pub mod limits;
 
 pub use limits::RelayConfig;
 
+use axum::extract::rejection::ExtensionRejection;
+use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{ConnectInfo, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -39,17 +41,17 @@ pub fn router(cfg: RelayConfig) -> Router {
 async fn entry(
     State(state): State<RelayState>,
     headers: HeaderMap,
-    connect: Option<ConnectInfo<SocketAddr>>,
-    ws: Option<WebSocketUpgrade>,
+    connect: Result<ConnectInfo<SocketAddr>, ExtensionRejection>,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
-    let Some(ws) = ws else {
+    let Ok(ws) = ws else {
         return info_document(&state.cfg, &headers);
     };
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
     if !state.cfg.origin_allowed(origin) {
         return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
     }
-    let ip = client_ip(&headers, connect.map(|c| c.0), state.cfg.trust_proxy);
+    let ip = client_ip(&headers, connect.ok().map(|c| c.0), state.cfg.trust_proxy);
     let (hub, cfg) = (state.hub.clone(), state.cfg.clone());
     ws.max_message_size(state.cfg.max_message_bytes)
         .on_upgrade(move |socket| connection::handle(socket, hub, cfg, ip))

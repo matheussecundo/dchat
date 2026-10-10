@@ -63,7 +63,7 @@ async fn connect(addr: SocketAddr) -> Ws {
 }
 
 async fn send(ws: &mut Ws, msg: &TabToAgent) {
-    ws.send(Message::Text(serde_json::to_string(msg).unwrap())).await.unwrap();
+    ws.send(Message::Text(serde_json::to_string(msg).unwrap().into())).await.unwrap();
 }
 
 /// Next message from the app; `None` once the socket is closed. Panics after 3 s.
@@ -267,7 +267,7 @@ async fn bye_ends_the_session_and_oversized_frames_close_it() {
     assert_eq!(recv(&mut ws).await, None);
     let mut next = connect(h.addr).await;
     pair(&mut next, "TEST0000").await;
-    let _ = next.send(Message::Text("x".repeat(64 * 1024))).await;
+    let _ = next.send(Message::Text("x".repeat(64 * 1024).into())).await;
     let ended = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             match next.next().await {

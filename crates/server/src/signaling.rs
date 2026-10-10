@@ -31,7 +31,7 @@ pub async fn handle_websocket(socket: WebSocket, state: AppState) {
                     continue;
                 }
             };
-            if ws_sender.send(Message::Text(json)).await.is_err() {
+            if ws_sender.send(Message::Text(json.into())).await.is_err() {
                 break;
             }
         }
