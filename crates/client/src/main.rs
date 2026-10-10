@@ -997,6 +997,11 @@ fn App() -> impl IntoView {
             with_session(&|s| s.kick(&pubkey));
         }
     };
+    let make_admin_member = move |pubkey: String, name: String| {
+        if confirm(t_replace_1(lang.get_untracked(), "confirm_make_admin", "{name}", &name)) {
+            with_session(&|s| s.make_admin(&pubkey));
+        }
+    };
     let rotate_link = move |_| {
         if confirm(t(lang.get_untracked(), "confirm_rotate").to_string()) {
             with_session(&|s| s.rotate_link());
@@ -1298,6 +1303,7 @@ fn App() -> impl IntoView {
                     {move || match &notice {
                         Notice::Joined(name) => t_replace_1(lang.get(), "sys_joined", "{name}", name),
                         Notice::Left(name) => t_replace_1(lang.get(), "sys_left", "{name}", name),
+                        Notice::NowAdmin(name) => t_replace_1(lang.get(), "sys_now_admin", "{name}", name),
                         Notice::HistoryShown => t(lang.get(), "sys_history_shown").to_string(),
                         Notice::Rekeyed => t(lang.get(), "sys_rekeyed").to_string(),
                     }}
@@ -1389,7 +1395,6 @@ fn App() -> impl IntoView {
     };
 
     let room_view = move || {
-        let is_admin_link = admin_url().is_some();
         view! {
             <div class="connection-bar">
                 <div class="status-indicator">
@@ -1431,7 +1436,9 @@ fn App() -> impl IntoView {
                     <button class="btn btn-secondary copy-invite-btn" on:click=copy_invite_link>
                         {move || if copied.get() { t(lang.get(), "btn_copied") } else { t(lang.get(), "btn_copy_link") }}
                     </button>
-                    {is_admin_link.then(|| view! {
+                    // Any admin whose link holds the admin secret: the creator, or a member who took
+                    // over or was made admin (their link gained it then).
+                    {move || (am_admin.get() && admin_url().is_some()).then(|| view! {
                         <button class="btn btn-secondary copy-admin-btn" on:click=copy_admin_link>
                             {move || t(lang.get(), "btn_copy_admin")}
                         </button>
@@ -1718,7 +1725,7 @@ fn App() -> impl IntoView {
                         <For
                             each=move || members.get()
                             key=|m| (m.pubkey.clone(), m.name.clone(), m.is_admin, m.link.clone())
-                            children=move |m| member_row(lang, m, am_admin, kick_member, dm_unread, open_dm, control, move |pk: String| with_session(&|s| s.revoke_control(&pk)))
+                            children=move |m| member_row(lang, m, am_admin, kick_member, make_admin_member, dm_unread, open_dm, control, move |pk: String| with_session(&|s| s.revoke_control(&pk)))
                         />
                     </ul>
                 </aside>
@@ -3179,6 +3186,7 @@ fn member_row(
     member: MemberUi,
     am_admin: Memo<bool>,
     on_kick: impl Fn(String, String) + Copy + 'static,
+    on_make_admin: impl Fn(String, String) + Copy + 'static,
     dm_unread: ReadSignal<HashMap<String, usize>>,
     on_dm: impl Fn(String) + Copy + 'static,
     control: ReadSignal<ControlUi>,
@@ -3262,7 +3270,15 @@ fn member_row(
             })}
             {move || (kickable && am_admin.get()).then(|| {
                 let (pubkey, name) = kick_target.clone();
+                let (admin_pubkey, admin_name) = kick_target.clone();
                 view! {
+                    <button
+                        class="btn btn-sm btn-secondary make-admin-btn"
+                        title=move || t(lang.get(), "title_make_admin")
+                        on:click=move |_| on_make_admin(admin_pubkey.clone(), admin_name.clone())
+                    >
+                        {move || t(lang.get(), "btn_make_admin")}
+                    </button>
                     <button
                         class="btn btn-sm btn-danger kick-btn"
                         title=move || t(lang.get(), "title_kick")

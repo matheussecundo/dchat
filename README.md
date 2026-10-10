@@ -99,16 +99,20 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 13. **Phase 13: Always-On History (Completed)**
    - Whoever joins sees the room's conversation as members see it: messages with their latest edits, deletions, reactions, file cards and the names of members who left. Members sync what they hold on every new connection, so someone whose connection dropped for a while catches up too. Kept in RAM only (up to 32 MB per member), carried through a kick or a new link, gone when the last member leaves.
 
+14. **Phase 14: Admin Succession (Completed)**
+   - When the room's last admin leaves, the member who has been there longest becomes admin after 15 seconds, and admins can make another member an admin with **Make admin**.
+
 ---
 
 ## Group Rooms
 
 1. **Create**: open the app, pick a name for this session and a member limit, then tap **✨ Create Room**. The room ID, the room key and an admin key are generated in your browser and placed in the URL fragment.
-2. **Invite**: tap **🔗 Copy Link** or **📱 Scan QR**. Both share the *invite* link. Only the creator also sees **🔑 Copy Admin Link**, which adds the admin secret (`admsk`); share it only with co-moderators.
+2. **Invite**: tap **🔗 Copy Link** or **📱 Scan QR**. Both share the *invite* link. Only admins also see **🔑 Copy Admin Link**, which adds the admin secret (`admsk`); share it only with co-moderators.
 3. **Join**: whoever opens the invite picks a name and taps **🚪 Enter Room**. Names live in memory only and are shown with a 4-character key tag (`Ana · 3f2a`), so two people with the same name stay distinct. The tag tells people apart; it is not proof of identity.
 4. **Member list**: each member shows how you reach them: `direct`, `via <name>` (no direct link, text is relayed through that member), or `connecting…`. The admin carries an `ADMIN` badge.
-5. **Moderation (admin link only)**: next to each member, **Kick** moves everyone else to a new room ID and key; the kicked member sees *You were removed from the room*. **🔄 New Link** does the same without removing anyone, so the old invite stops working. The conversation is kept (whoever joins the new room gets it too), you stay the author of your earlier messages, files you shared stay downloadable, and anyone in voice is reconnected automatically. Share the new invite (**🔗 Copy Link**) with anyone who was offline during the move: they can't follow on their own. Kicking needs an admin online, and admins can't kick each other.
-6. **Member limit**: when a room is full, the member who joined last sees *Room is full*. Everyone applies the same rule (join time, then key), so all members agree on who stays. An admin session always gets a seat and bumps the latest non-admin.
+5. **Moderation (admin link only)**: next to each member, **Kick** moves everyone else to a new room ID and key; the kicked member sees *You were removed from the room*. **🔄 New Link** does the same without removing anyone, so the old invite stops working. The conversation is kept (whoever joins the new room gets it too), you stay the author of your earlier messages, files you shared stay downloadable, and anyone in voice is reconnected automatically. Share the new invite (**🔗 Copy Link**) with anyone who was offline during the move: they can't follow on their own. Kicking needs an admin online, and admins can't kick each other. **Make admin** (next to Kick) gives a member the admin secret at once: their link gains it, so they become an admin like the creator. It can't be undone, since the secret can't be taken back and admins can't kick each other, so the app asks first.
+6. **When the last admin leaves**: while an admin is in the room, the member who has been there longest (as the admin's tab saw it) quietly holds a copy of the admin secret, in memory only and unseen by others. If no admin is in the room for 15 seconds while someone else is, that member takes over: the secret goes into their link, they get the `ADMIN` badge, and everyone sees *"Name is now an admin"*. They then pick the next one in line the same way. An admin who reloads is back within those 15 seconds, so nothing changes. If the admin and that member drop out within the same 15 seconds, the room has no admin until someone opens an admin link again. Kicking the member who holds the copy is allowed; they still know the admin secret, but get no key to the new room.
+7. **Member limit**: when a room is full, the member who joined last sees *Room is full*. Everyone applies the same rule (join time, then key), so all members agree on who stays. An admin session always gets a seat and bumps the latest non-admin.
 
 Every room message is signed with its author's session key, so a member relaying it cannot alter it or forge messages from someone else.
 
@@ -201,7 +205,7 @@ Everything after `#` stays in the browser and is never sent to any server.
 | `room` | `room=jr9m4r26` | Room ID (hashed before it reaches relays) |
 | `key` | `key=Zm9v…` | 256-bit room key (base64url) |
 | `adm` | `adm=9f3c…` | Admin public key; sessions proving it get the `ADMIN` badge and a guaranteed seat |
-| `admsk` | `admsk=…` | Admin secret key: **admin link only**, never in the invite or QR code |
+| `admsk` | `admsk=…` | Admin secret key: **admin links only** (the creator's, or a member who took over or was made admin), never in the invite or QR code |
 | `max` | `max=10` | Member limit; default 25, `0` = unlimited (no hard ceiling; large rooms load every member) |
 | `maxa` | `maxa=4` | Voice limit: members in the lounge at once; default 8, `0` = unlimited |
 | `maxv` | `maxv=2` | Video limit: cameras/screens on at once; default 6, `0` = unlimited |
@@ -388,7 +392,7 @@ cargo test --workspace
 ```
 
 ### 2. Playwright Multi-Browser End-to-End (E2E) Tests
-Simulates several isolated browser members: WebRTC mesh handshakes, signed message fan-out, member caps and the admin seat, text relayed between members without a direct link, history synced to whoever joins or reconnects, empty `localStorage`/`sessionStorage`, and memory wipe on reload.
+Simulates several isolated browser members: WebRTC mesh handshakes, signed message fan-out, member caps and the admin seat, text relayed between members without a direct link, history synced to whoever joins or reconnects, admin succession and Make admin, empty `localStorage`/`sessionStorage`, and memory wipe on reload.
 
 The E2E suite runs against a separate bundle built with the `e2e-hooks` feature (test-only `window.__dchat` probes, e.g. to simulate a pair that cannot connect). That bundle goes to `crates/client/dist-e2e/` and is never deployed; production builds contain no hooks.
 ```bash

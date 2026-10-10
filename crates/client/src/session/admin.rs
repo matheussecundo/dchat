@@ -84,7 +84,11 @@ impl RoomSession {
         let s = self.clone();
         set_timeout(
             move || {
-                let carry = SessionCarry { identity: s.inner.identity.clone(), shared_files: s.shared_files() };
+                let carry = SessionCarry {
+                    identity: s.inner.identity.clone(),
+                    shared_files: s.shared_files(),
+                    first_seen: s.inner.succession.borrow().seen.clone(),
+                };
                 s.leave();
                 let mut params = current_fragment();
                 params.set("room", &grant.room);

@@ -1439,10 +1439,15 @@ select.lobby-input {
   border-color: rgba(16, 185, 129, 0.3);
 }
 
-.kick-btn {
+.kick-btn,
+.make-admin-btn {
   margin-inline-start: auto;
   padding: 1px 8px;
   font-size: 0.7rem;
+}
+
+.make-admin-btn + .kick-btn {
+  margin-inline-start: 4px;
 }
 
 /* Room-wide file cards */

@@ -6,7 +6,7 @@ Messages, voice, video and files are end-to-end encrypted, and nothing is writte
 
 | Who | Can see | Never sees |
 |---|---|---|
-| **Other members** (anyone who gets in) | Your name, your messages (including the ones you sent before they joined, see [Room history](#room-history-always-on)), and your IP address from the direct WebRTC link. Once you allow the microphone or camera, browsers also reveal your local network address. In a room that hides IP addresses (`hideip=1`) they see only the TURN server's address. When a private message has to be relayed, the members relaying it see that you sent one and roughly how long it is. | The text of private messages between others, and whom they were sent to |
+| **Other members** (anyone who gets in) | Your name, your messages (including the ones you sent before they joined, see [Room history](#room-history-always-on)), and your IP address from the direct WebRTC link. Once you allow the microphone or camera, browsers also reveal your local network address. In a room that hides IP addresses (`hideip=1`) they see only the TURN server's address. When a private message has to be relayed, the members relaying it see that you sent one and roughly how long it is. They also see when an admin hands the admin secret to someone (for succession or **Make admin**), but not to whom. | The text of private messages between others, and whom they were sent to |
 | **Nostr relays** | Your IP address, the room's topic (a hash), a relay key that is new every session (your member identity travels inside the encryption), and when you join, stay (a presence beacon every 15 s) and leave | The room ID, the key, names, messages, and your handshakes (sealed, see below) |
 | **The STUN server** | Your IP address each time you open a connection | Anything about the room |
 | **A TURN server** (when used) | The IP addresses of members whose traffic it relays, and how much and when | Content: it only forwards encrypted packets |
@@ -36,6 +36,7 @@ Messages, voice, video and files are end-to-end encrypted, and nothing is writte
 - **Remote control only with your click.** Members can ask to control your mouse and keyboard (one person at a time) or to plug in a game controller while you share your screen, but nothing happens until you allow it. Their input reaches only your computer, sealed over your direct link; your tab and `dchat-host` both drop anything from someone you didn't allow. Everything held down is released when control ends.
 - **Video quality and stats stay on your device.** The camera and screen presets are local settings: nothing about them is sent to anyone beyond what the video itself shows. Choosing a codec asks your own browser which encoders it has (`MediaCapabilities`); members can infer from the negotiated codec whether you have, say, a hardware H.265 encoder, but WebRTC's handshake already listed your browser's codecs to them. The ⓘ stats panel reads only your own connection's statistics, never shows addresses or candidates, and stores nothing.
 - **Installing the app changes nothing.** The installed app (PWA) is the same site under the same rules: nothing is stored, and the cache holds only the app's own files and icons. A room link opened in the app, or pasted into **Join with a link**, is read on your device; only its part after `#` is used, written into the address in place and never sent. The app keeps no list of rooms. The badge on its icon is a count of unread @mentions while it is open.
+- **The admin secret moves sealed.** For succession, an admin keeps a copy of the room's admin secret with the member who has been there longest, sealed to that member's session key, like a private message and without naming them. That member holds it in memory only and uses it only once no admin has been in the room for 15 seconds. Until then nobody, that member included, is shown who holds it. By design the secret is then on two devices, and **Make admin** adds one more.
 - **No long-term identity.** Each tab makes a fresh session key; nothing ties two visits together. When an admin moves the room (kick or new link), you keep your key inside the room, so you stay the author of your earlier messages, but your relay events are signed by a new key, so relays can't tie the new room to the old one.
 - **Short-lived relay events.** Signaling uses ephemeral Nostr events (kind 20001), which compliant relays forward without storing. `dchat-relay` stores nothing and logs no IP addresses.
 
@@ -57,6 +58,7 @@ Not implemented yet. Roughly in order of value for effort within each group.
 - **Keep the key out of the address bar.** After joining, remove `key` and `admsk` from the address bar (`history.replaceState`) and keep them only in memory; Copy Link and the QR code still work. This keeps the key out of later history entries, browser sync, tab restore and screenshots, although some browsers may already have recorded the first visit. The trade-off is that a reload returns to the lobby.
 - **Rotating relay topics.** Derive the topic from the room key and the current time period, so relays can't follow a long-lived room across days and the room ID alone doesn't lead to it.
 - **Verify members out of band.** Compare a few safety words derived from both session keys to confirm a member is who you think, rather than someone with the link and the same display name, before sending private messages.
+- **Rotate the admin key on a kick.** Someone who once held the admin secret (a former heir, or a kicked one) keeps knowing it, and the key stays the same across new links. A kick could move the room to a fresh admin key, handed sealed to the remaining admins.
 
 ### What relays and the network see
 - **Show relays less.**
@@ -98,6 +100,7 @@ Not implemented yet. Roughly in order of value for effort within each group.
 - Allowing someone your mouse and keyboard gives them full use of your computer while it lasts, including approving others. Only allow people you trust.
 - Deleted and edited messages are only removed by unmodified clients.
 - Room history can't be turned off: whoever gets in reads what the room still holds.
+- Admin rights can't be taken back: a member who was made admin, or held the admin secret as heir, keeps knowing it.
 - Relays, STUN and TURN servers and the website host see IP addresses. Use a VPN to hide yours from them.
 - Browsers may still offer to save a room password in their password manager; decline if you don't want it kept.
 - Tor Browser disables WebRTC, so dchat can't run there.

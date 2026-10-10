@@ -29,7 +29,7 @@ test('3-member mesh: names, member list, fan-out messages, zero storage, reload 
   await expectDirectMesh(bo.page, everyone, 'Bo');
   await expectDirectMesh(cy.page, everyone, 'Cy');
 
-  // The creator's admin proof is visible to everyone; the copy-admin button only to the creator.
+  // The creator's admin proof is visible to everyone; the copy-admin button only to admins.
   await expect(memberRow(bo.page, 'Ana').locator('.member-badge')).toBeVisible();
   await expect(memberRow(bo.page, 'Bo').locator('.member-badge')).toHaveCount(0);
   await expect(ana.page.locator('.copy-admin-btn')).toBeVisible();
