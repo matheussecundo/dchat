@@ -1,11 +1,11 @@
 # dchat-relay container image. Build from the repository root:
 #   docker build -f crates/relay/Dockerfile -t dchat-relay .
-FROM rust:1-bookworm AS build
+FROM rust:1-trixie AS build
 WORKDIR /src
 COPY . .
 RUN cargo build --release --locked -p relay
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN useradd --system --no-create-home --shell /usr/sbin/nologin dchat
 COPY --from=build /src/target/release/dchat-relay /usr/local/bin/dchat-relay
 USER dchat
