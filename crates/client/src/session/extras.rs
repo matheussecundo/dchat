@@ -1,8 +1,9 @@
 //! Chat extras on top of signed room messages: typing indicator, reactions, editing and
-//! deleting one's own messages, private DMs (ECDH-sealed), and @mention detection.
+//! deleting one's own messages, private DMs (ECDH-sealed, waiting in RAM for a member who is
+//! away), and @mention detection.
 
 use super::RoomSession;
-use crate::state::{current_time_string, DmUi};
+use crate::state::{current_time_string, DmDelivery, DmUi};
 use leptos::*;
 use protocol::{open_json, seal_json, DmContent, RoomBody, RoomEnvelope};
 use wasm_bindgen::closure::Closure;
@@ -149,6 +150,7 @@ impl RoomSession {
             text: content.text,
             time: current_time_string(),
             notice: false,
+            delivery: DmDelivery::Sent,
         });
         self.inner.signals.dm_unread.update(|unread| *unread.entry(author.to_string()).or_default() += 1);
         true
@@ -156,13 +158,15 @@ impl RoomSession {
 
     /// Send a private message: sealed to `to` with ECDH; over our direct link when there is
     /// one (so nobody else even sees the envelope), otherwise relayed through the room,
-    /// where members see that we sent a private message but not to whom.
+    /// where members see that we sent a private message but not to whom. To a member who is
+    /// away it waits in RAM, sealed, until they are back (`flush_dm_outbox`).
     pub fn send_dm(&self, to: &str, text: &str) -> Result<(), String> {
         let text = text.trim();
         if text.is_empty() {
             return Err("Empty message".into());
         }
-        if !self.inner.present.borrow().contains(to) {
+        let away = self.inner.absences.borrow().is_away(to);
+        if !away && !self.inner.present.borrow().contains(to) {
             return Err("That member is not in the room".into());
         }
         let sealed = seal_json(&self.inner.identity, to, &DmContent { text: text.to_string() }).map_err(|e| e.to_string())?;
@@ -171,28 +175,74 @@ impl RoomSession {
             RoomEnvelope::sign(&self.inner.identity, self.adm(), js_sys::Date::now() as u64, body).map_err(|e| e.to_string())?;
         self.inner.dedup.borrow_mut().insert(&envelope.id);
         let frame = self.encode(&envelope).ok_or("Failed to encrypt")?;
-        let direct = self.link(to).filter(|l| l.is_open());
-        let sent = match direct {
-            Some(link) => link.send(&frame),
-            None => self
-                .inner
-                .links
-                .borrow()
-                .values()
-                .map(|l| l.send(&frame))
-                .fold(false, |any, ok| any || ok),
-        };
-        if !sent {
+        let delivery = if away {
+            self.inner.dm_outbox.borrow_mut().entry(to.to_string()).or_default().push((envelope.id.clone(), frame));
+            DmDelivery::Waiting
+        } else if self.send_dm_frame(to, &frame) {
+            DmDelivery::Sent
+        } else {
             return Err("No route to that member".into());
-        }
+        };
         self.push_dm(to, DmUi {
             id: envelope.id,
             from_me: true,
             text: text.to_string(),
             time: current_time_string(),
             notice: false,
+            delivery,
         });
         Ok(())
+    }
+
+    /// Send a sealed DM frame: over the direct link to `to`, else to every neighbor.
+    fn send_dm_frame(&self, to: &str, frame: &str) -> bool {
+        match self.link(to).filter(|l| l.is_open()) {
+            Some(link) => link.send(frame),
+            None => self.inner.links.borrow().values().map(|l| l.send(frame)).fold(false, |any, ok| any || ok),
+        }
+    }
+
+    /// `peer` is back: send the DMs that waited for them.
+    pub(super) fn flush_dm_outbox(&self, peer: &str) {
+        if !self.inner.present.borrow().contains(peer) {
+            return;
+        }
+        let Some(waiting) = self.inner.dm_outbox.borrow_mut().remove(peer) else {
+            return;
+        };
+        let mut sent = Vec::new();
+        let mut unsent = Vec::new();
+        for (id, frame) in waiting {
+            if self.send_dm_frame(peer, &frame) {
+                sent.push(id);
+            } else {
+                unsent.push((id, frame));
+            }
+        }
+        if !unsent.is_empty() {
+            self.inner.dm_outbox.borrow_mut().insert(peer.to_string(), unsent);
+        }
+        self.set_dm_delivery(peer, &sent, DmDelivery::Sent);
+    }
+
+    /// `peer` left (or stayed away too long): the DMs that waited for them never go out.
+    pub(super) fn drop_dm_outbox(&self, peer: &str) {
+        let Some(waiting) = self.inner.dm_outbox.borrow_mut().remove(peer) else {
+            return;
+        };
+        let ids: Vec<String> = waiting.into_iter().map(|(id, _)| id).collect();
+        self.set_dm_delivery(peer, &ids, DmDelivery::NotDelivered);
+    }
+
+    fn set_dm_delivery(&self, peer: &str, ids: &[String], delivery: DmDelivery) {
+        if ids.is_empty() {
+            return;
+        }
+        self.inner.signals.dms.update(|threads| {
+            for line in threads.get_mut(peer).into_iter().flatten().filter(|l| ids.contains(&l.id)) {
+                line.delivery = delivery;
+            }
+        });
     }
 
     fn push_dm(&self, peer: &str, dm: DmUi) {
@@ -213,6 +263,7 @@ impl RoomSession {
             text: name,
             time: current_time_string(),
             notice: true,
+            delivery: DmDelivery::Sent,
         });
     }
 }

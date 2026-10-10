@@ -10,6 +10,7 @@ pub mod messages;
 pub mod nostr;
 pub mod pacing;
 pub mod password;
+pub mod presence;
 pub mod relays;
 pub mod room;
 pub mod succession;
@@ -17,7 +18,7 @@ pub mod transfer;
 pub mod version;
 pub mod video;
 
-// `chat_log`, `media`, `pacing`, `succession`, `transfer` and `video` are used by path (`protocol::video::Hint`): names like `Hint` and
+// `chat_log`, `media`, `pacing`, `presence`, `succession`, `transfer` and `video` are used by path (`protocol::video::Hint`): names like `Hint` and
 // `Degradation` are too generic to export at the crate root.
 pub use agent::*;
 pub use control::*;

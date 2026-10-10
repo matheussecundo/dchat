@@ -43,7 +43,7 @@ use staging::{staged_chip, StagedFile};
 use state::{
     admin_url, create_room, current_fragment, format_file_size, host_download_url, fragment_relay_choice, invite_url, read_credentials,
     selectable_devices, AudioSettings, DeviceChoice, DeviceEntry, RelayMode, CAMERA_KIND, MIC_KIND, SPEAKER_KIND,
-    ChatMessageUi, ConnectionStatus, DmUi, DownloadSummary, FileOfferInfo, FileTransferStatus, LinkUi,
+    ChatMessageUi, ConnectionStatus, DmDelivery, DmUi, DownloadSummary, FileOfferInfo, FileTransferStatus, LinkUi,
     LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RekeyTarget, RoomCaps, ControlUi, ControlPromptUi, SessionCarry,
 };
 use protocol::chat_log::ChatLog;
@@ -2190,10 +2190,19 @@ fn App() -> impl IntoView {
                                 if line.notice {
                                     view! { <div class="dm-notice">{move || t_replace_1(lang.get(), "dm_peer_left", "{name}", &line.text)}</div> }.into_view()
                                 } else {
+                                    let delivery = match line.delivery {
+                                        DmDelivery::Sent => None,
+                                        DmDelivery::Waiting => Some(("waiting", "dm_waiting")),
+                                        DmDelivery::NotDelivered => Some(("not-delivered", "dm_not_delivered")),
+                                    };
                                     view! {
-                                        <div class=if line.from_me { "dm-line self" } else { "dm-line peer" }>
+                                        <div class=if line.from_me { "dm-line self" } else { "dm-line peer" }
+                                            data-delivery=delivery.map(|(kind, _)| kind)>
                                             <span class="dm-text" dir="auto">{line.text}</span>
                                             <span class="dm-time">{line.time}</span>
+                                            {delivery.map(|(kind, key)| view! {
+                                                <span class=format!("dm-delivery {kind}")>{move || t_replace_1(lang.get(), key, "{name}", &name.get())}</span>
+                                            })}
                                         </div>
                                     }.into_view()
                                 }
@@ -2611,6 +2620,14 @@ fn file_actions(
                 .unwrap_or_else(|| pubkey_tag(pubkey))
         })
     };
+    let author_away = {
+        let author = author.clone();
+        move || members.with(|m| m.iter().any(|x| x.pubkey == author && x.link == LinkUi::Away))
+    };
+    let author_name = {
+        let author = author.clone();
+        move || display_name(&author)
+    };
     let reachable = move || members.with(|m| m.iter().any(|x| x.pubkey == author && x.link == LinkUi::Direct));
     match file.status.clone() {
         FileTransferStatus::Sharing { .. } => {
@@ -2684,13 +2701,39 @@ fn file_actions(
         }
         FileTransferStatus::Offered => {
             let download = button(FileAction::Download, "btn btn-sm btn-primary file-download-btn", "file_download");
+            let author_name = author_name.clone();
             view! {
                 <div class="file-status-row">
                     {move || if reachable() {
                         view! { {download.clone()} }.into_view()
+                    } else if author_away() {
+                        let author_name = author_name.clone();
+                        view! {
+                            <span class="file-status-text file-sender-away" dir="auto">
+                                {move || t_replace_1(lang.get(), "file_sender_away", "{name}", &author_name())}
+                            </span>
+                        }
+                        .into_view()
                     } else {
                         view! { <span class="file-status-text cancelled file-unreachable">{move || t(lang.get(), "file_unreachable")}</span> }.into_view()
                     }}
+                </div>
+            }
+            .into_view()
+        }
+        FileTransferStatus::Paused { progress } => {
+            let author_name = author_name.clone();
+            view! {
+                <div class="file-progress-container file-paused">
+                    <div class="file-progress-bar">
+                        <div class="file-progress-fill" style=format!("width: {progress}%;")></div>
+                    </div>
+                    <div class="file-progress-meta">
+                        <span class="file-progress-label file-paused-label" dir="auto">
+                            {move || format!("{}: {progress}%", t_replace_1(lang.get(), "file_paused", "{name}", &author_name()))}
+                        </span>
+                        {button(FileAction::Cancel, "btn btn-sm btn-danger file-cancel-btn", "btn_cancel")}
+                    </div>
                 </div>
             }
             .into_view()
@@ -3491,6 +3534,8 @@ fn member_row(
     };
     let revoke_pk = member.pubkey.clone();
     let kickable = member.link != LinkUi::Me && !member.is_admin;
+    // A member who is away can be kicked, but not made an admin: the handover can't reach them.
+    let promotable = kickable && member.link != LinkUi::Away;
     let dm_target = (member.link != LinkUi::Me).then(|| member.pubkey.clone());
     let kick_target = (member.pubkey.clone(), member.name.clone());
     let (kind, dot) = match member.link {
@@ -3498,6 +3543,7 @@ fn member_row(
         LinkUi::Direct => ("direct", "link-direct"),
         LinkUi::Via(_) => ("via", "link-via"),
         LinkUi::Connecting => ("connecting", "link-connecting"),
+        LinkUi::Away => ("away", "link-away"),
     };
     let link = member.link.clone();
     let is_via = matches!(member.link, LinkUi::Via(_));
@@ -3518,6 +3564,7 @@ fn member_row(
                     LinkUi::Direct => t(lang.get(), "link_direct").to_string(),
                     LinkUi::Via(name) => t_replace_1(lang.get(), "link_via", "{name}", name),
                     LinkUi::Connecting => t(lang.get(), "link_connecting").to_string(),
+                    LinkUi::Away => t(lang.get(), "link_away").to_string(),
                 }}
             </span>
             {dm_target.map(|pubkey| {
@@ -3560,13 +3607,15 @@ fn member_row(
                 let (pubkey, name) = kick_target.clone();
                 let (admin_pubkey, admin_name) = kick_target.clone();
                 view! {
-                    <button
-                        class="btn btn-sm btn-secondary make-admin-btn"
-                        title=move || t(lang.get(), "title_make_admin")
-                        on:click=move |_| on_make_admin(admin_pubkey.clone(), admin_name.clone())
-                    >
-                        {move || t(lang.get(), "btn_make_admin")}
-                    </button>
+                    {promotable.then(|| view! {
+                        <button
+                            class="btn btn-sm btn-secondary make-admin-btn"
+                            title=move || t(lang.get(), "title_make_admin")
+                            on:click=move |_| on_make_admin(admin_pubkey.clone(), admin_name.clone())
+                        >
+                            {move || t(lang.get(), "btn_make_admin")}
+                        </button>
+                    })}
                     <button
                         class="btn btn-sm btn-danger kick-btn"
                         title=move || t(lang.get(), "title_kick")

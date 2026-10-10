@@ -28,6 +28,7 @@ use files::Files;
 use lounge::{Lounge, VoiceInfo};
 use leptos::*;
 use protocol::chat_log::ChatLog;
+use protocol::presence::Absences;
 use protocol::succession::Succession;
 use protocol::crypto::{decrypt_json, encrypt_json};
 use protocol::{
@@ -54,6 +55,14 @@ const DEDUP_CAPACITY: usize = 4096;
 const MAX_REMOTE_NAME_CHARS: usize = 32;
 /// After moving to a new room link, members re-join in a burst: no join notices for a while.
 const MIGRATION_QUIET_MS: f64 = 5000.0;
+/// The ticker missed this much: the tab was paused (a phone that switched apps, a frozen
+/// background tab), so its links and relay connections may have died meanwhile.
+const FROZEN_GAP_MS: f64 = 8000.0;
+/// After a pause, a link that answers nothing for this long is dropped and dialed again.
+const LINK_CHECK_MS: f64 = 3000.0;
+/// An offer or ICE through the relays from a member whose link to us has been open this long
+/// means they lost that link (it would go over the link otherwise): ours is stale.
+const STALE_LINK_MS: f64 = 15_000.0;
 
 /// Reactive outputs of the session for the UI.
 #[derive(Clone, Copy)]
@@ -118,7 +127,6 @@ struct Inner {
     identity: Rc<NostrBurnerKey>,
     me: String,
     join_ts: u64,
-    started_at: f64,
     rtc_config: RtcConfiguration,
     signals: SessionSignals,
     pool: RefCell<Option<Rc<NostrRelayPool>>>,
@@ -160,6 +168,21 @@ struct Inner {
     /// Members already reported as running another protocol version.
     other_versions: RefCell<HashSet<String>>,
     control: Control,
+    /// Members who dropped out of reach without leaving: away, then gone after the grace.
+    absences: RefCell<Absences>,
+    /// When the ticker last ran (or the tab last came back): a gap means we were paused.
+    last_alive: Cell<f64>,
+    /// Beacon every tick until then (joining, or back after a pause).
+    fast_beacon_until: Cell<f64>,
+    /// Links asked whether they are alive after a pause, and when they must have answered.
+    link_checks: RefCell<HashMap<String, f64>>,
+    /// DMs to members who are away, sealed and signed, by recipient: (id, frame).
+    dm_outbox: RefCell<HashMap<String, Vec<(String, String)>>>,
+    /// After we followed a rekey: hand it to members who were away, on the old topic.
+    forwarding: RefCell<Option<admin::Forwarding>>,
+    /// Test hook: the tab acts as if paused (no signals, no links, no ticks).
+    #[cfg(feature = "e2e-hooks")]
+    frozen: Cell<bool>,
 }
 
 impl RoomSession {
@@ -207,7 +230,6 @@ impl RoomSession {
                 identity: identity.clone(),
                 me,
                 join_ts: started_at as u64,
-                started_at,
                 signals,
                 pool: RefCell::new(None),
                 links: RefCell::new(HashMap::new()),
@@ -239,6 +261,14 @@ impl RoomSession {
                 dm_peers: RefCell::new(HashSet::new()),
                 other_versions: RefCell::new(HashSet::new()),
                 control: Control::default(),
+                absences: RefCell::new(Absences::default()),
+                last_alive: Cell::new(started_at),
+                fast_beacon_until: Cell::new(started_at + FAST_BEACON_FOR_MS),
+                link_checks: RefCell::new(HashMap::new()),
+                dm_outbox: RefCell::new(HashMap::new()),
+                forwarding: RefCell::new(None),
+                #[cfg(feature = "e2e-hooks")]
+                frozen: Cell::new(false),
             }),
         };
         if migrated {
@@ -256,7 +286,7 @@ impl RoomSession {
         let events = PoolEvents {
             on_signal: {
                 let s = session.clone();
-                Box::new(move |from, signal| s.on_signal(from, signal))
+                Box::new(move |from, signal| s.on_relay_signal(from, signal))
             },
             on_other_version: {
                 let s = session.clone();
@@ -265,6 +295,11 @@ impl RoomSession {
             on_relay_connected: {
                 let s = session.clone();
                 Box::new(move |count| {
+                    // A pool kept open after a rekey (`forward_rekey`) must not touch the UI,
+                    // which shows the new session.
+                    if s.inner.closed.get() {
+                        return;
+                    }
                     s.inner.relays_connected.set(count);
                     s.inner.signals.connected_relays.set(count);
                     s.refresh_status();
@@ -276,7 +311,7 @@ impl RoomSession {
 
         session.start_ticker();
         session.start_typing_ticker();
-        session.leave_on_pagehide();
+        session.watch_lifecycle();
         session.recompute();
         #[cfg(feature = "e2e-hooks")]
         session.install_e2e_hooks();
@@ -309,14 +344,43 @@ impl RoomSession {
         for (_, link) in self.inner.links.borrow_mut().drain() {
             link.close();
         }
-        // Queued messages (the PeerLeft above) are still sent before the sockets close.
+        // Queued messages (the PeerLeft above) are still sent before the sockets close. After
+        // a rekey, the relays stay a while for members who were away (`forward_rekey`).
         if let Some(pool) = self.pool() {
-            pool.close();
+            self.close_pool_after_forwarding(pool);
         }
         self.refresh_status();
     }
 
     // ---- Signaling -------------------------------------------------------------------
+
+    /// A signal through the relays. An offer or ICE from a member whose link to us has been
+    /// open a while means they lost that link (a phone that slept): ours is stale, start over.
+    fn on_relay_signal(&self, from: String, signal: SignalPayload) {
+        if self.frozen() {
+            return;
+        }
+        if self.inner.closed.get() {
+            if signal == SignalPayload::Presence {
+                self.forward_rekey(&from);
+            }
+            return;
+        }
+        match &signal {
+            SignalPayload::RekeyForward { envelope, .. } => {
+                self.on_rekey_forward(envelope);
+                return;
+            }
+            SignalPayload::Offer { .. } | SignalPayload::IceBatch { .. } => {
+                if self.link(&from).is_some_and(|l| l.open_for() > STALE_LINK_MS) {
+                    log::info!("{} lost its link to us: connecting again", pubkey_tag(&from));
+                    self.drop_link(&from, false);
+                }
+            }
+            _ => {}
+        }
+        self.on_signal(from, signal);
+    }
 
     fn on_signal(&self, from: String, signal: SignalPayload) {
         if self.inner.closed.get() || self.inner.blocked.borrow().contains(&from) {
@@ -354,6 +418,8 @@ impl RoomSession {
                 }
             }
             SignalPayload::PeerLeft => self.remove_member(&from),
+            // Relays only (`on_relay_signal`).
+            SignalPayload::RekeyForward { .. } => {}
         }
     }
 
@@ -380,7 +446,10 @@ impl RoomSession {
             return;
         }
         let now = js_sys::Date::now();
-        if self.inner.retry_after.borrow().get(from).is_some_and(|t| *t > now) {
+        // The backoff spares a member we still reach through others while our direct link to
+        // them keeps failing. One out of reach (away, gone, or we were paused) is dialed at once.
+        let reachable = self.inner.present.borrow().contains(from);
+        if reachable && self.inner.retry_after.borrow().get(from).is_some_and(|t| *t > now) {
             return;
         }
         if self.inner.me.as_str() < from {
@@ -444,18 +513,26 @@ impl RoomSession {
     }
 
     fn on_link_event(&self, remote: &str, id: u64, event: LinkEvent) {
-        let is_current = self.inner.links.borrow().get(remote).map(|l| l.id) == Some(id);
-        if !is_current || self.inner.closed.get() {
+        let link = self.inner.links.borrow().get(remote).filter(|l| l.id == id).cloned();
+        let Some(link) = link else {
+            return;
+        };
+        if self.inner.closed.get() || self.frozen() {
             return;
         }
         match event {
             LinkEvent::Open => {
                 log::info!("Direct link open with {}", pubkey_tag(remote));
+                link.mark_opened();
                 self.inner.retry_after.borrow_mut().remove(remote);
+                self.inner.link_checks.borrow_mut().remove(remote);
                 self.publish_link_state();
                 self.sync_to(remote);
                 self.sync_link_opened(remote);
                 self.recompute();
+                // Back from away (either side): stopped downloads go on, waiting DMs go out.
+                self.resume_downloads(remote);
+                self.flush_dm_outbox(remote);
             }
             LinkEvent::Closed => self.drop_link(remote, true),
             LinkEvent::Message(text) => self.on_frame(remote, &text),
@@ -551,6 +628,8 @@ impl RoomSession {
             log::warn!("Dropping undecryptable room frame");
             return;
         };
+        // Anything from them answers a link check.
+        self.inner.link_checks.borrow_mut().remove(from);
         if envelope.author == self.inner.me || self.inner.dedup.borrow().contains(&envelope.id) {
             return;
         }
@@ -663,7 +742,7 @@ impl RoomSession {
             RoomBody::SyncDiff { ids, level, windows, last, .. } => self.on_sync_diff(author, ids, *level, windows, *last),
             RoomBody::SyncWant { ids, .. } => self.on_sync_want(author, ids),
             RoomBody::SyncBatch { envelopes, last, .. } => self.on_sync_batch(author, envelopes, *last),
-            RoomBody::AdminRekey { kicked, grants } => self.on_admin_rekey(author, kicked.as_deref(), grants),
+            RoomBody::AdminRekey { kicked, grants } => self.on_admin_rekey(envelope, kicked.as_deref(), grants),
             RoomBody::AdminHandover { promote, sealed } => self.on_admin_handover(envelope, *promote, sealed),
             RoomBody::FileCancel { to: None, .. } => {
                 // A withdrawal is part of the card's history.
@@ -677,10 +756,17 @@ impl RoomSession {
                 self.on_file_link_signal(author, *link, *from_dialer, signal);
             }
             RoomBody::LinkSignal { signal, .. } => {
-                // Only offers, answers and ICE addressed to us (presence and departures have
-                // no recipient and stay on the relays).
-                if signal.recipient() == Some(self.inner.me.as_str()) {
+                // Only offers, answers and ICE addressed to us (presence, departures and
+                // forwarded rekeys stay on the relays).
+                let handshake =
+                    matches!(signal, SignalPayload::Offer { .. } | SignalPayload::Answer { .. } | SignalPayload::IceBatch { .. });
+                if handshake && signal.recipient() == Some(self.inner.me.as_str()) {
                     self.on_signal(author.to_string(), signal.clone());
+                }
+            }
+            RoomBody::LinkCheck { reply, .. } => {
+                if !reply {
+                    self.send_direct(author, RoomBody::LinkCheck { to: author.to_string(), reply: true });
                 }
             }
             RoomBody::ControlStatus { .. } => self.on_control_status(envelope),
@@ -737,6 +823,13 @@ impl RoomSession {
         if pubkey == self.inner.me {
             return;
         }
+        // Away until now: their "left" line wasn't shown, and what waited for them goes.
+        if self.inner.absences.borrow_mut().forget(pubkey) {
+            if let Some(name) = self.inner.names.borrow().get(pubkey).cloned() {
+                self.push_notice(Notice::Left(name));
+            }
+            self.member_gone(pubkey);
+        }
         self.inner.roster.borrow_mut().remove(pubkey);
         self.inner.hellos.borrow_mut().remove(pubkey);
         self.inner.link_reports.borrow_mut().remove(pubkey);
@@ -779,15 +872,25 @@ impl RoomSession {
         }
 
         let previous = self.inner.present.replace(present.clone());
+        // Members who dropped out of reach without leaving are away; members no longer in the
+        // roster left (`Leave`, `PeerLeft`).
+        let still_listed: HashSet<String> = previous.iter().filter(|pk| roster.get(pk).is_some()).cloned().collect();
+        let changes = self.inner.absences.borrow_mut().update(&still_listed, &present, js_sys::Date::now() as u64);
+        let away = self.inner.absences.borrow().away();
         let mut notices = Vec::new();
         let quiet = js_sys::Date::now() < self.inner.quiet_until;
         for pk in present.difference(&previous) {
-            if let Some(member) = roster.get(pk).filter(|m| *pk != me && !quiet && m.join_ts > self.inner.join_ts) {
-                notices.push(Notice::Joined(member.name.clone()));
+            // Back from away: they never left. Back after their "left" line: joined again.
+            let returned = changes.returned.contains(pk);
+            if let Some(member) = roster.get(pk).filter(|m| *pk != me && !quiet && (returned || m.join_ts > self.inner.join_ts)) {
+                if !changes.back.contains(pk) {
+                    notices.push(Notice::Joined(member.name.clone()));
+                }
             }
         }
         let names = self.inner.names.borrow();
-        let departed: Vec<String> = previous.difference(&present).filter(|pk| **pk != me).cloned().collect();
+        let mut departed: Vec<String> = previous.iter().filter(|pk| **pk != me && !still_listed.contains(*pk)).cloned().collect();
+        departed.extend(changes.expired.iter().cloned());
         for pk in &departed {
             if let Some(name) = names.get(pk) {
                 notices.push(Notice::Left(name.clone()));
@@ -796,13 +899,16 @@ impl RoomSession {
         drop(names);
 
         let links = self.inner.links.borrow();
-        let mut members: Vec<&Member> = roster.members().filter(|m| present.contains(&m.pubkey)).collect();
+        let mut members: Vec<&Member> =
+            roster.members().filter(|m| present.contains(&m.pubkey) || away.contains(&m.pubkey)).collect();
         members.sort_by_key(|m| (m.pubkey != me, m.join_ts, m.pubkey.clone()));
         let members_ui = members
             .into_iter()
             .map(|m| {
                 let link = if m.pubkey == me {
                     LinkUi::Me
+                } else if away.contains(&m.pubkey) {
+                    LinkUi::Away
                 } else if links.get(&m.pubkey).is_some_and(|l| l.is_open()) {
                     LinkUi::Direct
                 } else if let Some(relay) = roster.relay_for(&me, &m.pubkey) {
@@ -826,14 +932,35 @@ impl RoomSession {
         for notice in notices {
             self.push_notice(notice);
         }
-        for pk in &departed {
-            self.on_file_author_gone(pk);
+        for pk in &changes.away {
             self.stop_typing(pk);
-            self.end_dm_thread(pk);
+        }
+        for pk in changes.back.iter().chain(&changes.returned) {
+            // Reached through someone else again: dial them at once, not after the backoff.
+            self.inner.retry_after.borrow_mut().remove(pk);
+            self.on_file_author_back(pk);
+            self.flush_dm_outbox(pk);
+        }
+        for pk in &departed {
+            self.member_gone(pk);
         }
         self.refresh_status();
         self.recompute_lounge();
         self.schedule_heir_check();
+    }
+
+    /// `pubkey` left, or stayed away for the whole grace: what waited for them ends.
+    fn member_gone(&self, pubkey: &str) {
+        self.on_file_author_gone(pubkey);
+        self.stop_typing(pubkey);
+        self.drop_dm_outbox(pubkey);
+        self.end_dm_thread(pubkey);
+    }
+
+    /// Members away now (out of reach, within their grace), as the roster holds them.
+    fn away_members(&self) -> Vec<Member> {
+        let absences = self.inner.absences.borrow();
+        self.inner.roster.borrow().members().filter(|m| absences.is_away(&m.pubkey)).cloned().collect()
     }
 
     fn refresh_status(&self) {
@@ -934,10 +1061,27 @@ impl RoomSession {
                 }
                 return;
             }
+            if s.frozen() {
+                return;
+            }
             let now = js_sys::Date::now();
+            s.wake_check(now);
             let n = tick.get() + 1;
             tick.set(n);
-            if now - s.inner.started_at < FAST_BEACON_FOR_MS || n % SLOW_BEACON_EVERY == 0 {
+            if now < s.inner.fast_beacon_until.get() || n % SLOW_BEACON_EVERY == 0 {
+                if let Some(pool) = s.pool() {
+                    pool.broadcast_signal(&SignalPayload::Presence);
+                }
+            }
+            if s.inner.absences.borrow().next_expiry().is_some_and(|at| at as f64 <= now) {
+                s.recompute();
+            }
+            let silent: Vec<String> =
+                s.inner.link_checks.borrow().iter().filter(|(_, until)| **until <= now).map(|(pk, _)| pk.clone()).collect();
+            for remote in silent {
+                log::info!("Link to {} did not answer after a pause: connecting again", pubkey_tag(&remote));
+                s.inner.link_checks.borrow_mut().remove(&remote);
+                s.drop_link(&remote, false);
                 if let Some(pool) = s.pool() {
                     pool.broadcast_signal(&SignalPayload::Presence);
                 }
@@ -966,13 +1110,85 @@ impl RoomSession {
         cb.forget();
     }
 
-    fn leave_on_pagehide(&self) {
+    /// Leaving the page leaves the room. Coming back to it (the page shown again, the
+    /// network back) checks whether we were paused meanwhile (`wake_check`).
+    fn watch_lifecycle(&self) {
+        let Some(w) = window() else {
+            return;
+        };
         let s = self.clone();
-        let cb = Closure::wrap(Box::new(move || s.leave()) as Box<dyn FnMut()>);
-        if let Some(w) = window() {
-            let _ = w.add_event_listener_with_callback("pagehide", cb.as_ref().unchecked_ref());
+        let leave = Closure::wrap(Box::new(move || s.leave()) as Box<dyn FnMut()>);
+        let _ = w.add_event_listener_with_callback("pagehide", leave.as_ref().unchecked_ref());
+        leave.forget();
+        let s = self.clone();
+        let shown = Closure::wrap(Box::new(move || {
+            let visible = window().and_then(|w| w.document()).is_some_and(|d| !d.hidden());
+            if visible && !s.inner.closed.get() && !s.frozen() {
+                s.wake_check(js_sys::Date::now());
+            }
+        }) as Box<dyn FnMut()>);
+        if let Some(doc) = w.document() {
+            let _ = doc.add_event_listener_with_callback("visibilitychange", shown.as_ref().unchecked_ref());
         }
-        cb.forget();
+        shown.forget();
+        let s = self.clone();
+        let online = Closure::wrap(Box::new(move || {
+            if !s.inner.closed.get() && !s.frozen() {
+                s.on_wake();
+            }
+        }) as Box<dyn FnMut()>);
+        let _ = w.add_event_listener_with_callback("online", online.as_ref().unchecked_ref());
+        online.forget();
+    }
+
+    /// The ticker (or the page shown again) runs at `now`: if it missed a lot, the tab was
+    /// paused and its connections may be dead.
+    fn wake_check(&self, now: f64) {
+        let gap = now - self.inner.last_alive.replace(now);
+        if gap > FROZEN_GAP_MS {
+            log::info!("Back after {:.0} s paused", gap / 1000.0);
+            self.on_wake();
+        }
+    }
+
+    /// Back from a pause, or the network came back: reconnect the relays, ask every link
+    /// whether it is still alive (silent ones are dialed again), and announce ourselves.
+    fn on_wake(&self) {
+        if self.inner.closed.get() {
+            return;
+        }
+        let now = js_sys::Date::now();
+        self.inner.last_alive.set(now);
+        self.inner.fast_beacon_until.set(now + FAST_BEACON_FOR_MS);
+        self.inner.retry_after.borrow_mut().clear();
+        if let Some(pool) = self.pool() {
+            pool.wake();
+            pool.broadcast_signal(&SignalPayload::Presence);
+        }
+        let links: Vec<Rc<PeerLink>> = self.inner.links.borrow().values().cloned().collect();
+        for link in links {
+            let remote = link.remote.clone();
+            let asked = link.is_open() && self.send_direct(&remote, RoomBody::LinkCheck { to: remote.clone(), reply: false });
+            if asked {
+                self.inner.link_checks.borrow_mut().insert(remote, now + LINK_CHECK_MS);
+            } else {
+                self.drop_link(&remote, false);
+            }
+        }
+        self.resume_voice();
+        self.recompute();
+    }
+
+    /// Whether the tab acts as paused (test hook only).
+    fn frozen(&self) -> bool {
+        #[cfg(feature = "e2e-hooks")]
+        {
+            self.inner.frozen.get()
+        }
+        #[cfg(not(feature = "e2e-hooks"))]
+        {
+            false
+        }
     }
 
     /// `window.__dchat` probes for Playwright: compiled only with the `e2e-hooks` feature.
@@ -1010,6 +1226,49 @@ impl RoomSession {
         let _ = js_sys::Reflect::set(&hooks, &"unblockPeer".into(), unblock_peer.as_ref());
         unblock_peer.forget();
         self.install_sync_hooks(&hooks);
+
+        // Act as a phone that switched apps: links die without a word (the members drop them
+        // as if they timed out), signals and ticks are ignored, nothing is sent.
+        let s = self.clone();
+        let freeze = Closure::wrap(Box::new(move || {
+            s.inner.frozen.set(true);
+            for link in s.inner.links.borrow().values() {
+                link.close();
+            }
+        }) as Box<dyn Fn()>);
+        let _ = js_sys::Reflect::set(&hooks, &"simulateFreeze".into(), freeze.as_ref());
+        freeze.forget();
+
+        // Come back from `simulateFreeze` as the page shown again would: the ticker missed
+        // `paused_ms`, so the tab finds its links dead and reconnects.
+        let s = self.clone();
+        let resume = Closure::wrap(Box::new(move |paused_ms: f64| {
+            s.inner.frozen.set(false);
+            let now = js_sys::Date::now();
+            s.inner.last_alive.set(now - paused_ms);
+            s.wake_check(now);
+        }) as Box<dyn Fn(f64)>);
+        let _ = js_sys::Reflect::set(&hooks, &"simulateResume".into(), resume.as_ref());
+        resume.forget();
+
+        // Shorten how long members stay away before counting as gone.
+        let s = self.clone();
+        let grace = Closure::wrap(Box::new(move |ms: f64| {
+            s.inner.absences.borrow_mut().set_grace(ms as u64);
+            s.recompute();
+        }) as Box<dyn Fn(f64)>);
+        let _ = js_sys::Reflect::set(&hooks, &"awayGraceMs".into(), grace.as_ref());
+        grace.forget();
+
+        // Members this tab lists as away.
+        let s = self.clone();
+        let away = Closure::wrap(Box::new(move || {
+            let mut away: Vec<String> = s.inner.absences.borrow().away().into_iter().collect();
+            away.sort();
+            JsValue::from(away.into_iter().map(JsValue::from).collect::<js_sys::Array>())
+        }) as Box<dyn Fn() -> JsValue>);
+        let _ = js_sys::Reflect::set(&hooks, &"awayMembers".into(), away.as_ref());
+        away.forget();
 
         // "active", "dormant" (heir) or "none": what this session holds of the admin secret.
         let s = self.clone();

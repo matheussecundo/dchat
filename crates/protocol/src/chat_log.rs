@@ -1213,6 +1213,7 @@ mod tests {
             RoomBody::FileCancel { to: Some("b".into()), file_id: "f".into() },
             RoomBody::Dm { sealed: crate::crypto::EncryptedPayload { nonce: "n".into(), ciphertext: "c".into() } },
             RoomBody::SyncWant { to: "b".into(), ids: vec![] },
+            RoomBody::LinkCheck { to: "b".into(), reply: false },
         ] {
             assert_eq!(log.merge(&env("x", "ana", NOW, body), NOW), Merge::Ignored(Ignored::NotLogged));
         }

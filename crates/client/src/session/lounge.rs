@@ -490,6 +490,18 @@ impl RoomSession {
         });
     }
 
+    /// Back from a pause in voice: a mic the browser ended meanwhile (iOS does, for pages in
+    /// the background) is captured again, keeping the mute.
+    pub(super) fn resume_voice(&self) {
+        let ended = self
+            .local_track("audio")
+            .is_some_and(|track| track.ready_state() == web_sys::MediaStreamTrackState::Ended);
+        if ended {
+            log::info!("The microphone ended while paused: capturing it again");
+            self.recapture_mic();
+        }
+    }
+
     pub fn voice_cap(&self) -> Option<usize> {
         self.inner.params.voice_cap
     }

@@ -3,7 +3,9 @@
 //! links to them when those raise the rate (`file_links.rs`). Chunks are sealed with the
 //! room key (ChaCha20-Poly1305, authenticated header) and never relayed; the downloader puts
 //! them back in order and confirms progress (`protocol::transfer`). All transfer state lives
-//! in RAM and dies with the link.
+//! in RAM. A download whose link drops (one side switched apps) pauses and goes on from the
+//! first missing chunk once the link is back; it ends when the sender leaves or stays away
+//! past the grace (`protocol::presence`).
 
 use super::RoomSession;
 use crate::media::sleep_ms;
@@ -97,6 +99,10 @@ struct Download {
     /// last delivered a chunk, and how many ever did.
     routes_seen: HashMap<Option<(bool, u32)>, f64>,
     most_routes: usize,
+    /// Since when the link to the author is down (the download waits for it), and how long
+    /// earlier pauses lasted (left out of the time and speed shown).
+    paused_since: Option<f64>,
+    paused_ms: f64,
 }
 
 impl Download {
@@ -171,6 +177,8 @@ pub(super) struct Files {
     /// Uploads streaming chunks. Removing one (requester cancelled, link lost) stops it
     /// at its next chunk.
     active_transfers: RefCell<HashMap<Upload, ActiveUpload>>,
+    /// Where each requested upload starts, until it does (`FileRequest::from_chunk`).
+    starts_at: RefCell<HashMap<Upload, u32>>,
     next_upload_id: Cell<u64>,
     /// Test-only pause between chunks, so queues and interruptions are observable.
     #[cfg(feature = "e2e-hooks")]
@@ -190,6 +198,7 @@ impl Default for Files {
             delivered: RefCell::new(HashMap::new()),
             downloads: RefCell::new(HashMap::new()),
             active_transfers: RefCell::new(HashMap::new()),
+            starts_at: RefCell::new(HashMap::new()),
             next_upload_id: Cell::new(0),
             #[cfg(feature = "e2e-hooks")]
             chunk_delay_ms: std::cell::Cell::new(0),
@@ -239,14 +248,24 @@ impl RoomSession {
         });
     }
 
-    fn on_file_request(&self, requester: &str, file_id: &str) {
-        if !self.inner.files.outgoing.borrow().contains_key(file_id) {
+    fn on_file_request(&self, requester: &str, file_id: &str, from_chunk: u32) {
+        let files = &self.inner.files;
+        if !files.outgoing.borrow().contains_key(file_id) {
             // A card from history whose file this tab no longer has: say so, so the
             // requester's card doesn't wait forever.
             self.send_direct(requester, RoomBody::FileCancel { to: Some(requester.to_string()), file_id: file_id.to_string() });
             return;
         }
-        let decision = self.inner.files.queue.borrow_mut().request(file_id, requester);
+        let upload = (file_id.to_string(), requester.to_string());
+        files.starts_at.borrow_mut().insert(upload.clone(), from_chunk);
+        // Asked again while still sending (it lost our link and came back before we noticed):
+        // the newest request says where it is, so the run starts over from there.
+        if files.queue.borrow().is_active(file_id, requester) {
+            files.active_transfers.borrow_mut().remove(&upload);
+            self.start_upload(upload.0, upload.1);
+            return;
+        }
+        let decision = files.queue.borrow_mut().request(file_id, requester);
         match decision {
             QueueDecision::Start => self.start_upload(file_id.to_string(), requester.to_string()),
             QueueDecision::Queued(position) => {
@@ -288,6 +307,8 @@ impl RoomSession {
         let Some(file) = files.outgoing.borrow().get(&file_id).cloned() else {
             return;
         };
+        let total_chunks = chunk_count(file.size());
+        let first = files.starts_at.borrow_mut().remove(&(file_id.clone(), peer.clone())).unwrap_or(0).min(total_chunks);
         let id = files.next_upload_id.get();
         files.next_upload_id.set(id + 1);
         files.active_transfers.borrow_mut().insert(
@@ -295,7 +316,7 @@ impl RoomSession {
             ActiveUpload {
                 id,
                 started: js_sys::Date::now(),
-                acked: 0,
+                acked: first,
                 last_ui_update: js_sys::Date::now(),
                 progress: 0,
                 meter: RateMeter::new(SPEED_WINDOW_MS),
@@ -307,7 +328,7 @@ impl RoomSession {
         self.refresh_sharing_card(&file_id);
         let s = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let completed = s.upload(&file, &file_id, &peer, id).await;
+            let completed = s.upload(&file, &file_id, &peer, id, first).await;
             s.file_links_idle_later(&peer);
             let upload = (file_id.clone(), peer.clone());
             let mut active = s.inner.files.active_transfers.borrow_mut();
@@ -336,14 +357,16 @@ impl RoomSession {
         files.active_transfers.borrow().get(upload).is_some_and(|a| a.id == id) && !files.withdrawn.borrow().contains(&upload.0)
     }
 
-    /// Stream `file` to `peer` in sealed chunks over every connection in use; returns
-    /// whether the peer confirmed them all.
-    async fn upload(&self, file: &web_sys::File, file_id: &str, peer: &str, id: u64) -> bool {
+    /// Stream `file` to `peer` in sealed chunks from chunk `first` on, over every connection
+    /// in use; returns whether the peer confirmed them all.
+    async fn upload(&self, file: &web_sys::File, file_id: &str, peer: &str, id: u64, first: u32) -> bool {
         let Ok(file_uuid) = uuid::Uuid::parse_str(file_id) else {
             return false;
         };
         let total_size = file.size();
-        let total_chunks = ((total_size / CHUNK_SIZE as f64).ceil() as u32).max(1);
+        let total_chunks = chunk_count(total_size);
+        // What the peer had before this run, for progress and growth.
+        let had = (first as f64 * CHUNK_SIZE as f64).min(total_size) as u64;
         let upload = (file_id.to_string(), peer.to_string());
         let forced = self.forced_file_links(peer);
         let mut cap = self.file_connection_cap();
@@ -352,7 +375,7 @@ impl RoomSession {
         // When each route last carried a chunk, for the count on our card.
         let mut carried: HashMap<Option<u32>, f64> = HashMap::new();
         let mut batch = ReadBatch::default();
-        let mut next: u32 = 0;
+        let mut next: u32 = first;
         let mut turn = 0;
         let mut lost = self.file_links_lost(peer);
         // Bytes handed to the connections, resent ones included.
@@ -362,7 +385,7 @@ impl RoomSession {
             if !self.upload_running(&upload, id) {
                 return false;
             }
-            let acked = self.inner.files.active_transfers.borrow().get(&upload).map_or(0, |a| a.acked.min(total_chunks));
+            let acked = self.inner.files.active_transfers.borrow().get(&upload).map_or(first, |a| a.acked.min(total_chunks));
             if acked == total_chunks {
                 return true;
             }
@@ -381,7 +404,7 @@ impl RoomSession {
             let routes = self.chunk_routes(peer, cap);
             let taken = sent.saturating_sub(self.queued_to(peer));
             let shown = recently_used(&mut carried, js_sys::Date::now());
-            self.steer_upload(&upload, &mut growth, taken, total_size, routes.len(), shown);
+            self.steer_upload(&upload, &mut growth, had, taken, total_size, routes.len(), shown);
             if next == total_chunks || !in_send_window(next, acked) {
                 sleep_ms(ACK_POLL_MS).await;
                 continue;
@@ -424,12 +447,14 @@ impl RoomSession {
     }
 
     /// Grow or shrink the connections an upload uses, and refresh its line on our card.
-    /// `taken`: bytes the connections took from our send queues so far; `connections`: the
-    /// routes open for it; `shown`: those that carried chunks lately.
-    fn steer_upload(&self, upload: &Upload, growth: &mut LinkGrowth, taken: u64, total_size: f64, connections: usize, shown: u8) {
+    /// `had`: bytes the peer had before this run; `taken`: bytes the connections took from our
+    /// send queues since; `connections`: the routes open for it; `shown`: those that carried
+    /// chunks lately.
+    #[allow(clippy::too_many_arguments)]
+    fn steer_upload(&self, upload: &Upload, growth: &mut LinkGrowth, had: u64, taken: u64, total_size: f64, connections: usize, shown: u8) {
         let now = js_sys::Date::now();
         let total = total_size as u64;
-        let decision = growth.update(now, taken, connections, total.saturating_sub(taken));
+        let decision = growth.update(now, taken, connections, total.saturating_sub(had + taken));
         if decision != Growth::Hold {
             let rate = growth.rate().unwrap_or(0.0) / 1_048_576.0;
             log::info!("Upload to {}: {decision:?} at {rate:.1} MB/s over {connections} connections", crate::names::pubkey_tag(&upload.1));
@@ -447,7 +472,7 @@ impl RoomSession {
                 let average = taken as f64 / ((now - state.started) / 1000.0).max(0.001);
                 state.speed_kb = (state.meter.rate().unwrap_or(average) / 1024.0) as u64;
             }
-            state.progress = (taken.min(total) as f64 / total.max(1) as f64 * 100.0) as u8;
+            state.progress = ((had + taken).min(total) as f64 / total.max(1) as f64 * 100.0) as u8;
             state.connections = shown;
             if now - state.last_ui_update >= 250.0 {
                 state.last_ui_update = now;
@@ -581,12 +606,14 @@ impl RoomSession {
                     first_chunk_at: None,
                     routes_seen: HashMap::new(),
                     most_routes: 1,
+                    paused_since: None,
+                    paused_ms: 0.0,
                 },
             );
             s.set_file_status(&file_id, FileTransferStatus::Downloading { progress: 0, speed_kb: 0, connections: 1 });
             #[cfg(feature = "e2e-hooks")]
             s.inner.files.requests_sent.set(s.inner.files.requests_sent.get() + 1);
-            let request = RoomBody::FileRequest { to: author.clone(), file_id: file_id.clone() };
+            let request = RoomBody::FileRequest { to: author.clone(), file_id: file_id.clone(), from_chunk: 0 };
             if !s.send_direct(&author, request) {
                 s.abort_download(&file_id, FileTransferStatus::Interrupted);
                 s.toast("toast_file_request_failed");
@@ -694,7 +721,8 @@ impl RoomSession {
             download.last_ui_update = now;
             if now - download.speed_at >= SPEED_REFRESH_MS {
                 download.speed_at = now;
-                let average = download.received as f64 / ((now - download.started) / 1000.0).max(0.001);
+                let elapsed = now - download.started - download.paused_ms;
+                let average = download.received as f64 / (elapsed / 1000.0).max(0.001);
                 download.speed_kb = (download.meter.rate().unwrap_or(average) / 1024.0) as u64;
             }
             let connections = recently_used(&mut download.routes_seen, now);
@@ -720,7 +748,7 @@ impl RoomSession {
         };
         let summary = DownloadSummary {
             bytes: done.received,
-            millis: (now - done.first_chunk_at.unwrap_or(now)).max(0.0) as u64,
+            millis: (now - done.first_chunk_at.unwrap_or(now) - done.paused_ms).max(0.0) as u64,
         };
         log::info!(
             "Downloaded {} bytes in {:.1} s ({:.2} MB/s, up to {} connections)",
@@ -820,7 +848,10 @@ impl RoomSession {
                 active_peers: Vec::new(),
                 queued_peers: Vec::new(),
             }
-        } else if live || self.inner.present.borrow().contains(&envelope.author) {
+        } else if live
+            || self.inner.present.borrow().contains(&envelope.author)
+            || self.inner.absences.borrow().is_away(&envelope.author)
+        {
             FileTransferStatus::Offered
         } else {
             FileTransferStatus::SenderLeft
@@ -877,7 +908,7 @@ impl RoomSession {
     /// Route a file message by its author and (direct-only) recipient.
     pub(super) fn on_file_message(&self, author: &str, body: &RoomBody) {
         match body {
-            RoomBody::FileRequest { file_id, .. } => self.on_file_request(author, file_id),
+            RoomBody::FileRequest { file_id, from_chunk, .. } => self.on_file_request(author, file_id, *from_chunk),
             RoomBody::FileQueued { file_id, position, .. } => {
                 let ours = self.inner.files.downloads.borrow().get(file_id).is_some_and(|d| d.author == author);
                 if ours {
@@ -904,20 +935,27 @@ impl RoomSession {
         }
     }
 
-    /// The direct link to `remote` is gone: its transfers in either direction stop.
+    /// The direct link to `remote` is gone: our uploads to them stop (they ask again from
+    /// where they are), and our downloads from them pause until the link is back.
     pub(super) fn on_file_peer_lost(&self, remote: &str) {
         self.close_file_links(remote);
         let files = &self.inner.files;
         files.active_transfers.borrow_mut().retain(|(_, peer), _| peer != remote);
-        let downloads: Vec<String> = files
+        files.starts_at.borrow_mut().retain(|(_, peer), _| peer != remote);
+        let now = js_sys::Date::now();
+        let paused: Vec<(String, u8)> = files
             .downloads
-            .borrow()
-            .iter()
+            .borrow_mut()
+            .iter_mut()
             .filter(|(_, d)| d.author == remote)
-            .map(|(id, _)| id.clone())
+            .map(|(id, d)| {
+                d.paused_since.get_or_insert(now);
+                let progress = d.total.map_or(0, |total| (d.reorder.next() as f64 / total as f64 * 100.0) as u8);
+                (id.clone(), progress)
+            })
             .collect();
-        for file_id in downloads {
-            self.abort_download(&file_id, FileTransferStatus::Interrupted);
+        for (file_id, progress) in paused {
+            self.set_file_status(&file_id, FileTransferStatus::Paused { progress });
         }
         let started = files.queue.borrow_mut().remove_peer(remote);
         self.after_queue_change(started);
@@ -927,9 +965,69 @@ impl RoomSession {
         }
     }
 
-    /// `author` is no longer in the room (left, or unreachable by anyone we can reach):
-    /// their pending offers can no longer be downloaded.
+    /// The link to `remote` is open again: paused downloads from them go on from the first
+    /// chunk we lack.
+    pub(super) fn resume_downloads(&self, remote: &str) {
+        let now = js_sys::Date::now();
+        let resumed: Vec<(String, u32, u8)> = self
+            .inner
+            .files
+            .downloads
+            .borrow_mut()
+            .iter_mut()
+            .filter(|(_, d)| d.author == remote)
+            .filter_map(|(id, d)| {
+                let since = d.paused_since.take()?;
+                d.paused_ms += now - since;
+                d.last_ui_update = now;
+                let next = d.reorder.next();
+                let progress = d.total.map_or(0, |total| (next as f64 / total as f64 * 100.0) as u8);
+                Some((id.clone(), next, progress))
+            })
+            .collect();
+        for (file_id, from_chunk, progress) in resumed {
+            log::info!("Resuming a download from chunk {from_chunk}");
+            self.set_file_status(&file_id, FileTransferStatus::Downloading { progress, speed_kb: 0, connections: 1 });
+            let request = RoomBody::FileRequest { to: remote.to_string(), file_id: file_id.clone(), from_chunk };
+            if !self.send_direct(remote, request) {
+                if let Some(d) = self.inner.files.downloads.borrow_mut().get_mut(&file_id) {
+                    d.paused_since = Some(now);
+                }
+                self.set_file_status(&file_id, FileTransferStatus::Paused { progress });
+            }
+        }
+    }
+
+    /// `author` is back (from away, or after counting as gone): their cards can be
+    /// downloaded again.
+    pub(super) fn on_file_author_back(&self, author: &str) {
+        let offers = self.inner.files.offers.borrow();
+        self.inner.signals.messages.update(|msgs| {
+            for msg in msgs.iter_mut() {
+                let theirs = msg.file.as_ref().is_some_and(|f| offers.get(&f.file_id).is_some_and(|o| o.author == author));
+                if let Some(file) = msg.file.as_mut().filter(|f| theirs && f.status == FileTransferStatus::SenderLeft) {
+                    file.status = FileTransferStatus::Offered;
+                    msg.rev += 1;
+                }
+            }
+        });
+    }
+
+    /// `author` is no longer in the room (left, or away past the grace): their pending
+    /// offers can no longer be downloaded, and downloads paused waiting for them end.
     pub(super) fn on_file_author_gone(&self, author: &str) {
+        let waiting: Vec<String> = self
+            .inner
+            .files
+            .downloads
+            .borrow()
+            .iter()
+            .filter(|(_, d)| d.author == author)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for file_id in waiting {
+            self.abort_download(&file_id, FileTransferStatus::SenderLeft);
+        }
         let theirs: Vec<String> = self
             .inner
             .files
@@ -1006,6 +1104,11 @@ async fn call_stream_method(writable: &JsValue, method: &str, arg: Option<&JsVal
     };
     JsFuture::from(result.dyn_into::<js_sys::Promise>()?).await?;
     Ok(())
+}
+
+/// Chunks in a file of `size` bytes (an empty file is one empty chunk).
+fn chunk_count(size: f64) -> u32 {
+    ((size / CHUNK_SIZE as f64).ceil() as u32).max(1)
 }
 
 fn blob_type(mime_type: &str) -> &str {

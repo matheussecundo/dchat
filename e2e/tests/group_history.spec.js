@@ -79,7 +79,9 @@ test('always on: a late joiner gets the conversation as members see it, even fro
   await expect(card(ana.page, 'bo-withdrawn.txt')).toContainText('Withdrawn by sender', { timeout: 10000 });
   await expect(card(ana.page, 'bo-draft.txt')).toBeVisible();
 
-  // Closing the context skips the clean leave: the dropped link is detected instead.
+  // Closing the context skips the clean leave: the dropped link is detected instead, and Bo
+  // counts as away until the grace (shortened here) runs out.
+  await ana.page.evaluate(() => window.__dchat.awayGraceMs(2000));
   await bo.context.close();
   await expect(ana.page.locator('.member-row')).toHaveCount(1, { timeout: 30000 });
 
@@ -141,12 +143,12 @@ test('a member cut off for a while catches up once its links come back, without 
   await expect(row(cy.page, 'Before the gap')).toBeVisible({ timeout: 10000 });
   const [anaKey, boKey, cyKey] = await Promise.all([ana, bo, cy].map((m) => selfKey(m.page)));
 
-  // Cut Cy off on both ends of each link.
+  // Cut Cy off on both ends of each link: within the grace, each side lists the other as away.
   await ana.page.evaluate((k) => window.__dchat.blockPeer(k), cyKey);
   await bo.page.evaluate((k) => window.__dchat.blockPeer(k), cyKey);
   await cy.page.evaluate((keys) => keys.forEach((k) => window.__dchat.blockPeer(k)), [anaKey, boKey]);
-  await expect(ana.page.locator('.member-row')).toHaveCount(2, { timeout: 20000 });
-  await expect(cy.page.locator('.member-row')).toHaveCount(1, { timeout: 20000 });
+  await expect(memberRow(ana.page, 'Cy')).toHaveAttribute('data-link', 'away', { timeout: 20000 });
+  for (const name of ['Ana', 'Bo']) await expect(memberRow(cy.page, name)).toHaveAttribute('data-link', 'away', { timeout: 20000 });
 
   await sendMessage(ana.page, 'Missed one');
   await sendMessage(bo.page, 'Missed two');

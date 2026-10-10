@@ -1,4 +1,5 @@
 use futures::channel::mpsc;
+use futures::future::{select, Either};
 use futures::{SinkExt, StreamExt};
 use gloo_net::websocket::futures::WebSocket;
 use gloo_net::websocket::Message;
@@ -17,6 +18,10 @@ const RECONNECT_INITIAL_MS: f64 = 1000.0;
 const RECONNECT_MAX_MS: f64 = 30_000.0;
 const STABLE_CONNECTION_MS: f64 = 60_000.0;
 const SEEN_EVENTS_CAPACITY: usize = 4096;
+/// After a pause (`wake`), a connection that answers nothing for this long is taken for dead.
+const WAKE_PROBE_MS: i32 = 3500;
+/// How often a loop waiting to reconnect checks whether `wake` was called.
+const WAKE_POLL_MS: f64 = 250.0;
 
 /// The protocol version this tab speaks. E2E builds can pretend to be another version
 /// (`window.__dchatProtocolVersion`, set before the app loads).
@@ -63,6 +68,12 @@ pub struct NostrRelayPool {
     pub version: u32,
     /// Outgoing queue of each relay that currently has an open connection.
     senders: RefCell<HashMap<usize, mpsc::UnboundedSender<String>>>,
+    /// Ends each open connection at once (a socket that died while the tab slept may never
+    /// report it), and when each last received anything.
+    kills: RefCell<HashMap<usize, mpsc::UnboundedSender<()>>>,
+    last_heard: RefCell<HashMap<usize, f64>>,
+    /// Bumped by `wake`: loops waiting to reconnect go at once.
+    wakes: Cell<u32>,
     seen_event_ids: RefCell<GossipDedup>,
     connected_count: Cell<usize>,
     closed: Cell<bool>,
@@ -94,6 +105,9 @@ impl NostrRelayPool {
             topic,
             version: protocol_version(),
             senders: RefCell::new(HashMap::new()),
+            kills: RefCell::new(HashMap::new()),
+            last_heard: RefCell::new(HashMap::new()),
+            wakes: Cell::new(0),
             seen_event_ids: RefCell::new(GossipDedup::new(SEEN_EVENTS_CAPACITY)),
             connected_count: Cell::new(0),
             closed: Cell::new(false),
@@ -114,12 +128,44 @@ impl NostrRelayPool {
         self.closed.set(true);
         // Dropping the senders ends each forwarder, which closes its socket.
         self.senders.borrow_mut().clear();
+        self.kills.borrow_mut().clear();
+    }
+
+    /// The tab was paused (a phone that switched apps): reconnect now. Relays waiting to
+    /// reconnect stop waiting, and every open connection must answer our subscription,
+    /// sent again, within `WAKE_PROBE_MS` or it is replaced.
+    pub fn wake(self: &Rc<Self>) {
+        if self.closed.get() {
+            return;
+        }
+        self.wakes.set(self.wakes.get().wrapping_add(1));
+        let probed_at = js_sys::Date::now();
+        if let Some(req) = self.subscription_json() {
+            // Same subscription id: relays replace the subscription and answer with EOSE.
+            self.senders.borrow_mut().retain(|_, tx| tx.unbounded_send(req.clone()).is_ok());
+        }
+        let pool = self.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            crate::media::sleep_ms(WAKE_PROBE_MS).await;
+            if pool.closed.get() {
+                return;
+            }
+            let heard = pool.last_heard.borrow().clone();
+            let silent: Vec<usize> =
+                pool.kills.borrow().keys().filter(|i| heard.get(i).is_none_or(|at| *at < probed_at)).copied().collect();
+            for index in silent {
+                if let Some(kill) = pool.kills.borrow_mut().remove(&index) {
+                    let _ = kill.unbounded_send(());
+                }
+            }
+        });
     }
 
     async fn run_relay(self: Rc<Self>, index: usize, url: String, events: Rc<PoolEvents>) {
         let mut backoff = RECONNECT_INITIAL_MS;
         while !self.closed.get() {
             let started = js_sys::Date::now();
+            let wakes = self.wakes.get();
             match WebSocket::open(&url) {
                 Ok(ws) => self.serve_connection(index, &url, ws, &events).await,
                 Err(err) => log::warn!("Cannot open Nostr relay {}: {:?}", url, err),
@@ -127,15 +173,48 @@ impl NostrRelayPool {
             if self.closed.get() {
                 return;
             }
-            if js_sys::Date::now() - started > STABLE_CONNECTION_MS {
+            if js_sys::Date::now() - started > STABLE_CONNECTION_MS || self.wakes.get() != wakes {
                 backoff = RECONNECT_INITIAL_MS;
             }
             // Jitter keeps a room's members from reconnecting in lockstep after a relay restart.
             let delay = backoff * (0.75 + 0.5 * js_sys::Math::random());
             log::info!("Reconnecting to Nostr relay {} in {:.1}s", url, delay / 1000.0);
-            crate::media::sleep_ms(delay as i32).await;
+            if self.sleep_unless_woken(delay).await {
+                backoff = RECONNECT_INITIAL_MS;
+                continue;
+            }
             backoff = (backoff * 2.0).min(RECONNECT_MAX_MS);
         }
+    }
+
+    /// Wait `ms`, or less if `wake` is called meanwhile; returns whether it was.
+    async fn sleep_unless_woken(&self, ms: f64) -> bool {
+        let wakes = self.wakes.get();
+        let until = js_sys::Date::now() + ms;
+        loop {
+            if self.wakes.get() != wakes || self.closed.get() {
+                return true;
+            }
+            let left = until - js_sys::Date::now();
+            if left <= 0.0 {
+                return false;
+            }
+            crate::media::sleep_ms(left.min(WAKE_POLL_MS) as i32).await;
+        }
+    }
+
+    /// Our subscription to the room's topic, as a REQ message.
+    fn subscription_json(&self) -> Option<String> {
+        ClientRelayMessage::Req {
+            sub_id: format!("sub-{}", &self.topic[0..12]),
+            filters: vec![NostrFilter {
+                kinds: Some(vec![KIND_EPHEMERAL_SIGNAL]),
+                d_tags: Some(vec![self.topic.clone()]),
+                ..Default::default()
+            }],
+        }
+        .to_json()
+        .ok()
     }
 
     /// Subscribe, announce presence and route incoming events until the connection ends.
@@ -152,15 +231,7 @@ impl NostrRelayPool {
         });
 
         // Queued until the socket opens.
-        let req = ClientRelayMessage::Req {
-            sub_id: format!("sub-{}", &self.topic[0..12]),
-            filters: vec![NostrFilter {
-                kinds: Some(vec![KIND_EPHEMERAL_SIGNAL]),
-                d_tags: Some(vec![self.topic.clone()]),
-                ..Default::default()
-            }],
-        };
-        if let Ok(json) = req.to_json() {
+        if let Some(json) = self.subscription_json() {
             let _ = tx.unbounded_send(json);
         }
         if let Some(presence) = self.signed_event_json(&SignalPayload::Presence) {
@@ -170,10 +241,22 @@ impl NostrRelayPool {
             return;
         }
         self.senders.borrow_mut().insert(index, tx.clone());
+        let (kill_tx, mut kill_rx) = mpsc::unbounded::<()>();
+        self.kills.borrow_mut().insert(index, kill_tx.clone());
+        self.last_heard.borrow_mut().insert(index, js_sys::Date::now());
 
         // Counted as connected once the relay answers (EOSE to our subscription).
         let mut counted = false;
-        while let Some(msg_res) = ws_stream.next().await {
+        loop {
+            let msg_res = match select(ws_stream.next(), kill_rx.next()).await {
+                Either::Left((Some(msg_res), _)) => msg_res,
+                Either::Left((None, _)) => break,
+                Either::Right(_) => {
+                    log::warn!("Nostr relay {} did not answer after a pause", url);
+                    break;
+                }
+            };
+            self.last_heard.borrow_mut().insert(index, js_sys::Date::now());
             let text = match msg_res {
                 Ok(Message::Text(t)) => t,
                 Ok(_) => continue,
@@ -196,6 +279,11 @@ impl NostrRelayPool {
             senders.remove(&index);
         }
         drop(senders);
+        let mut kills = self.kills.borrow_mut();
+        if kills.get(&index).is_some_and(|current| current.same_receiver(&kill_tx)) {
+            kills.remove(&index);
+        }
+        drop(kills);
         if counted {
             self.connected_count.set(self.connected_count.get().saturating_sub(1));
             (events.on_relay_connected)(self.connected_count.get());

@@ -60,6 +60,7 @@ features = [
   "RtcRtpTransceiverDirection",
   "MediaStream",
   "MediaStreamTrack",
+  "MediaStreamTrackState",
   "MediaStreamConstraints",
   "MediaDevices",
   "Navigator",

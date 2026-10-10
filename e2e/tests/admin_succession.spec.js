@@ -42,7 +42,9 @@ test('the admin closes the tab: the longest-present member takes over after a wh
   expect(await keyState(cy.page)).toBe('none');
   await expect(memberRow(cy.page, 'Bo').locator('.member-badge')).toHaveCount(0);
 
-  // Closing the context skips the clean leave: the dropped link is detected instead.
+  // Closing the context skips the clean leave: the dropped link is detected instead, and Ana
+  // counts as away until the grace (shortened here from 5 minutes) runs out.
+  for (const m of [bo, cy]) await m.page.evaluate(() => window.__dchat.awayGraceMs(2000));
   await ana.context.close();
   await expect(bo.page.locator('.member-row')).toHaveCount(2, { timeout: 30000 });
   await bo.page.waitForTimeout(10000);
