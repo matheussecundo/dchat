@@ -7,9 +7,9 @@ edition = "2021"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chacha20poly1305 = { version = "0.10", features = ["alloc"] }
-base64 = "0.22"
+base64 = "0.23"
 rand = "0.8"
-thiserror = "1.0"
+thiserror = "2.0"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 k256 = { version = "0.13", default-features = false, features = ["schnorr", "arithmetic", "alloc"] }
 sha2 = "0.10"

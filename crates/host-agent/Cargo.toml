@@ -22,12 +22,12 @@ clap = { version = "4.5", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
-base64 = "0.22"
+base64 = "0.23"
 global-hotkey = "0.8"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
-x11rb = { version = "0.13", features = ["randr"] }
+x11rb = { version = "0.14", features = ["randr"] }
 
 [target.'cfg(windows)'.dependencies]
 vigem-client = "0.1"
