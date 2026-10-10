@@ -79,6 +79,26 @@ export async function expectDirectMesh(page, names, self) {
   }
 }
 
+/** Share a file with the room from the input bar (with an optional caption). */
+export async function shareFile(page, name, content, caption) {
+  await page.setInputFiles('#file-input-hidden', { name, mimeType: 'application/pdf', buffer: Buffer.from(content) });
+  await expect(page.locator('.attachment-chip')).toContainText(name);
+  if (caption) await page.locator('footer.input-bar input').fill(caption);
+  await page.locator('footer.input-bar .send-btn').click();
+  await expect(page.locator('.attachment-chip')).toHaveCount(0);
+}
+
+/** Click Download and return the downloaded bytes (in-memory Blob fallback). */
+export async function downloadVia(page, card) {
+  await page.evaluate(() => { delete window.showSaveFilePicker; });
+  const downloadPromise = page.waitForEvent('download');
+  await card.locator('.file-download-btn').click();
+  const download = await downloadPromise;
+  const chunks = [];
+  for await (const chunk of await download.createReadStream()) chunks.push(chunk);
+  return { name: download.suggestedFilename(), text: Buffer.concat(chunks).toString('utf-8') };
+}
+
 export async function expectNoStorage(page) {
   const storage = await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }));
   expect(storage.local).toBe(0);

@@ -4,7 +4,7 @@
 use super::RoomSession;
 use crate::state::{current_time_string, DmUi};
 use leptos::*;
-use protocol::{mentions, open_json, seal_json, DmContent, RoomBody, RoomEnvelope};
+use protocol::{open_json, seal_json, DmContent, RoomBody, RoomEnvelope};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use web_sys::window;
@@ -76,7 +76,7 @@ impl RoomSession {
 
     /// Toggle our `emoji` reaction on message `target`.
     pub fn toggle_reaction(&self, target: &str, emoji: &str) {
-        let on = !self.inner.reactions.borrow().has(target, emoji, &self.inner.me);
+        let on = !self.inner.log.borrow().has_reaction(target, emoji, &self.inner.me);
         self.publish(RoomBody::Reaction {
             target: target.to_string(),
             emoji: emoji.to_string(),
@@ -101,63 +101,17 @@ impl RoomSession {
         }
     }
 
+    /// Who wrote chat message `message_id` (only they may edit or delete it), per the log.
     fn author_of(&self, message_id: &str) -> Option<String> {
-        self.inner.message_authors.borrow().get(message_id).cloned()
-    }
-
-    /// Remember who wrote a chat message (edits and deletes must come from them) and
-    /// whether it mentions us.
-    pub(super) fn track_chat(&self, envelope: &RoomEnvelope, text: &str) -> bool {
-        self.inner
-            .message_authors
-            .borrow_mut()
-            .insert(envelope.id.clone(), envelope.author.clone());
-        self.stop_typing(&envelope.author);
-        let my_name = self.inner.names.borrow().get(&self.inner.me).cloned().unwrap_or_default();
-        let mentioned = envelope.author != self.inner.me && mentions(text, &my_name);
-        if mentioned {
-            self.inner.signals.mention.update(|n| *n += 1);
-        }
-        mentioned
+        self.inner.log.borrow().chat_author(message_id).map(str::to_string)
     }
 
     pub(super) fn on_chat_extra(&self, envelope: &RoomEnvelope) {
-        let author = envelope.author.as_str();
         match &envelope.body {
-            RoomBody::Typing => self.on_typing(author),
-            RoomBody::Reaction { target, emoji, on } => {
-                let changed = self.inner.reactions.borrow_mut().apply(target, emoji, author, envelope.ts, *on);
-                if changed {
-                    let tally = self.inner.reactions.borrow().tally(target);
-                    self.update_message(target, |m| m.reactions = tally);
-                }
-            }
-            RoomBody::Edit { target, text } => {
-                if self.author_of(target).as_deref() != Some(author) {
-                    return;
-                }
-                let newer = self.inner.last_edit.borrow().get(target).map_or(true, |ts| *ts < envelope.ts);
-                if !newer {
-                    return;
-                }
-                self.inner.last_edit.borrow_mut().insert(target.clone(), envelope.ts);
-                // The signed original no longer matches: keep it out of history.
-                self.inner.history.borrow_mut().remove(target);
-                let my_name = self.inner.names.borrow().get(&self.inner.me).cloned().unwrap_or_default();
-                let mentioned = author != self.inner.me && mentions(text, &my_name);
-                self.update_message(target, |m| {
-                    m.text = text.clone();
-                    m.edited = true;
-                    m.mentions_me = mentioned;
-                });
-            }
-            RoomBody::Delete { target } => {
-                if self.author_of(target).as_deref() != Some(author) {
-                    return;
-                }
-                self.inner.history.borrow_mut().remove(target);
-                self.inner.signals.messages.update(|msgs| msgs.retain(|m| m.id != *target));
-            }
+            RoomBody::Typing => self.on_typing(&envelope.author),
+            // Only the author's edits and deletions count, and the latest toggle wins: the
+            // log applies those rules the same way to live and synced envelopes.
+            RoomBody::Reaction { .. } | RoomBody::Edit { .. } | RoomBody::Delete { .. } => self.on_logged(envelope),
             RoomBody::Dm { .. } => {
                 self.receive_dm(envelope);
             }
@@ -165,7 +119,7 @@ impl RoomSession {
         }
     }
 
-    fn update_message(&self, id: &str, change: impl FnOnce(&mut crate::state::ChatMessageUi)) {
+    pub(super) fn update_message(&self, id: &str, change: impl FnOnce(&mut crate::state::ChatMessageUi)) {
         self.inner.signals.messages.update(|msgs| {
             if let Some(msg) = msgs.iter_mut().find(|m| m.id == id) {
                 change(msg);
@@ -213,7 +167,8 @@ impl RoomSession {
         }
         let sealed = seal_json(&self.inner.identity, to, &DmContent { text: text.to_string() }).map_err(|e| e.to_string())?;
         let body = RoomBody::Dm { sealed };
-        let envelope = RoomEnvelope::sign(&self.inner.identity, js_sys::Date::now() as u64, body).map_err(|e| e.to_string())?;
+        let envelope =
+            RoomEnvelope::sign(&self.inner.identity, self.adm(), js_sys::Date::now() as u64, body).map_err(|e| e.to_string())?;
         self.inner.dedup.borrow_mut().insert(&envelope.id);
         let frame = self.encode(&envelope).ok_or("Failed to encrypt")?;
         let direct = self.link(to).filter(|l| l.is_open());

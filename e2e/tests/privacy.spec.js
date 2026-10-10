@@ -27,23 +27,66 @@ test('handshakes through the relays are sealed: the room key alone does not reve
   const adminUrl = await createRoom(ana.page, { name: 'Ana' });
   await joinRoom(bo.page, inviteFrom(adminUrl), 'Bo');
   await expectDirectMesh(ana.page, ['Ana', 'Bo'], 'Ana');
+  const anaKey = await ana.page.evaluate(() => window.__dchat.selfPubkey());
   const boKey = await bo.page.evaluate(() => window.__dchat.selfPubkey());
 
-  const signals = published
+  const events = published
     .map((m) => JSON.parse(m))
     .filter(([type]) => type === 'EVENT')
-    .map(([, event]) => JSON.parse(openWithRoomKey(adminUrl, JSON.parse(event.content))));
-  const kinds = signals.map((s) => s.payload.kind);
+    .map(([, event]) => event);
+  const signals = events.map((event) => JSON.parse(openWithRoomKey(adminUrl, JSON.parse(event.content))));
+  const kinds = signals.map((s) => s.payload.signal.kind);
   expect(kinds).toContain('Presence');
   expect(kinds).toContain('Sealed');
-  for (const signal of signals.filter((s) => s.payload.kind === 'Sealed')) {
-    expect(signal.payload.content.to).toBe(boKey);
+  for (const signal of signals.filter((s) => s.payload.signal.kind === 'Sealed')) {
+    expect(signal.payload.signal.content.to).toBe(boKey);
   }
+  // The member's identity travels inside the encryption; relays see only a per-session key.
+  for (const signal of signals) expect(signal.payload.from).toBe(anaKey);
+  for (const event of events) expect(event.pubkey).not.toBe(anaKey);
   const readable = JSON.stringify(signals);
   // `"sdp`, not `sdp`: random base64url ciphertext can contain the letters, never a quote.
   for (const secret of ['v=0', 'candidate', 'a=fingerprint', '"sdp']) {
     expect(readable).not.toContain(secret);
   }
+
+  await ana.context.close();
+  await bo.context.close();
+});
+
+test('relays see a new key after the room moves, while members keep their identity', async ({ browser }) => {
+  test.setTimeout(90000);
+  const ana = await newMember(browser, 'Ana');
+  const bo = await newMember(browser, 'Bo');
+  const published = [];
+  await ana.context.routeWebSocket('**/nostr', (ws) => {
+    const server = ws.connectToServer();
+    ws.onMessage((message) => {
+      published.push(message);
+      server.send(message);
+    });
+  });
+  const relayKeys = () => new Set(published
+    .map((m) => JSON.parse(m))
+    .filter(([type]) => type === 'EVENT')
+    .map(([, event]) => event.pubkey));
+  const selfKey = (page) => page.evaluate(() => window.__dchat.selfPubkey());
+
+  const adminUrl = await createRoom(ana.page, { name: 'Ana' });
+  await joinRoom(bo.page, inviteFrom(adminUrl), 'Bo');
+  await expectDirectMesh(ana.page, ['Ana', 'Bo'], 'Ana');
+  const anaKey = await selfKey(ana.page);
+  const before = relayKeys();
+  expect(before.size).toBe(1);
+
+  ana.page.once('dialog', (dialog) => dialog.accept());
+  await ana.page.locator('#rotate-link-btn').click();
+  await expect(ana.page.locator('.system-notice', { hasText: 'The admin moved the room to a new link' })).toBeVisible({ timeout: 15000 });
+  await expectDirectMesh(ana.page, ['Ana', 'Bo'], 'Ana');
+  expect(await selfKey(ana.page)).toBe(anaKey);
+  const after = [...relayKeys()].filter((k) => !before.has(k));
+  expect(after).toHaveLength(1);
+  expect(after[0]).not.toBe(anaKey);
 
   await ana.context.close();
   await bo.context.close();

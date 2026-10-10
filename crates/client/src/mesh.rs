@@ -18,6 +18,8 @@ use web_sys::{
 const CHAT_LABEL: &str = "chat";
 const FILE_LABEL: &str = "file-transfer";
 pub const FILE_BUFFER_LOW_THRESHOLD: u32 = 512 * 1024;
+/// History sync waiting for room on the chat channel wakes when its queue drops below this.
+const CHAT_BUFFER_LOW_THRESHOLD: u32 = 64 * 1024;
 const ICE_BATCH_DELAY_MS: i32 = 100;
 /// Pointer and controller states are dropped rather than queued behind this much data.
 const INPUT_STATE_MAX_BUFFERED: u32 = 8 * 1024;
@@ -65,6 +67,8 @@ pub struct PeerLink {
     making_offer: Rc<Cell<bool>>,
     ignore_offer: Cell<bool>,
     chat: Rc<RefCell<Option<RtcDataChannel>>>,
+    /// Wakes history sync waiting for room on the chat channel.
+    chat_drain_notify: DrainNotify,
     /// Binary channel for encrypted file chunks, separate so transfers never delay chat.
     files: Rc<RefCell<Option<RtcDataChannel>>>,
     file_drain_notify: DrainNotify,
@@ -109,6 +113,7 @@ impl PeerLink {
             making_offer: Rc::new(Cell::new(false)),
             ignore_offer: Cell::new(false),
             chat: Rc::new(RefCell::new(None)),
+            chat_drain_notify: Rc::new(RefCell::new(Vec::new())),
             files: Rc::new(RefCell::new(None)),
             file_drain_notify: Rc::new(RefCell::new(Vec::new())),
             input_events: Rc::new(RefCell::new(None)),
@@ -133,7 +138,7 @@ impl PeerLink {
             let init = RtcDataChannelInit::new();
             init.set_ordered(true);
             let dc = link.pc.create_data_channel_with_data_channel_dict(CHAT_LABEL, &init);
-            attach_chat_callbacks(&dc, &link.remote, id, on_event.clone(), notify_closed);
+            attach_chat_callbacks(&dc, &link.remote, id, on_event.clone(), notify_closed, link.chat_drain_notify.clone());
             *link.chat.borrow_mut() = Some(dc);
             let file_dc = link.pc.create_data_channel_with_data_channel_dict(FILE_LABEL, &init);
             file_dc.set_buffered_amount_low_threshold(FILE_BUFFER_LOW_THRESHOLD);
@@ -150,6 +155,7 @@ impl PeerLink {
             *link.input_state.borrow_mut() = Some(state_dc);
         } else {
             let chat = link.chat.clone();
+            let chat_drain_notify = link.chat_drain_notify.clone();
             let files = link.files.clone();
             let file_drain_notify = link.file_drain_notify.clone();
             let input_events = link.input_events.clone();
@@ -159,7 +165,7 @@ impl PeerLink {
                 let dc = ev.channel();
                 match dc.label().as_str() {
                     CHAT_LABEL => {
-                        attach_chat_callbacks(&dc, &remote, id, on_event.clone(), notify_closed.clone());
+                        attach_chat_callbacks(&dc, &remote, id, on_event.clone(), notify_closed.clone(), chat_drain_notify.clone());
                         *chat.borrow_mut() = Some(dc);
                     }
                     FILE_LABEL => {
@@ -197,6 +203,27 @@ impl PeerLink {
         match self.chat.borrow().as_ref() {
             Some(dc) if dc.ready_state() == RtcDataChannelState::Open => dc.send_with_str(text).is_ok(),
             _ => false,
+        }
+    }
+
+    /// Wait until the chat channel has less than `high_water` queued, so bulk traffic (history
+    /// sync) leaves room for live messages; `false` once the channel is gone.
+    pub async fn wait_for_chat_room(&self, high_water: u32) -> bool {
+        use futures::FutureExt;
+        loop {
+            let buffered = match self.chat.borrow().as_ref() {
+                Some(dc) if !self.closed.get() && dc.ready_state() == RtcDataChannelState::Open => dc.buffered_amount(),
+                _ => return false,
+            };
+            if buffered < high_water {
+                return true;
+            }
+            let (tx, rx) = oneshot::channel();
+            self.chat_drain_notify.borrow_mut().push(tx);
+            futures::select! {
+                _ = rx.fuse() => {},
+                _ = crate::media::sleep_ms(100).fuse() => {},
+            }
         }
     }
 
@@ -257,7 +284,7 @@ impl PeerLink {
 
     pub fn close(&self) {
         self.closed.set(true);
-        for tx in self.file_drain_notify.borrow_mut().drain(..) {
+        for tx in self.file_drain_notify.borrow_mut().drain(..).chain(self.chat_drain_notify.borrow_mut().drain(..)) {
             let _ = tx.send(());
         }
         for channel in [&self.chat, &self.files, &self.input_events, &self.input_state] {
@@ -417,7 +444,10 @@ fn attach_chat_callbacks(
     id: u64,
     on_event: LinkEventHandler,
     notify_closed: Rc<dyn Fn()>,
+    drain_notify: DrainNotify,
 ) {
+    dc.set_buffered_amount_low_threshold(CHAT_BUFFER_LOW_THRESHOLD);
+    notify_on_drain(dc, drain_notify);
     {
         let on_event = on_event.clone();
         let remote = remote.to_string();

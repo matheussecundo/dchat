@@ -4,7 +4,7 @@
 //! member (and anyone holding only the old link) stays behind.
 
 use super::RoomSession;
-use crate::state::{current_fragment, replace_fragment, RekeyTarget};
+use crate::state::{current_fragment, replace_fragment, RekeyTarget, SessionCarry};
 use leptos::*;
 use protocol::{generate_key, generate_room_id, key_from_base64, key_to_base64, RoomBody, RoomGrant, SealedGrant};
 
@@ -84,6 +84,7 @@ impl RoomSession {
         let s = self.clone();
         set_timeout(
             move || {
+                let carry = SessionCarry { identity: s.inner.identity.clone(), shared_files: s.shared_files() };
                 s.leave();
                 let mut params = current_fragment();
                 params.set("room", &grant.room);
@@ -93,6 +94,7 @@ impl RoomSession {
                     room: grant.room,
                     key,
                     rejoin_voice,
+                    carry,
                 }));
             },
             std::time::Duration::from_millis(REKEY_DELAY_MS),

@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod chat_log;
 pub mod control;
 pub mod crypto;
 pub mod fragment;
@@ -14,7 +15,7 @@ pub mod transfer;
 pub mod version;
 pub mod video;
 
-// `pacing`, `transfer` and `video` are used by path (`protocol::video::Hint`): names like `Hint` and
+// `chat_log`, `pacing`, `transfer` and `video` are used by path (`protocol::video::Hint`): names like `Hint` and
 // `Degradation` are too generic to export at the crate root.
 pub use agent::*;
 pub use control::*;

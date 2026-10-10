@@ -1152,6 +1152,20 @@ select.lobby-input {
   text-align: center;
 }
 
+/* Earlier messages are being fetched: stays at the top while the chat scrolls. */
+.history-loading {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  align-self: center;
+  font-size: 0.75rem;
+  color: #93c5fd;
+  background-color: var(--bg-card);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 9999px;
+  padding: 3px 12px;
+}
+
 .message-author,
 .member-name {
   unicode-bidi: isolate;

@@ -34,8 +34,10 @@ use state::{
     admin_url, create_room, current_fragment, format_file_size, host_download_url, fragment_relay_choice, invite_url, read_credentials,
     selectable_devices, AudioSettings, DeviceChoice, DeviceEntry, RelayMode, CAMERA_KIND, MIC_KIND, SPEAKER_KIND,
     ChatMessageUi, ConnectionStatus, DmUi, DownloadSummary, FileOfferInfo, FileTransferStatus, LinkUi,
-    LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RekeyTarget, RoomCaps, ControlUi, ControlPromptUi,
+    LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RekeyTarget, RoomCaps, ControlUi, ControlPromptUi, SessionCarry,
 };
+use protocol::chat_log::ChatLog;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use wasm_bindgen::JsCast;
 use web_sys::{window, HtmlInputElement};
@@ -72,7 +74,6 @@ fn App() -> impl IntoView {
     let (cap_input, set_cap_input) = create_signal(DEFAULT_MEMBER_CAP.to_string());
     let (voice_cap_input, set_voice_cap_input) = create_signal(DEFAULT_VOICE_CAP.to_string());
     let (video_cap_input, set_video_cap_input) = create_signal(DEFAULT_VIDEO_CAP.to_string());
-    let (history_input, set_history_input) = create_signal(false);
     let (hide_ip_input, set_hide_ip_input) = create_signal(false);
     // Typed at creation or on the join screen; cleared once stretched.
     let (password_input, set_password_input) = create_signal(String::new());
@@ -102,6 +103,10 @@ fn App() -> impl IntoView {
 
     let (status, set_status) = create_signal(ConnectionStatus::Idle);
     let (messages, set_messages) = create_signal(Vec::<ChatMessageUi>::new());
+    // The room's chat log (signed originals, synced with members): RAM only, carried across
+    // rekeys, emptied on a fresh entry or removal.
+    let chat_log = store_value(Rc::new(RefCell::new(ChatLog::new())));
+    let (history_loading, set_history_loading) = create_signal(false);
     let (members, set_members) = create_signal(Vec::<MemberUi>::new());
     let (names, set_names) = create_signal(HashMap::<String, String>::new());
     let (room_full, set_room_full) = create_signal(false);
@@ -205,7 +210,10 @@ fn App() -> impl IntoView {
     // A password room's stretched password, RAM only: it also opens the room after a rekey.
     let stretched_password = store_value(None::<[u8; KEY_LENGTH]>);
 
-    let start_session = move |room_id: String, link_key: [u8; KEY_LENGTH], migrated: bool| -> Option<RoomSession> {
+    let start_session = move |room_id: String, link_key: [u8; KEY_LENGTH], carry: Option<SessionCarry>| -> Option<RoomSession> {
+        if carry.is_none() {
+            chat_log.with_value(|log| log.borrow_mut().clear());
+        }
         // In a password room the link's key alone opens nothing.
         let key = match (RoomParams::from_fragment(&current_fragment()).password_salt, stretched_password.get_value()) {
             (Some(_), Some(stretched)) => password_room_key(&link_key, &stretched),
@@ -234,9 +242,11 @@ fn App() -> impl IntoView {
             control: set_control,
             devices: set_device_choice,
             ready_files,
+            chat_log,
+            history_loading: set_history_loading,
         };
         set_room_id_sig.set(room_id.clone());
-        match RoomSession::start(room_id, key, my_name.get_value(), signals, migrated, host_ice.get_value()) {
+        match RoomSession::start(room_id, key, my_name.get_value(), signals, carry, host_ice.get_value()) {
             Ok(session) => {
                 session_ref.set_value(Some(session.clone()));
                 session.set_allow_control(allow_control.get_untracked());
@@ -284,7 +294,7 @@ fn App() -> impl IntoView {
             }
             // Optional host TURN servers (Cloudflare Worker); quick 404 on static hosts.
             host_ice.set_value(ice::fetch_ice_servers().await);
-            start_session(room_id, key, false);
+            start_session(room_id, key, None);
             set_entering.set(false);
         });
     };
@@ -293,7 +303,7 @@ fn App() -> impl IntoView {
     create_effect(move |_| {
         if let Some(target) = rekey.get() {
             set_rekey.set(None);
-            if let Some(session) = start_session(target.room, target.key, true) {
+            if let Some(session) = start_session(target.room, target.key, Some(target.carry)) {
                 if target.rejoin_voice {
                     session.join_voice();
                 }
@@ -303,6 +313,7 @@ fn App() -> impl IntoView {
     create_effect(move |_| {
         if removed.get() {
             ready_files.update_value(|ready| ready.clear());
+            chat_log.with_value(|log| log.borrow_mut().clear());
             set_screen.set(Screen::Removed);
         }
     });
@@ -312,7 +323,6 @@ fn App() -> impl IntoView {
             members: parse_cap(Some(&cap_input.get_untracked()), DEFAULT_MEMBER_CAP),
             voice: parse_cap(Some(&voice_cap_input.get_untracked()), DEFAULT_VOICE_CAP),
             video: parse_cap(Some(&video_cap_input.get_untracked()), DEFAULT_VIDEO_CAP),
-            history: history_input.get_untracked(),
             hide_ip: hide_ip_input.get_untracked(),
             password: password_wanted.get_untracked() && !password_input.get_untracked().trim().is_empty(),
             relays: match (relay_mode.get_untracked(), custom_relays.get_untracked()) {
@@ -992,7 +1002,6 @@ fn App() -> impl IntoView {
             with_session(&|s| s.rotate_link());
         }
     };
-    let history_on = move || session_ref.with_value(|s| s.as_ref().is_some_and(|s| s.history_enabled()));
     let hides_ip = move || session_ref.with_value(|s| s.as_ref().is_some_and(|s| s.hides_ip()));
     let has_password = move || session_ref.with_value(|s| s.as_ref().is_some_and(|s| s.has_password()));
 
@@ -1119,15 +1128,6 @@ fn App() -> impl IntoView {
                             })}
                         })}
                         <p class="lobby-hint">{move || t(lang.get(), "relay_hint")}</p>
-                        <label class="lobby-check" for="history-checkbox">
-                            <input
-                                type="checkbox"
-                                id="history-checkbox"
-                                prop:checked=move || history_input.get()
-                                on:change=move |ev| set_history_input.set(event_target_checked(&ev))
-                            />
-                            <span>{move || t(lang.get(), "history_label")}</span>
-                        </label>
                         <label class="lobby-check" for="hide-ip-checkbox">
                             <input
                                 type="checkbox"
@@ -1298,7 +1298,6 @@ fn App() -> impl IntoView {
                     {move || match &notice {
                         Notice::Joined(name) => t_replace_1(lang.get(), "sys_joined", "{name}", name),
                         Notice::Left(name) => t_replace_1(lang.get(), "sys_left", "{name}", name),
-                        Notice::LateJoin => t(lang.get(), "sys_late_join").to_string(),
                         Notice::HistoryShown => t(lang.get(), "sys_history_shown").to_string(),
                         Notice::Rekeyed => t(lang.get(), "sys_rekeyed").to_string(),
                     }}
@@ -1419,11 +1418,6 @@ fn App() -> impl IntoView {
                     >
                         {move || format!("👥 {}", members.get().len())}
                     </button>
-                    {move || history_on().then(|| view! {
-                        <span class="history-badge" title=move || t(lang.get(), "history_badge_title")>
-                            {move || t(lang.get(), "history_badge")}
-                        </span>
-                    })}
                     {move || has_password().then(|| view! {
                         <span class="history-badge password-badge" title=move || t(lang.get(), "password_badge_title")>
                             {move || t(lang.get(), "password_badge")}
@@ -1681,6 +1675,9 @@ fn App() -> impl IntoView {
                         }
                     }
                 >
+                    {move || history_loading.get().then(|| view! {
+                        <div class="history-loading" role="status">{move || t(lang.get(), "history_loading")}</div>
+                    })}
                     {move || {
                         if !has_messages.get() {
                             view! {

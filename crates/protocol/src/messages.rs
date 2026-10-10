@@ -136,6 +136,24 @@ impl RelaySignal {
     }
 }
 
+/// What a member sends through the relays: its room identity (session pubkey), proof that
+/// the key signing the relay event speaks for it, and the signal. Relay events are signed by
+/// a key that is fresh every session, while the identity survives a rekey; so relays can't
+/// tie a room to the one it was rotated from.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelayFrame {
+    pub from: String,
+    /// `from`'s signature over `relay_key_message(topic, relay event pubkey)`.
+    pub cert: String,
+    pub signal: RelaySignal,
+}
+
+/// Bytes a member's identity signs to vouch for the key that signs its relay events on
+/// `topic`. Binding the relay key stops anyone from re-sending the frame under their own.
+pub fn relay_key_message(topic: &str, relay_pubkey: &str) -> Vec<u8> {
+    format!("dchat:relay-key:{topic}:{relay_pubkey}").into_bytes()
+}
+
 /// Why remote control ended or was not granted.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ControlEnd {
@@ -158,6 +176,15 @@ pub enum VideoKind {
     Screen,
 }
 
+/// A time window of a chat log: its start (ms since the epoch, aligned to its span), how
+/// many entries it holds and the XOR of their fingerprints.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncWindow {
+    pub start: u64,
+    pub count: u32,
+    pub hash: u64,
+}
+
 /// Content of a room message. Sent inside a `RoomEnvelope` over the per-pair
 /// "chat" RTCDataChannel, encrypted with the room key.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -172,13 +199,7 @@ pub enum RoomBody {
     },
     /// The author's current direct WebRTC links; `seq` increases with each update.
     LinkState { seq: u64, direct: Vec<String> },
-    /// `shareable`: the author allows this message in the history shown to late joiners
-    /// (set from the author's own room link, `&hist=1`).
-    Chat {
-        text: String,
-        #[serde(default)]
-        shareable: bool,
-    },
+    Chat { text: String },
     /// The author's voice-lounge state. `voice_ts` / `video_ts` are when they joined
     /// voice / turned video on, ordering the voice and video caps like `join_ts` does
     /// for the member cap. `seq` increases with each update.
@@ -211,10 +232,19 @@ pub enum RoomBody {
     /// `from_dialer`: the author opened that link (otherwise `to` did); each side numbers
     /// the links it opens.
     FileLinkSignal { to: String, link: u32, from_dialer: bool, signal: SignalPayload },
-    /// A late joiner asks a neighbor for the shareable recent messages it holds.
-    HistoryRequest { to: String },
-    /// Signed originals of recent shareable chat messages, oldest first.
-    HistoryChunk { to: String, envelopes: Vec<RoomEnvelope> },
+    /// History sync, first message of a round: the sender's non-empty day windows of its
+    /// chat log (`protocol::chat_log`). `horizon`: the time below which its log keeps nothing.
+    SyncSummary { to: String, horizon: Option<u64>, windows: Vec<SyncWindow> },
+    /// Describe these windows of `level` (0 day, 1 hour, 2 minute): they differ from ours.
+    SyncAsk { to: String, horizon: Option<u64>, level: u8, starts: Vec<u64> },
+    /// Answer to a summary or an ask: the ids held in small differing windows, and the
+    /// non-empty `level` windows inside large ones. `last` ends the answer.
+    SyncDiff { to: String, ids: Vec<String>, level: u8, windows: Vec<SyncWindow>, last: bool },
+    /// Send these entries of your log.
+    SyncWant { to: String, ids: Vec<String> },
+    /// Signed originals from the sender's log (authors' Hellos first). `last` ends the
+    /// answer to one `SyncWant`.
+    SyncBatch { to: String, envelopes: Vec<RoomEnvelope>, last: bool },
     /// The author is typing (sent at most every few seconds; expires on its own).
     Typing,
     /// Add (`on`) or remove the author's `emoji` reaction to message `target`.
@@ -255,8 +285,11 @@ impl RoomBody {
             RoomBody::FileRequest { to, .. }
             | RoomBody::FileQueued { to, .. }
             | RoomBody::FileLinkSignal { to, .. }
-            | RoomBody::HistoryRequest { to }
-            | RoomBody::HistoryChunk { to, .. }
+            | RoomBody::SyncSummary { to, .. }
+            | RoomBody::SyncAsk { to, .. }
+            | RoomBody::SyncDiff { to, .. }
+            | RoomBody::SyncWant { to, .. }
+            | RoomBody::SyncBatch { to, .. }
             | RoomBody::LinkSignal { to, .. }
             | RoomBody::ControlRequest { to, .. }
             | RoomBody::ControlGrant { to, .. }
@@ -268,7 +301,9 @@ impl RoomBody {
 }
 
 /// A room message signed by its author's session key, so it can be gossip-relayed
-/// through other members without any of them being able to forge or alter it.
+/// through other members without any of them being able to forge or alter it. The
+/// signature also covers the room's admin key (`adm`, unchanged by rekeys), so a member of
+/// two rooms can't replay one room's messages, or names, into the other.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RoomEnvelope {
     pub id: String,
@@ -279,10 +314,11 @@ pub struct RoomEnvelope {
 }
 
 impl RoomEnvelope {
-    pub fn sign(key: &NostrBurnerKey, ts: u64, body: RoomBody) -> Result<Self, NostrError> {
+    /// `adm`: the room's admin pubkey (`""` for a link without one).
+    pub fn sign(key: &NostrBurnerKey, adm: &str, ts: u64, body: RoomBody) -> Result<Self, NostrError> {
         let id = uuid::Uuid::new_v4().to_string();
         let author = key.pubkey().to_string();
-        let sig = key.sign_message(&Self::signed_bytes(&id, &author, ts, &body)?)?;
+        let sig = key.sign_message(&Self::signed_bytes(adm, &id, &author, ts, &body)?)?;
         Ok(Self {
             id,
             author,
@@ -292,14 +328,15 @@ impl RoomEnvelope {
         })
     }
 
-    pub fn verify(&self) -> bool {
-        Self::signed_bytes(&self.id, &self.author, self.ts, &self.body)
+    /// Signed by `author` for the room whose admin pubkey is `adm`.
+    pub fn verify(&self, adm: &str) -> bool {
+        Self::signed_bytes(adm, &self.id, &self.author, self.ts, &self.body)
             .map(|bytes| verify_message(&self.author, &bytes, &self.sig))
             .unwrap_or(false)
     }
 
-    pub(crate) fn signed_bytes(id: &str, author: &str, ts: u64, body: &RoomBody) -> Result<Vec<u8>, NostrError> {
-        Ok(serde_json::to_vec(&("dchat:envelope:v1", id, author, ts, body))?)
+    pub(crate) fn signed_bytes(adm: &str, id: &str, author: &str, ts: u64, body: &RoomBody) -> Result<Vec<u8>, NostrError> {
+        Ok(serde_json::to_vec(&("dchat:envelope:v2", adm, id, author, ts, body))?)
     }
 }
 
@@ -368,24 +405,34 @@ mod tests {
     #[test]
     fn test_envelope_sign_verify_and_tamper() {
         let key = NostrBurnerKey::generate().unwrap();
-        let env = RoomEnvelope::sign(&key, 42, RoomBody::Chat { text: "hi".into(), shareable: false }).unwrap();
-        assert!(env.verify());
+        let env = RoomEnvelope::sign(&key, "adm", 42, RoomBody::Chat { text: "hi".into() }).unwrap();
+        assert!(env.verify("adm"));
 
         let json = serde_json::to_string(&env).unwrap();
         let parsed: RoomEnvelope = serde_json::from_str(&json).unwrap();
-        assert!(parsed.verify());
+        assert!(parsed.verify("adm"));
 
         let mut forged = env.clone();
-        forged.body = RoomBody::Chat { text: "bye".into(), shareable: false };
-        assert!(!forged.verify());
+        forged.body = RoomBody::Chat { text: "bye".into() };
+        assert!(!forged.verify("adm"));
 
         let mut reattributed = env.clone();
         reattributed.author = NostrBurnerKey::generate().unwrap().pubkey().to_string();
-        assert!(!reattributed.verify());
+        assert!(!reattributed.verify("adm"));
 
         let mut retimed = env;
         retimed.ts = 43;
-        assert!(!retimed.verify());
+        assert!(!retimed.verify("adm"));
+    }
+
+    #[test]
+    fn test_envelope_bound_to_admin_key() {
+        // A member of two rooms can't replay one room's messages into the other.
+        let key = NostrBurnerKey::generate().unwrap();
+        let env = RoomEnvelope::sign(&key, "room-a-admin", 1, RoomBody::Chat { text: "hi".into() }).unwrap();
+        assert!(env.verify("room-a-admin"));
+        assert!(!env.verify("room-b-admin"));
+        assert!(!env.verify(""));
     }
 
     #[test]
@@ -396,8 +443,17 @@ mod tests {
         assert_eq!(withdraw.recipient(), None);
         let stop = RoomBody::FileCancel { to: Some("b".into()), file_id: "f".into() };
         assert_eq!(stop.recipient(), Some("b"));
-        assert_eq!(RoomBody::Chat { text: "x".into(), shareable: true }.recipient(), None);
-        assert_eq!(RoomBody::HistoryRequest { to: "c".into() }.recipient(), Some("c"));
+        assert_eq!(RoomBody::Chat { text: "x".into() }.recipient(), None);
+        let sync_bodies = [
+            RoomBody::SyncSummary { to: "c".into(), horizon: None, windows: vec![] },
+            RoomBody::SyncAsk { to: "c".into(), horizon: Some(1), level: 1, starts: vec![0] },
+            RoomBody::SyncDiff { to: "c".into(), ids: vec![], level: 1, windows: vec![], last: true },
+            RoomBody::SyncWant { to: "c".into(), ids: vec!["m".into()] },
+            RoomBody::SyncBatch { to: "c".into(), envelopes: vec![], last: true },
+        ];
+        for body in sync_bodies {
+            assert_eq!(body.recipient(), Some("c"), "history sync is direct-only: {body:?}");
+        }
         assert_eq!(RoomBody::ControlRequest { to: "s".into(), mouse_keyboard: true, controller: false }.recipient(), Some("s"));
         assert_eq!(RoomBody::ControlRelease { to: "s".into() }.recipient(), Some("s"));
         let status = RoomBody::ControlStatus { seq: 1, available: true, controllers: 4, mouse_keyboard: None, pads: vec![] };
@@ -426,9 +482,9 @@ mod tests {
         assert_eq!(body.recipient(), Some("b"));
 
         let key = NostrBurnerKey::generate().unwrap();
-        let env = RoomEnvelope::sign(&key, 1, body).unwrap();
+        let env = RoomEnvelope::sign(&key, "", 1, body).unwrap();
         let parsed: RoomEnvelope = serde_json::from_str(&serde_json::to_string(&env).unwrap()).unwrap();
-        assert!(parsed.verify());
+        assert!(parsed.verify(""));
         assert_eq!(parsed.body, RoomBody::LinkSignal { to: "b".into(), signal: offer });
     }
 
@@ -437,11 +493,18 @@ mod tests {
         // One reason members link only on the same PROTOCOL_VERSION: a verifier that drops
         // an unknown field re-serializes different bytes, so the signature no longer matches.
         let key = NostrBurnerKey::generate().unwrap();
-        let env = RoomEnvelope::sign(&key, 1, RoomBody::Chat { text: "hi".into(), shareable: true }).unwrap();
+        let offer = RoomBody::FileOffer {
+            file_id: "f".into(),
+            name: "a.txt".into(),
+            size: 1,
+            mime_type: "text/plain".into(),
+            caption: Some("c".into()),
+        };
+        let env = RoomEnvelope::sign(&key, "adm", 1, offer).unwrap();
         let mut json: serde_json::Value = serde_json::to_value(&env).unwrap();
-        json["body"]["data"].as_object_mut().unwrap().remove("shareable");
+        json["body"]["data"].as_object_mut().unwrap().remove("caption");
         let as_old_client_sees_it: RoomEnvelope = serde_json::from_value(json).unwrap();
-        assert!(!as_old_client_sees_it.verify());
+        assert!(!as_old_client_sees_it.verify("adm"));
     }
 
     #[test]
@@ -457,9 +520,15 @@ mod tests {
     }
 
     #[test]
-    fn test_chat_shareable_defaults_to_false() {
-        let parsed: RoomBody = serde_json::from_str(r#"{"type":"Chat","data":{"text":"hi"}}"#).unwrap();
-        assert_eq!(parsed, RoomBody::Chat { text: "hi".into(), shareable: false });
+    fn test_relay_key_cert_binds_topic_and_key() {
+        let identity = NostrBurnerKey::generate().unwrap();
+        let relay_key = NostrBurnerKey::generate().unwrap();
+        let other_key = NostrBurnerKey::generate().unwrap();
+        let cert = identity.sign_message(&relay_key_message("topic", relay_key.pubkey())).unwrap();
+        assert!(verify_message(identity.pubkey(), &relay_key_message("topic", relay_key.pubkey()), &cert));
+        assert!(!verify_message(identity.pubkey(), &relay_key_message("topic", other_key.pubkey()), &cert));
+        assert!(!verify_message(identity.pubkey(), &relay_key_message("other", relay_key.pubkey()), &cert));
+        assert!(!verify_message(other_key.pubkey(), &relay_key_message("topic", relay_key.pubkey()), &cert));
     }
 
     #[test]

@@ -3,6 +3,8 @@ use protocol::{
     key_to_base64, parse_relay_list, FragmentParams, NostrBurnerKey, VideoKind, DEFAULT_MEMBER_CAP,
     DEFAULT_VIDEO_CAP, DEFAULT_VOICE_CAP, KEY_LENGTH, PUBLIC_RELAYS, PUBLIC_RELAYS_KEYWORD,
 };
+use std::collections::HashMap;
+use std::rc::Rc;
 use wasm_bindgen::JsValue;
 use web_sys::window;
 
@@ -203,14 +205,13 @@ pub struct ControlPromptUi {
     pub takes_over: Option<String>,
 }
 
-/// Room settings chosen at creation: caps (`None` = unlimited), history for late joiners and
-/// the `&relays=` value (`None` = the public relays).
+/// Room settings chosen at creation: caps (`None` = unlimited) and the `&relays=` value
+/// (`None` = the public relays).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomCaps {
     pub members: Option<usize>,
     pub voice: Option<usize>,
     pub video: Option<usize>,
-    pub history: bool,
     /// Connect only through TURN, hiding members' IP addresses from each other.
     pub hide_ip: bool,
     /// The room key also needs a password: the link gets a fresh salt (`pw`).
@@ -305,7 +306,6 @@ pub fn format_file_size(bytes: u64) -> String {
 pub enum Notice {
     Joined(String),
     Left(String),
-    LateJoin,
     /// History from before we joined was inserted above.
     HistoryShown,
     /// An admin moved the room to a new link and we followed.
@@ -313,12 +313,23 @@ pub enum Notice {
 }
 
 /// Where an admin moved the room: the new room ID and key, already written to the URL.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct RekeyTarget {
     pub room: String,
     pub key: [u8; KEY_LENGTH],
     /// Rejoin the voice lounge in the new room.
     pub rejoin_voice: bool,
+    pub carry: SessionCarry,
+}
+
+/// What a session hands to the next one when an admin moves the room (RAM only).
+#[derive(Clone)]
+pub struct SessionCarry {
+    /// Our session identity, kept in the new room: we stay the author of our earlier
+    /// messages there (relay events get a fresh key, so relays can't link the rooms).
+    pub identity: Rc<NostrBurnerKey>,
+    /// Files we offered, still downloadable from us in the new room, by file id.
+    pub shared_files: HashMap<String, web_sys::File>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -339,6 +350,25 @@ pub struct ChatMessageUi {
     pub mentions_me: bool,
     /// Bumped on every in-place change, so the row re-renders.
     pub rev: u32,
+}
+
+/// Insert `incoming` (history, any order) into the timeline: each one after every message
+/// with an earlier or equal timestamp, in one pass.
+pub fn merge_by_time(messages: &mut Vec<ChatMessageUi>, mut incoming: Vec<ChatMessageUi>) {
+    if incoming.is_empty() {
+        return;
+    }
+    incoming.sort_by_key(|m| m.ts);
+    let mut incoming = incoming.into_iter().peekable();
+    let mut merged = Vec::with_capacity(messages.len() + incoming.len());
+    for message in messages.drain(..) {
+        while let Some(earlier) = incoming.next_if(|m| m.ts < message.ts) {
+            merged.push(earlier);
+        }
+        merged.push(message);
+    }
+    merged.extend(incoming);
+    *messages = merged;
 }
 
 /// One line of a private conversation.
@@ -416,12 +446,12 @@ pub fn create_room(caps: RoomCaps) -> Result<(), String> {
     } else {
         params.remove("pw");
     }
-    for (key, on) in [("hist", caps.history), ("hideip", caps.hide_ip)] {
-        if on {
-            params.set(key, "1");
-        } else {
-            params.remove(key);
-        }
+    // History is always on now; links from older builds may still carry `hist`.
+    params.remove("hist");
+    if caps.hide_ip {
+        params.set("hideip", "1");
+    } else {
+        params.remove("hideip");
     }
     match &caps.relays {
         Some(relays) => params.set("relays", relays),
@@ -563,6 +593,17 @@ mod tests {
         assert_eq!(ids(SPEAKER_KIND), ["o1"]);
         // Before permission some browsers list devices without ids: nothing to pick.
         assert!(selectable_devices(&[device(MIC_KIND, "", "")], MIC_KIND).is_empty());
+    }
+
+    #[test]
+    fn history_lands_after_earlier_or_equal_messages() {
+        let msg = |id: &str, ts: u64| ChatMessageUi { id: id.into(), ts, ..Default::default() };
+        let mut timeline = vec![msg("a", 10), msg("b", 30), msg("notice", 20), msg("c", 40)];
+        merge_by_time(&mut timeline, vec![msg("h35", 35), msg("h10", 10), msg("h5", 5), msg("h99", 99)]);
+        let ids: Vec<&str> = timeline.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["h5", "a", "h10", "b", "notice", "h35", "c", "h99"]);
+        merge_by_time(&mut timeline, Vec::new());
+        assert_eq!(timeline.len(), 8);
     }
 
     #[test]
