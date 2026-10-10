@@ -4,7 +4,7 @@
 
 use super::{clean_remote_name, RoomSession};
 use crate::state::{current_time_string, merge_by_time, ChatMessageUi, FileTransferStatus, Notice};
-use leptos::*;
+use leptos::prelude::*;
 use protocol::chat_log::{Effect, Ignored, Merge};
 use protocol::{mentions, RoomBody, RoomEnvelope};
 use std::collections::HashSet;

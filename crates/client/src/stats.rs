@@ -10,7 +10,8 @@
 use crate::i18n::{t, Language};
 use crate::names::pubkey_tag;
 use crate::session::RoomSession;
-use leptos::*;
+use leptos::prelude::*;
+use send_wrapper::SendWrapper;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -496,7 +497,7 @@ fn poll(
     poller: &Rc<Poller>,
     member: &str,
     is_self: bool,
-    session: StoredValue<Option<RoomSession>>,
+    session: StoredValue<Option<RoomSession>, LocalStorage>,
     set_data: WriteSignal<PanelData>,
 ) {
     if poller.busy.get() || !poller.alive.get() {
@@ -590,7 +591,7 @@ fn sender_view(
     names: ReadSignal<HashMap<String, String>>,
 ) -> impl IntoView {
     if rows.is_empty() {
-        return view! { <p class="stats-empty">{move || t(lang.get(), "stats_no_viewers")}</p> }.into_view();
+        return view! { <p class="stats-empty">{move || t(lang.get(), "stats_no_viewers")}</p> }.into_any();
     }
     rows.into_iter()
         .map(|(viewer, s)| {
@@ -626,6 +627,7 @@ fn sender_view(
             }
         })
         .collect_view()
+        .into_any()
 }
 
 /// The stats panel of one tile: `member`'s video as we receive it, or, on our own tile,
@@ -635,11 +637,11 @@ pub fn stats_panel(
     lang: ReadSignal<Language>,
     member: String,
     is_self: bool,
-    session: StoredValue<Option<RoomSession>>,
+    session: StoredValue<Option<RoomSession>, LocalStorage>,
     names: ReadSignal<HashMap<String, String>>,
     video: Option<HtmlVideoElement>,
 ) -> impl IntoView {
-    let (data, set_data) = create_signal(PanelData::Collecting);
+    let (data, set_data) = signal(PanelData::Collecting);
     let poller = Rc::new(Poller {
         alive: Cell::new(true),
         busy: Cell::new(false),
@@ -652,7 +654,9 @@ pub fn stats_panel(
         let (poller, member) = (poller.clone(), member.clone());
         set_interval_with_handle(move || poll(&poller, &member, is_self, session, set_data), POLL_INTERVAL).ok()
     };
+    let held = SendWrapper::new((poller, interval));
     on_cleanup(move || {
+        let (poller, interval) = held.take();
         poller.alive.set(false);
         if let Some(handle) = interval {
             handle.clear();
@@ -668,9 +672,9 @@ pub fn stats_panel(
             data-state=move || if data.with(|d| *d == PanelData::Collecting) { "collecting" } else { "ready" }
         >
             {move || match data.get() {
-                PanelData::Collecting => view! { <p class="stats-empty">{move || t(lang.get(), "stats_collecting")}</p> }.into_view(),
-                PanelData::Viewer(stats) => viewer_view(lang, stats).into_view(),
-                PanelData::Sharer(rows) => sender_view(lang, rows, names).into_view(),
+                PanelData::Collecting => view! { <p class="stats-empty">{move || t(lang.get(), "stats_collecting")}</p> }.into_any(),
+                PanelData::Viewer(stats) => viewer_view(lang, stats).into_any(),
+                PanelData::Sharer(rows) => sender_view(lang, rows, names).into_any(),
             }}
         </div>
     }

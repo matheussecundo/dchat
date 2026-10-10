@@ -10,8 +10,10 @@ use crate::held_media::{HeldMedia, AUTO_LOAD_BYTES, INLINE_MAX_BYTES, MAX_REFRES
 use crate::i18n::{t, Language};
 use crate::state::{format_file_size, ChatMessageUi, FileOfferInfo, FileTransferStatus, LinkUi, MemberUi};
 use crate::FileAction;
-use leptos::*;
+use leptos::html;
+use leptos::prelude::*;
 use protocol::media::{media_family, preview_type, MediaInfo, MediaKind, WAVEFORM_BARS};
+use send_wrapper::SendWrapper;
 use std::collections::HashMap;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
@@ -228,7 +230,9 @@ fn watch_visibility(node: NodeRef<html::Div>, visible: RwSignal<bool>) {
             observer.observe(el);
         });
     }
+    let held = SendWrapper::new((observer, callback));
     on_cleanup(move || {
+        let (observer, callback) = held.take();
         if let Some(observer) = observer {
             observer.disconnect();
         }
@@ -247,26 +251,26 @@ pub fn media_card(
     caption: String,
     author: String,
     is_self: bool,
-    actions: View,
-    on_action: impl Fn(FileAction, String) + Copy + 'static,
+    actions: AnyView,
+    on_action: impl Fn(FileAction, String) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let lang = ctx.lang;
     let id = file.file_id.clone();
     let url = {
         let id = id.clone();
-        create_memo(move |_| ctx.held.with(|h| h.url(&id)))
+        Memo::new(move |_| ctx.held.with(|h| h.url(&id)))
     };
     let reachable = {
         let author = author.clone();
-        create_memo(move |_| ctx.members.with(|m| m.iter().any(|x| x.pubkey == author && x.link == LinkUi::Direct)))
+        Memo::new(move |_| ctx.members.with(|m| m.iter().any(|x| x.pubkey == author && x.link == LinkUi::Direct)))
     };
     // Small media loads by itself once its card is on screen (and its author reachable).
-    let visible = create_rw_signal(false);
-    let requested = store_value(false);
+    let visible = RwSignal::new(false);
+    let requested = StoredValue::new(false);
     {
         let id = id.clone();
         let size = file.size;
-        create_effect(move |_| {
+        Effect::new(move |_| {
             if !visible.get() {
                 return;
             }
@@ -287,9 +291,9 @@ pub fn media_card(
         MediaKind::Voice => "voice",
     };
     let body = match preview.kind {
-        MediaKind::Voice => voice_bubble(ctx, &file, url, preview.playable, live, visible).into_view(),
+        MediaKind::Voice => voice_bubble(ctx, &file, url, preview.playable, live, visible).into_any(),
         MediaKind::Audio => {
-            let frame = create_node_ref::<html::Div>();
+            let frame = NodeRef::<html::Div>::new();
             watch_visibility(frame, visible);
             let id = id.clone();
             let mime = file.mime_type.clone();
@@ -301,16 +305,16 @@ pub fn media_card(
                             view! {
                                 <audio class="media-audio chat-media" src=src controls=true preload="metadata"
                                     on:error=move |ev| media_failed(ctx, &id, &mime, &ev, false)></audio>
-                            }.into_view()
+                            }.into_any()
                         }
-                        None => view! { <div class="media-audio-placeholder">"🎵"</div> }.into_view(),
+                        None => view! { <div class="media-audio-placeholder">"🎵"</div> }.into_any(),
                     }}
                 </div>
             }
-            .into_view()
+            .into_any()
         }
         MediaKind::Image | MediaKind::Video => {
-            visual_frame(ctx, preview, &file, url, live, reachable, visible, on_action).into_view()
+            visual_frame(ctx, preview, &file, url, live, reachable, visible, on_action).into_any()
         }
     };
     // Why it can't open: the browser's error, or (refused before loading) its declared type.
@@ -347,12 +351,12 @@ fn visual_frame(
     live: Memo<Option<FileTransferStatus>>,
     reachable: Memo<bool>,
     visible: RwSignal<bool>,
-    on_action: impl Fn(FileAction, String) + Copy + 'static,
+    on_action: impl Fn(FileAction, String) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let lang = ctx.lang;
     let kind = preview.kind;
     let mime = file.mime_type.clone();
-    let frame = create_node_ref::<html::Div>();
+    let frame = NodeRef::<html::Div>::new();
     watch_visibility(frame, visible);
     let (width, _, w, h) = frame_size(file.media.as_ref());
     let style = format!("width: {width:.0}px; aspect-ratio: {w} / {h};");
@@ -376,7 +380,7 @@ fn visual_frame(
             let id = id.clone();
             let overlay = move || match live.get() {
                 // Couldn't open here: said below the thumbnail.
-                _ if !preview.playable => ().into_view(),
+                _ if !preview.playable => ().into_any(),
                 // The numbers, speed and Cancel are below, as on any file card; the ring
                 // follows the live progress.
                 Some(FileTransferStatus::Downloading { .. }) => {
@@ -390,14 +394,14 @@ fn visual_frame(
                             <span class="media-progress-label">{move || format!("{}%", progress())}</span>
                         </div>
                     }
-                    .into_view()
+                    .into_any()
                 }
                 Some(FileTransferStatus::Queued { .. } | FileTransferStatus::Paused { .. }) => {
-                    view! { <span class="media-progress-ring waiting"></span> }.into_view()
+                    view! { <span class="media-progress-ring waiting"></span> }.into_any()
                 }
                 // Said below the picture (withdrawn, sender left): the thumbnail stays.
                 Some(FileTransferStatus::Withdrawn | FileTransferStatus::SenderLeft | FileTransferStatus::Completed { withdrawn: true, .. }) => {
-                    ().into_view()
+                    ().into_any()
                 }
                 _ if reachable.get() => {
                     let id = id.clone();
@@ -408,15 +412,15 @@ fn visual_frame(
                             <span class="media-load-size">{format_file_size(size)}</span>
                         </button>
                     }
-                    .into_view()
+                    .into_any()
                 }
-                _ => ().into_view(),
+                _ => ().into_any(),
             };
             view! {
                 {thumb.clone().map(|src| view! { <img class="media-thumb" src=src alt="" /> })}
                 <div class="media-overlay">{overlay}</div>
             }
-            .into_view()
+            .into_any()
         }
     };
     view! {
@@ -433,7 +437,7 @@ fn visual_frame(
                                 <button class="media-expand" title=move || t(lang.get(), "title_fullscreen")
                                     on:click=move |_| open(expand.clone())>"⛶"</button>
                             }
-                            .into_view()
+                            .into_any()
                         }
                         _ => {
                             let full = src.clone();
@@ -442,7 +446,7 @@ fn visual_frame(
                                     on:click=move |_| open(full.clone())
                                     on:error=move |ev| media_failed(ctx, &id, &mime, &ev, true) />
                             }
-                            .into_view()
+                            .into_any()
                         }
                     }
                 }
@@ -462,14 +466,14 @@ fn voice_bubble(
     visible: RwSignal<bool>,
 ) -> impl IntoView {
     let lang = ctx.lang;
-    let bubble = create_node_ref::<html::Div>();
+    let bubble = NodeRef::<html::Div>::new();
     watch_visibility(bubble, visible);
-    let audio = create_node_ref::<html::Audio>();
-    let (playing, set_playing) = create_signal(false);
-    let (position, set_position) = create_signal(0.0_f64);
-    let (speed, set_speed) = create_signal(0_usize);
+    let audio = NodeRef::<html::Audio>::new();
+    let (playing, set_playing) = signal(false);
+    let (position, set_position) = signal(0.0_f64);
+    let (speed, set_speed) = signal(0_usize);
     let media = file.media.clone();
-    let (duration, set_duration) = create_signal(media.as_ref().map_or(0.0, |m| m.duration_ms as f64 / 1000.0));
+    let (duration, set_duration) = signal(media.as_ref().map_or(0.0, |m| m.duration_ms as f64 / 1000.0));
     let bars: Vec<u8> = media
         .as_ref()
         .and_then(|m| m.waveform.clone())
@@ -493,7 +497,7 @@ fn voice_bubble(
             let _ = el.pause();
         }
     };
-    let wave = create_node_ref::<html::Div>();
+    let wave = NodeRef::<html::Div>::new();
     let seek = move |ev: web_sys::PointerEvent| {
         let (Some(el), Some(wave)) = (element(), wave.get()) else {
             return;
@@ -575,11 +579,11 @@ fn voice_bubble(
 }
 
 /// The fullscreen viewer over everything: the image or the video, its name, Download and ✕.
-pub fn media_viewer(ctx: MediaCtx, on_download: impl Fn(String) + Copy + 'static) -> impl IntoView {
+pub fn media_viewer(ctx: MediaCtx, on_download: impl Fn(String) + Copy + Send + Sync + 'static) -> impl IntoView {
     let lang = ctx.lang;
-    let close_ref = create_node_ref::<html::Button>();
+    let close_ref = NodeRef::<html::Button>::new();
     // Focus ✕ when the viewer opens, so Enter or Esc closes it straight away.
-    create_effect(move |_| {
+    Effect::new(move |_| {
         if ctx.viewer.with(|v| v.is_some()) {
             request_animation_frame(move || {
                 if let Some(button) = close_ref.get_untracked() {
@@ -595,8 +599,8 @@ pub fn media_viewer(ctx: MediaCtx, on_download: impl Fn(String) + Copy + 'static
                 MediaKind::Video => view! {
                     <video class="media-viewer-video chat-media" src=item.url.clone() controls=true autoplay=true playsinline=true></video>
                 }
-                .into_view(),
-                _ => view! { <img class="media-viewer-image" src=item.url.clone() alt=item.name.clone() /> }.into_view(),
+                .into_any(),
+                _ => view! { <img class="media-viewer-image" src=item.url.clone() alt=item.name.clone() /> }.into_any(),
             };
             view! {
                 <div class="media-viewer" role="dialog" aria-modal="true"

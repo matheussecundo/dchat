@@ -7,7 +7,7 @@ use crate::nostr::hash_room_topic;
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 
 pub const PASSWORD_SALT_LENGTH: usize = 16;
@@ -19,7 +19,7 @@ const ARGON2_PASSES: u32 = 2;
 /// A fresh salt for a new password room, encoded as it goes in the link (`pw=`).
 pub fn generate_password_salt() -> String {
     let mut salt = [0u8; PASSWORD_SALT_LENGTH];
-    rand::thread_rng().fill_bytes(&mut salt);
+    rand::rng().fill_bytes(&mut salt);
     URL_SAFE_NO_PAD.encode(salt)
 }
 

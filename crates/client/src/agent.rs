@@ -3,7 +3,7 @@
 //! Only opened when the user clicks Connect, never on page load. The pairing code and the
 //! session token stay in RAM.
 
-use leptos::{SignalSet, WriteSignal};
+use leptos::prelude::{Set, WriteSignal};
 use protocol::{
     pair_ack_matches, pair_proof, resume_ack_matches, resume_proof, AgentCaps, AgentOs, AgentToTab, InputEvent,
     MonitorInfo, RefuseReason, TabToAgent, AGENT_PROTOCOL_VERSION,
@@ -309,7 +309,7 @@ impl AgentLink {
         let delay = self.backoff.get();
         self.backoff.set((delay * 2).min(RECONNECT_MAX_MS));
         let link = Rc::downgrade(self);
-        leptos::set_timeout(
+        leptos::prelude::set_timeout(
             move || {
                 if let Some(link) = link.upgrade() {
                     if !link.user_closed.get() {

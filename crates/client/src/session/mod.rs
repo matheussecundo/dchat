@@ -26,7 +26,7 @@ use control::Control;
 use file_links::FileLinks;
 use files::Files;
 use lounge::{Lounge, VoiceInfo};
-use leptos::*;
+use leptos::prelude::*;
 use protocol::chat_log::ChatLog;
 use protocol::presence::Absences;
 use protocol::succession::Succession;
@@ -86,7 +86,7 @@ pub struct SessionSignals {
     /// An admin removed this tab from the room.
     pub removed: WriteSignal<bool>,
     /// An admin moved the room: start a new session there.
-    pub rekey: WriteSignal<Option<RekeyTarget>>,
+    pub rekey: WriteSignal<Option<RekeyTarget>, LocalStorage>,
     /// Names of members currently typing.
     pub typing: WriteSignal<Vec<String>>,
     /// Count of messages that @-mentioned us (the UI resets it when seen).
@@ -105,10 +105,10 @@ pub struct SessionSignals {
     pub devices: WriteSignal<crate::state::DeviceChoice>,
     /// Finished downloads waiting for a tap on Save (iOS), by file id. App level, so a
     /// rekey keeps them; the Save button takes them out.
-    pub ready_files: StoredValue<HashMap<String, web_sys::File>>,
+    pub ready_files: StoredValue<HashMap<String, web_sys::File>, LocalStorage>,
     /// The room's chat log (`protocol::chat_log`). App level, so a rekey carries it into the
     /// new room; a fresh entry starts it empty.
-    pub chat_log: StoredValue<Rc<RefCell<ChatLog>>>,
+    pub chat_log: StoredValue<Rc<RefCell<ChatLog>>, LocalStorage>,
     /// Earlier messages are being fetched from a member.
     pub history_loading: WriteSignal<bool>,
     /// Media loaded for viewing in the chat (`held_media`). App level, so a rekey keeps it.

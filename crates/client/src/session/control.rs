@@ -11,7 +11,7 @@
 //! sharer's preset (`quality.rs`).
 
 use super::RoomSession;
-use leptos::{SignalSet, SignalUpdate};
+use leptos::prelude::{Set, Update};
 use crate::agent::{AgentEvent, AgentLink};
 use crate::media::ScreenInfo;
 use crate::names::pubkey_tag;

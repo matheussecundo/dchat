@@ -4,7 +4,7 @@
 
 use super::RoomSession;
 use crate::state::{current_time_string, DmDelivery, DmUi};
-use leptos::*;
+use leptos::prelude::*;
 use protocol::{open_json, seal_json, DmContent, RoomBody, RoomEnvelope};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;

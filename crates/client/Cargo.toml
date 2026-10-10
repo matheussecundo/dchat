@@ -9,10 +9,10 @@ e2e-hooks = []
 
 [dependencies]
 protocol = { path = "../protocol" }
-leptos = { version = "0.6", features = ["csr"] }
+leptos = { version = "0.8", features = ["csr"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-gloo-net = { version = "0.5", features = ["websocket"] }
+gloo-net = { version = "0.7", features = ["websocket"] }
 js-sys = "0.3"
 console_error_panic_hook = "0.1"
 console_log = "1.0"
@@ -24,6 +24,8 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 uuid = { version = "1.0", features = ["v4", "js"] }
 # Voice messages as MP3 (pure Rust, no C): the format every browser and phone plays.
 rusty_mp3 = { version = "1.0.0", default-features = false }
+# Leptos cleanups must be Send: this carries the browser objects they release (wasm runs on one thread).
+send_wrapper = "0.6"
 
 [dependencies.web-sys]
 version = "0.3"

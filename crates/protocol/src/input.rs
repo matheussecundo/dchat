@@ -10,8 +10,8 @@
 use crate::crypto::{KEY_LENGTH, NONCE_LENGTH};
 use crate::keycodes::DomCode;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
-use rand::RngCore;
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -352,10 +352,10 @@ pub fn seal_input(
     }
     let plaintext = encode_events(events)?;
     let mut nonce = [0u8; NONCE_LENGTH];
-    rand::thread_rng().fill_bytes(&mut nonce);
+    rand::rng().fill_bytes(&mut nonce);
     let aad = packet_aad(lane, seq, from, to);
-    let ciphertext = ChaCha20Poly1305::new(Key::from_slice(key))
-        .encrypt(Nonce::from_slice(&nonce), Payload { msg: &plaintext, aad: &aad })
+    let ciphertext = ChaCha20Poly1305::new(key.into())
+        .encrypt((&nonce).into(), Payload { msg: &plaintext, aad: &aad })
         .map_err(|_| InputError::Malformed)?;
     let mut packet = Vec::with_capacity(HEADER_LEN + ciphertext.len());
     packet.push(lane as u8);
@@ -380,10 +380,10 @@ pub fn open_input(
     }
     let lane = InputLane::from_byte(packet[0]).ok_or(InputError::Malformed)?;
     let seq = u32::from_be_bytes(packet[1..5].try_into().expect("length checked"));
-    let nonce = &packet[5..HEADER_LEN];
+    let nonce = <&Nonce>::try_from(&packet[5..HEADER_LEN]).map_err(|_| InputError::Malformed)?;
     let aad = packet_aad(lane, seq, from, to);
-    let plaintext = ChaCha20Poly1305::new(Key::from_slice(key))
-        .decrypt(Nonce::from_slice(nonce), Payload { msg: &packet[HEADER_LEN..], aad: &aad })
+    let plaintext = ChaCha20Poly1305::new(key.into())
+        .decrypt(nonce, Payload { msg: &packet[HEADER_LEN..], aad: &aad })
         .map_err(|_| InputError::Unauthentic)?;
     let events = decode_events(&plaintext)?;
     if events.iter().any(|ev| ev.lane() != lane) {

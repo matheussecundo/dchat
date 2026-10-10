@@ -257,7 +257,7 @@ On Linux, `install.sh` (shipped in the download, also in `crates/host-agent/dist
 |---|---|
 | `pages.yml` fails at "configure-pages" | Pages isn't enabled: **Settings → Pages → Source: GitHub Actions**. Or disable the workflow if you only use Cloudflare. |
 | `cloudflare.yml` passes but deploys nothing | The `CLOUDFLARE_API_TOKEN` secret isn't set; the run log shows "skipping the Cloudflare deploy". |
-| Wrangler says it needs Node.js 22 | Wrangler 4 requires Node.js 22+. CI already uses 22; update Node locally. |
+| Wrangler says it needs Node.js 22 | Wrangler 4 requires Node.js 22+. CI uses 24; update Node locally. |
 | The page is blank and the console shows 404s for `.js`/`.wasm` files | The build isn't using relative paths. Build from `crates/client` so `Trunk.toml` (`public_url = "./"`) applies. |
 | An old version keeps showing after a deploy | The service worker updates in the background: reload once more, or close and reopen the tab. |
 | After a deploy, some members can't connect and one side sees "newer version" | The deploy changed the protocol version (`PROTOCOL_VERSION`): tabs opened before it only link with each other. The banner's **Reload** fixes it. Deploys that don't change the protocol never split a room. |

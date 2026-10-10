@@ -7,8 +7,9 @@ use protocol::{
     format_code, pair_ack, pair_proof_matches, resume_ack, resume_proof_matches, RefuseReason, PAIRING_CODE_ALPHABET,
     PAIRING_CODE_LENGTH,
 };
-use rand::rngs::OsRng;
-use rand::{Rng, RngCore};
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
+use rand::{Rng, RngExt};
 use std::time::{Duration, Instant};
 
 /// Wrong codes allowed before the code is burned and pairing pauses.
@@ -20,13 +21,13 @@ pub const RESUME_GRACE: Duration = Duration::from_secs(30);
 
 pub fn random_code() -> String {
     (0..PAIRING_CODE_LENGTH)
-        .map(|_| PAIRING_CODE_ALPHABET[OsRng.gen_range(0..PAIRING_CODE_ALPHABET.len())] as char)
+        .map(|_| PAIRING_CODE_ALPHABET[UnwrapErr(SysRng).random_range(0..PAIRING_CODE_ALPHABET.len())] as char)
         .collect()
 }
 
 pub fn random_token(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
-    OsRng.fill_bytes(&mut buf);
+    UnwrapErr(SysRng).fill_bytes(&mut buf);
     URL_SAFE_NO_PAD.encode(buf)
 }
 

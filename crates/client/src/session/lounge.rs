@@ -16,7 +16,7 @@ use crate::media::{self, SpeakingMeter};
 use crate::mesh::PeerLink;
 use crate::names::pubkey_tag;
 use crate::state::{next_device, selectable_devices, AudioSettings, DeviceChoice, LoungeMemberUi, MyVoiceUi, CAMERA_KIND};
-use leptos::*;
+use leptos::prelude::*;
 use protocol::video::VideoPresets;
 use protocol::{latest_beyond_cap, RoomBody, RoomEnvelope, VideoKind};
 use std::cell::{Cell, RefCell};

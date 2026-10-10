@@ -2,7 +2,8 @@
 //! `MAX_STAGED`. Each gets what its card will show before anyone pulls it (`MediaInfo`:
 //! thumbnail, size, length), and photos that record where they were taken say so.
 
-use leptos::*;
+use leptos::html;
+use leptos::prelude::*;
 use protocol::media::{jpeg_has_gps, media_family, mime_from_name, preview_type, strip_jpeg_gps, MediaInfo, MediaKind, Thumbnail, THUMB_MAX_BYTES};
 use std::cell::Cell;
 use wasm_bindgen::closure::Closure;
@@ -48,7 +49,7 @@ pub fn mime_of(file: &File) -> String {
 }
 
 /// Stage `files` after those already there; returns how many didn't fit.
-pub fn stage(staged: RwSignal<Vec<StagedFile>>, files: Vec<File>) -> usize {
+pub fn stage(staged: RwSignal<Vec<StagedFile>, LocalStorage>, files: Vec<File>) -> usize {
     let room = MAX_STAGED.saturating_sub(staged.with_untracked(|s| s.len()));
     let refused = files.len().saturating_sub(room);
     for file in files.into_iter().take(room) {
@@ -86,7 +87,7 @@ pub fn stage(staged: RwSignal<Vec<StagedFile>>, files: Vec<File>) -> usize {
 }
 
 /// Take one file off the list.
-pub fn unstage(staged: RwSignal<Vec<StagedFile>>, key: u64) {
+pub fn unstage(staged: RwSignal<Vec<StagedFile>, LocalStorage>, key: u64) {
     staged.update(|s| {
         if let Some(at) = s.iter().position(|i| i.key == key) {
             let item = s.remove(at);
@@ -98,7 +99,7 @@ pub fn unstage(staged: RwSignal<Vec<StagedFile>>, key: u64) {
 }
 
 /// Replace a staged photo with the same photo minus its location.
-pub fn remove_location(staged: RwSignal<Vec<StagedFile>>, key: u64) {
+pub fn remove_location(staged: RwSignal<Vec<StagedFile>, LocalStorage>, key: u64) {
     let Some(file) = staged.with_untracked(|s| s.iter().find(|i| i.key == key).map(|i| i.file.clone())) else {
         return;
     };
@@ -307,7 +308,7 @@ pub fn stamp() -> String {
 }
 
 /// Drop every staged file (the tab left the room).
-pub fn clear(staged: RwSignal<Vec<StagedFile>>) {
+pub fn clear(staged: RwSignal<Vec<StagedFile>, LocalStorage>) {
     staged.update(|s| {
         for item in s.drain(..) {
             if let Some(url) = item.url {
@@ -318,18 +319,18 @@ pub fn clear(staged: RwSignal<Vec<StagedFile>>) {
 }
 
 /// A file waiting to be sent: its preview, name and size, the location warning, ✕.
-pub fn staged_chip(lang: ReadSignal<crate::i18n::Language>, staged: RwSignal<Vec<StagedFile>>, item: StagedFile) -> impl IntoView {
+pub fn staged_chip(lang: ReadSignal<crate::i18n::Language>, staged: RwSignal<Vec<StagedFile>, LocalStorage>, item: StagedFile) -> impl IntoView {
     use crate::i18n::t;
     let key = item.key;
     let thumb = item.media.as_ref().and_then(|m| m.thumb.as_ref()).map(|t| format!("data:{};base64,{}", t.mime_type, t.data));
     let preview = match (item.kind, thumb, item.url.clone()) {
-        (_, Some(src), _) => view! { <img class="attachment-thumb" src=src alt="" /> }.into_view(),
-        _ if item.preparing => view! { <span class="attachment-icon">"⏳"</span> }.into_view(),
+        (_, Some(src), _) => view! { <img class="attachment-thumb" src=src alt="" /> }.into_any(),
+        _ if item.preparing => view! { <span class="attachment-icon">"⏳"</span> }.into_any(),
         // Our own file: shown as it is (only allow-listed types get a URL).
-        (Some(MediaKind::Image), None, Some(url)) => view! { <img class="attachment-thumb" src=url alt="" /> }.into_view(),
+        (Some(MediaKind::Image), None, Some(url)) => view! { <img class="attachment-thumb" src=url alt="" /> }.into_any(),
         (Some(MediaKind::Audio | MediaKind::Voice), _, Some(url)) => {
-            let audio = create_node_ref::<html::Audio>();
-            let (playing, set_playing) = create_signal(false);
+            let audio = NodeRef::<html::Audio>::new();
+            let (playing, set_playing) = signal(false);
             view! {
                 <button class="attachment-play" title=move || t(lang.get(), if playing.get() { "voice_pause" } else { "voice_play" })
                     on:click=move |_| {
@@ -348,10 +349,10 @@ pub fn staged_chip(lang: ReadSignal<crate::i18n::Language>, staged: RwSignal<Vec
                     on:pause=move |_| set_playing.set(false)
                     on:ended=move |_| set_playing.set(false)></audio>
             }
-            .into_view()
+            .into_any()
         }
-        (Some(MediaKind::Video), None, _) => view! { <span class="attachment-icon">"🎬"</span> }.into_view(),
-        _ => view! { <span class="attachment-icon">"📎"</span> }.into_view(),
+        (Some(MediaKind::Video), None, _) => view! { <span class="attachment-icon">"🎬"</span> }.into_any(),
+        _ => view! { <span class="attachment-icon">"📎"</span> }.into_any(),
     };
     view! {
         <div class="attachment-chip" data-ready=if item.preparing { "false" } else { "true" } data-gps=item.gps.to_string()>

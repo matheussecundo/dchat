@@ -1,7 +1,7 @@
-use k256::elliptic_curve::sec1::ToEncodedPoint;
+use k256::elliptic_curve::sec1::ToSec1Point;
 use k256::schnorr::{Signature, SigningKey, VerifyingKey};
 use k256::ProjectivePoint;
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -212,7 +212,7 @@ impl NostrBurnerKey {
     /// Generate a fresh random secp256k1 keypair.
     pub fn generate() -> Result<Self, NostrError> {
         let mut secret = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut secret);
+        rand::rng().fill_bytes(&mut secret);
         Self::from_secret_bytes(&secret)
     }
 
@@ -222,7 +222,7 @@ impl NostrBurnerKey {
     }
 
     fn from_secret_bytes(secret: &[u8]) -> Result<Self, NostrError> {
-        let signing_key = SigningKey::from_bytes(secret)
+        let signing_key = SigningKey::from_slice(secret)
             .map_err(|e| NostrError::Crypto(format!("Invalid private key: {e}")))?;
         let pubkey_hex = hex::encode(signing_key.verifying_key().to_bytes());
         Ok(Self {
@@ -243,10 +243,10 @@ impl NostrBurnerKey {
     /// (both sides use their even-Y BIP-340 keys, so either side derives the same point),
     /// then SHA-256 over a domain tag, the shared X and both pubkeys in sorted order.
     pub fn shared_key(&self, peer_pubkey_hex: &str) -> Result<[u8; 32], NostrError> {
-        let peer = VerifyingKey::from_bytes(&hex::decode(peer_pubkey_hex)?)
+        let peer = VerifyingKey::from_slice(&hex::decode(peer_pubkey_hex)?)
             .map_err(|e| NostrError::Crypto(format!("Invalid peer key: {e}")))?;
         let shared = (ProjectivePoint::from(*peer.as_affine()) * **self.signing_key.as_nonzero_scalar()).to_affine();
-        let encoded = shared.to_encoded_point(false);
+        let encoded = shared.to_sec1_point(false);
         let x = encoded.x().ok_or_else(|| NostrError::Crypto("Shared point at infinity".into()))?;
         let (a, b) = if self.pubkey_hex.as_str() <= peer_pubkey_hex {
             (self.pubkey_hex.as_str(), peer_pubkey_hex)
@@ -298,7 +298,7 @@ impl NostrBurnerKey {
     /// (which SHA-256 hashes its input first) must not be used here.
     fn sign_raw_32(&self, msg: &[u8]) -> Result<Signature, NostrError> {
         let mut aux_rand = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut aux_rand);
+        rand::rng().fill_bytes(&mut aux_rand);
         self.signing_key
             .sign_raw(msg, &aux_rand)
             .map_err(|e| NostrError::Crypto(format!("Signing failed: {e}")))
@@ -329,7 +329,7 @@ pub fn verify_message(pubkey_hex: &str, msg: &[u8], sig_hex: &str) -> bool {
         return false;
     };
     let (Ok(verifying_key), Some(signature)) = (
-        VerifyingKey::from_bytes(&pubkey_bytes),
+        VerifyingKey::from_slice(&pubkey_bytes),
         parse_signature(&sig_bytes),
     ) else {
         return false;
@@ -358,7 +358,7 @@ pub fn verify_event(event: &NostrEvent) -> Result<bool, NostrError> {
     }
 
     let pubkey_bytes = hex::decode(&event.pubkey)?;
-    let verifying_key = match VerifyingKey::from_bytes(&pubkey_bytes) {
+    let verifying_key = match VerifyingKey::from_slice(&pubkey_bytes) {
         Ok(vk) => vk,
         Err(_) => return Ok(false),
     };
@@ -416,7 +416,7 @@ mod tests {
             ),
         ];
         for (sk, aux, msg, sig) in vectors {
-            let key = SigningKey::from_bytes(&hex::decode(sk).unwrap()).unwrap();
+            let key = SigningKey::from_slice(&hex::decode(sk).unwrap()).unwrap();
             let aux: [u8; 32] = hex::decode(aux).unwrap().try_into().unwrap();
             let msg = hex::decode(msg).unwrap();
             let signature = key.sign_raw(&msg, &aux).unwrap();
@@ -436,7 +436,7 @@ mod tests {
             .expect("Create event");
 
         let id_bytes = hex::decode(&event.id).unwrap();
-        let vk = VerifyingKey::from_bytes(&hex::decode(&event.pubkey).unwrap()).unwrap();
+        let vk = VerifyingKey::from_slice(&hex::decode(&event.pubkey).unwrap()).unwrap();
         let sig = Signature::try_from(hex::decode(&event.sig).unwrap().as_slice()).unwrap();
 
         assert!(vk.verify_raw(&id_bytes, &sig).is_ok(), "sig must cover the raw id");
