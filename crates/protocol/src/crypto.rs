@@ -1,8 +1,8 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, KeyInit};
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
-use rand::RngCore;
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -33,7 +33,7 @@ pub struct EncryptedPayload {
 /// Generate a cryptographically secure 256-bit symmetric key.
 pub fn generate_key() -> [u8; KEY_LENGTH] {
     let mut key = [0u8; KEY_LENGTH];
-    rand::thread_rng().fill_bytes(&mut key);
+    rand::rng().fill_bytes(&mut key);
     key
 }
 
@@ -58,10 +58,10 @@ pub fn key_from_base64(s: &str) -> Result<[u8; KEY_LENGTH], CryptoError> {
 
 /// Encrypt raw bytes with ChaCha20-Poly1305.
 pub fn encrypt_bytes(key: &[u8; KEY_LENGTH], plaintext: &[u8]) -> Result<EncryptedPayload, CryptoError> {
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = ChaCha20Poly1305::new(key.into());
     let mut nonce_bytes = [0u8; NONCE_LENGTH];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    rand::rng().fill_bytes(&mut nonce_bytes);
+    let nonce: &Nonce = (&nonce_bytes).into();
 
     let ciphertext = cipher
         .encrypt(nonce, plaintext)
@@ -75,12 +75,9 @@ pub fn encrypt_bytes(key: &[u8; KEY_LENGTH], plaintext: &[u8]) -> Result<Encrypt
 
 /// Decrypt an EncryptedPayload with ChaCha20-Poly1305.
 pub fn decrypt_bytes(key: &[u8; KEY_LENGTH], payload: &EncryptedPayload) -> Result<Vec<u8>, CryptoError> {
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = ChaCha20Poly1305::new(key.into());
     let nonce_bytes = URL_SAFE_NO_PAD.decode(&payload.nonce)?;
-    if nonce_bytes.len() != NONCE_LENGTH {
-        return Err(CryptoError::DecryptionFailed);
-    }
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = <&Nonce>::try_from(nonce_bytes.as_slice()).map_err(|_| CryptoError::DecryptionFailed)?;
     let ciphertext = URL_SAFE_NO_PAD.decode(&payload.ciphertext)?;
 
     cipher
@@ -106,12 +103,12 @@ pub fn decrypt_json<T: serde::de::DeserializeOwned>(
 
 /// Generate a short random alphanumeric room identifier.
 pub fn generate_room_id() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     const CHARSET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     (0..8)
         .map(|_| {
-            let idx = rng.gen_range(0..CHARSET.len());
+            let idx = rng.random_range(0..CHARSET.len());
             CHARSET[idx] as char
         })
         .collect()
@@ -138,10 +135,10 @@ pub fn encrypt_chunk(
     total_chunks: u32,
     plaintext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = ChaCha20Poly1305::new(key.into());
     let mut nonce_bytes = [0u8; NONCE_LENGTH];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    rand::rng().fill_bytes(&mut nonce_bytes);
+    let nonce: &Nonce = (&nonce_bytes).into();
 
     let mut aad = [0u8; 24];
     aad[0..16].copy_from_slice(file_id);
@@ -182,7 +179,7 @@ pub fn decrypt_chunk(
     let chunk_index = u32::from_be_bytes(packet[16..20].try_into().unwrap());
     let total_chunks = u32::from_be_bytes(packet[20..24].try_into().unwrap());
 
-    let nonce = Nonce::from_slice(&packet[24..36]);
+    let nonce = <&Nonce>::try_from(&packet[24..36]).map_err(|_| CryptoError::DecryptionFailed)?;
     let ciphertext = &packet[36..];
 
     let aad = &packet[0..24];
@@ -191,7 +188,7 @@ pub fn decrypt_chunk(
         aad,
     };
 
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = ChaCha20Poly1305::new(key.into());
     let plaintext = cipher
         .decrypt(nonce, payload)
         .map_err(|_| CryptoError::DecryptionFailed)?;
