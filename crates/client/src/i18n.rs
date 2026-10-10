@@ -201,8 +201,10 @@ mod tests {
     fn test_interpolation() {
         assert_eq!(t_replace_1(Language::En, "sys_joined", "{name}", "Ana"), "Ana joined");
         for lang in Language::ALL {
-            let joined = t_replace_1(lang, "sys_joined", "{name}", "Ana");
-            assert!(joined.contains("Ana") && !joined.contains("{name}"), "{}", lang.code());
+            for key in ["sys_joined", "sys_now_admin", "confirm_make_admin"] {
+                let text = t_replace_1(lang, key, "{name}", "Ana");
+                assert!(text.contains("Ana") && !text.contains("{name}"), "{key} in {}", lang.code());
+            }
         }
     }
 

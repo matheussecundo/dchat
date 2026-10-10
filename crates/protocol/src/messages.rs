@@ -274,6 +274,12 @@ pub enum RoomBody {
     /// Admin only: move the room to a new ID and key. Each remaining member gets its own
     /// grant sealed to its session key; `kicked` (if any) gets none.
     AdminRekey { kicked: Option<String>, grants: Vec<SealedGrant> },
+    /// Admin only: the admin secret sealed to one member (`HandoverContent`, ECDH like a DM).
+    /// It names no recipient: every member tries to open it. `promote`: the recipient becomes
+    /// an admin now (Make admin); otherwise it is the heir, holding the secret until no admin
+    /// is left (`protocol::succession`). Everyone relays it, so an older heir sees that
+    /// someone else is the heir now and drops its copy.
+    AdminHandover { promote: bool, sealed: EncryptedPayload },
     Leave,
 }
 
@@ -390,6 +396,36 @@ impl SealedGrant {
     pub fn open(&self, recipient: &NostrBurnerKey, sender: &str) -> Option<RoomGrant> {
         open_json(recipient, sender, &self.payload)
     }
+}
+
+/// At most this many members in a handover's ranking.
+pub const MAX_RANKING: usize = 256;
+
+/// The plaintext inside a `RoomBody::AdminHandover`.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HandoverContent {
+    /// The admin secret key (hex), as in the admin link's `admsk`.
+    pub admsk: String,
+    /// The sender's seniority order of the members present, most senior first.
+    pub ranking: Vec<String>,
+}
+
+impl std::fmt::Debug for HandoverContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HandoverContent").field("admsk", &"<secret>").field("ranking", &self.ranking).finish()
+    }
+}
+
+/// Open a handover sealed to `recipient` by `sender`; `None` unless it opens and its secret
+/// is the room's admin key (`adm`).
+pub fn open_handover(recipient: &NostrBurnerKey, sender: &str, sealed: &EncryptedPayload, adm: &str) -> Option<HandoverContent> {
+    let mut content: HandoverContent = open_json(recipient, sender, sealed)?;
+    let admin = NostrBurnerKey::from_secret_hex(&content.admsk).ok()?;
+    if admin.pubkey() != adm {
+        return None;
+    }
+    content.ranking.truncate(MAX_RANKING);
+    Some(content)
 }
 
 /// Bytes an admin key signs to vouch that `session_pubkey` is an admin of `room_id`.
@@ -572,6 +608,26 @@ mod tests {
             assert_eq!(relayed.recipient(), None);
             assert_eq!(relayed.open(&cy, ana.pubkey()), Some(signal));
         }
+    }
+
+    #[test]
+    fn test_handover_opens_only_for_its_recipient_and_the_room_admin_key() {
+        let admin = NostrBurnerKey::generate().unwrap();
+        let ana = NostrBurnerKey::generate().unwrap();
+        let bo = NostrBurnerKey::generate().unwrap();
+        let cy = NostrBurnerKey::generate().unwrap();
+        let content = HandoverContent { admsk: admin.secret_hex(), ranking: vec![bo.pubkey().into(), cy.pubkey().into()] };
+        let sealed = seal_json(&ana, bo.pubkey(), &content).unwrap();
+        assert_eq!(open_handover(&bo, ana.pubkey(), &sealed, admin.pubkey()), Some(content.clone()));
+        assert_eq!(open_handover(&cy, ana.pubkey(), &sealed, admin.pubkey()), None, "only the recipient opens it");
+        assert_eq!(open_handover(&bo, cy.pubkey(), &sealed, admin.pubkey()), None, "the sender's key is part of the seal");
+        assert_eq!(open_handover(&bo, ana.pubkey(), &sealed, cy.pubkey()), None, "another room's admin key");
+        // On the wire: neither the secret nor the recipient.
+        let body = RoomBody::AdminHandover { promote: false, sealed };
+        let wire = serde_json::to_string(&body).unwrap();
+        assert!(!wire.contains(&admin.secret_hex()) && !wire.contains(bo.pubkey()));
+        assert_eq!(body.recipient(), None, "relayed by everyone");
+        assert!(!format!("{content:?}").contains(&admin.secret_hex()));
     }
 
     #[test]

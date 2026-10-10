@@ -7,11 +7,11 @@ use serde::{Deserialize, Serialize};
 /// Bump whenever members on the old and new code could misunderstand each other: the
 /// encoding of any signal or room message (the `wire_format_matches_protocol_version`
 /// test catches those), signed bytes, the file chunk layout, or a rule every member must
-/// apply alike (caps, gossip, the chat log's rules and sync, rekey).
+/// apply alike (caps, gossip, the chat log's rules and sync, rekey, admin succession).
 ///
 /// Never change how a plain room's relay topic is derived (`hash_room_topic`): members on
 /// different versions only notice each other (and show the reload banner) on a shared topic.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// What travels through the relays (encrypted with the room key): the sender's protocol
 /// version and its signal. Every version must keep `v` readable, whatever `payload` becomes.
@@ -60,11 +60,12 @@ mod tests {
     use crate::keycodes::DomCode;
     use crate::password::{password_room_key, password_room_topic, stretch_password};
     use crate::chat_log;
+    use crate::succession;
     use sha2::{Digest, Sha256};
 
     /// The wire fingerprint recorded for the current version. When the test below fails,
     /// bump `PROTOCOL_VERSION` and record the new pair here.
-    const RECORDED: (u32, &str) = (6, "bbbaea12e27de027b6b9b72dc5e09d871d69a9a65991b8c6d375204dac260a97");
+    const RECORDED: (u32, &str) = (7, "78d759229b23867afaaf979da92e10b9dc5462fee98ccce8641dd0a8bf5e1672");
 
     fn sealed() -> EncryptedPayload {
         EncryptedPayload { nonce: "n".into(), ciphertext: "c".into() }
@@ -175,6 +176,7 @@ mod tests {
                 kicked: Some("c".into()),
                 grants: vec![SealedGrant { to: "b".into(), payload: sealed() }],
             },
+            RoomBody::AdminHandover { promote: true, sealed: sealed() },
             RoomBody::ControlStatus { seq: 1, available: true, controllers: 2, mouse_keyboard: Some("b".into()), pads: vec![None, Some("c".into())] },
             RoomBody::ControlRequest { to: "s".into(), mouse_keyboard: true, controller: true },
             RoomBody::ControlGrant { to: "b".into(), mouse_keyboard: false, pad: Some(1), reason: Some(ControlEnd::TakenOver) },
@@ -206,6 +208,7 @@ mod tests {
             RoomBody::Dm { .. } => "Dm",
             RoomBody::LinkSignal { .. } => "LinkSignal",
             RoomBody::AdminRekey { .. } => "AdminRekey",
+            RoomBody::AdminHandover { .. } => "AdminHandover",
             RoomBody::ControlStatus { .. } => "ControlStatus",
             RoomBody::ControlRequest { .. } => "ControlRequest",
             RoomBody::ControlGrant { .. } => "ControlGrant",
@@ -233,6 +236,8 @@ mod tests {
         wire.push(serde_json::to_string(&DmContent { text: "psst".into() }).unwrap());
         wire.push(serde_json::to_string(&RoomGrant { room: "r".into(), key: "k".into() }).unwrap());
         wire.push(String::from_utf8(admin_proof_message("r", "s")).unwrap());
+        wire.push(serde_json::to_string(&HandoverContent { admsk: "k".into(), ranking: vec!["b".into()] }).unwrap());
+        wire.push(format!("{} {}", succession::ADMIN_ABSENT_MS, MAX_RANKING));
         wire.push(hash_room_topic("r"));
         // Remote-control input: every event's binary encoding, the packet header, the keys.
         wire.push(hex::encode(encode_events(&crate::input::tests::samples()).unwrap()));

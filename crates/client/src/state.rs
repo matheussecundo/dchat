@@ -306,6 +306,8 @@ pub fn format_file_size(bytes: u64) -> String {
 pub enum Notice {
     Joined(String),
     Left(String),
+    /// A member became an admin (the last admin left, or an admin made them one).
+    NowAdmin(String),
     /// History from before we joined was inserted above.
     HistoryShown,
     /// An admin moved the room to a new link and we followed.
@@ -330,6 +332,8 @@ pub struct SessionCarry {
     pub identity: Rc<NostrBurnerKey>,
     /// Files we offered, still downloadable from us in the new room, by file id.
     pub shared_files: HashMap<String, web_sys::File>,
+    /// Who has been in the room longest, as we saw it (admin succession).
+    pub first_seen: protocol::succession::FirstSeen,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

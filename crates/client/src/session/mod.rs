@@ -10,6 +10,7 @@ mod files;
 mod history;
 mod lounge;
 mod quality;
+mod succession;
 mod sync;
 
 pub use files::{save_finished, start_save};
@@ -27,6 +28,7 @@ use files::Files;
 use lounge::{Lounge, VoiceInfo};
 use leptos::*;
 use protocol::chat_log::ChatLog;
+use protocol::succession::Succession;
 use protocol::crypto::{decrypt_json, encrypt_json};
 use protocol::{
     admin_proof_message, hash_room_topic, password_room_topic, plan_ice, verify_message, EncryptedPayload, GossipDedup, IcePlan,
@@ -143,6 +145,11 @@ struct Inner {
     sync: sync::SyncState,
     /// The "earlier messages shown above" line is in the timeline.
     history_noted: Cell<bool>,
+    /// The admin secret, while this session is an admin (from the link, or handed over).
+    admin_key: RefCell<Option<Rc<NostrBurnerKey>>>,
+    /// Admin succession: seniority, the heir we handed the secret to, our dormant copy.
+    succession: RefCell<Succession>,
+    heir_check_queued: Cell<bool>,
     rekeying: Cell<bool>,
     quiet_until: f64,
     last_typing_sent: Cell<f64>,
@@ -166,18 +173,22 @@ impl RoomSession {
     ) -> Result<Self, String> {
         let params = RoomParams::from_fragment(&current_fragment());
         let migrated = carry.is_some();
-        let (identity, shared_files) = match carry {
-            Some(carry) => (carry.identity, carry.shared_files),
-            None => (Rc::new(NostrBurnerKey::generate().map_err(|e| e.to_string())?), HashMap::new()),
+        let (identity, shared_files, first_seen) = match carry {
+            Some(carry) => (carry.identity, carry.shared_files, carry.first_seen),
+            None => (Rc::new(NostrBurnerKey::generate().map_err(|e| e.to_string())?), HashMap::new(), Default::default()),
         };
         let me = identity.pubkey().to_string();
         let started_at = js_sys::Date::now();
-        let admin_proof = params
+        let admin_key = params
             .admin_secret
             .as_deref()
             .and_then(|secret| NostrBurnerKey::from_secret_hex(secret).ok())
-            .filter(|admin| params.admin_pubkey.as_deref() == Some(admin.pubkey()))
+            .filter(|admin| params.admin_pubkey.as_deref() == Some(admin.pubkey()));
+        let admin_proof = admin_key
+            .as_ref()
             .and_then(|admin| admin.sign_message(&admin_proof_message(&room_id, &me)).ok());
+        // After a move, members come back in a burst: hand the secret to an heir once they have.
+        let hold_until = if migrated { started_at + MIGRATION_QUIET_MS } else { 0.0 };
 
         let (rtc_config, ice_plan) = build_rtc_config(&params, host_ice.as_ref());
         let topic = match params.password_salt {
@@ -216,6 +227,9 @@ impl RoomSession {
                 log: signals.chat_log.get_value(),
                 sync: sync::SyncState::default(),
                 history_noted: Cell::new(migrated),
+                admin_key: RefCell::new(admin_key.map(Rc::new)),
+                succession: RefCell::new(Succession::new(first_seen, hold_until as u64)),
+                heir_check_queued: Cell::new(false),
                 rekeying: Cell::new(false),
                 quiet_until: if migrated { started_at + MIGRATION_QUIET_MS } else { 0.0 },
                 last_typing_sent: Cell::new(0.0),
@@ -288,6 +302,8 @@ impl RoomSession {
         }
         self.publish(RoomBody::Leave);
         self.inner.closed.set(true);
+        self.inner.succession.borrow_mut().clear_dormant();
+        self.inner.admin_key.borrow_mut().take();
         self.close_all_file_links();
         for (_, link) in self.inner.links.borrow_mut().drain() {
             link.close();
@@ -591,17 +607,23 @@ impl RoomSession {
                 self.inner.hellos.borrow_mut().insert(author.to_string(), envelope.clone());
                 // Kept in the log too, to name the author in history after they leave.
                 self.log_merge(envelope);
+                self.inner.succession.borrow_mut().seen.saw(author, js_sys::Date::now() as u64);
                 let name = clean_remote_name(name, author);
                 let is_admin = admin_proof
                     .as_deref()
                     .is_some_and(|proof| self.is_valid_admin_proof(author, proof));
                 self.remember_name(author, &name);
+                // A newer Hello may carry a proof the first one lacked: the member became an admin.
+                let was_admin = self.inner.roster.borrow().get(author).map(|m| m.is_admin);
                 self.inner.roster.borrow_mut().upsert(Member {
                     pubkey: author.to_string(),
-                    name,
+                    name: name.clone(),
                     join_ts: *join_ts,
                     is_admin,
                 });
+                if was_admin == Some(false) && is_admin {
+                    self.push_notice(Notice::NowAdmin(name));
+                }
                 self.recompute();
             }
             RoomBody::LinkState { seq, direct } => {
@@ -641,6 +663,7 @@ impl RoomSession {
             RoomBody::SyncWant { ids, .. } => self.on_sync_want(author, ids),
             RoomBody::SyncBatch { envelopes, last, .. } => self.on_sync_batch(author, envelopes, *last),
             RoomBody::AdminRekey { kicked, grants } => self.on_admin_rekey(author, kicked.as_deref(), grants),
+            RoomBody::AdminHandover { promote, sealed } => self.on_admin_handover(envelope, *promote, sealed),
             RoomBody::FileCancel { to: None, .. } => {
                 // A withdrawal is part of the card's history.
                 self.log_merge(envelope);
@@ -809,6 +832,7 @@ impl RoomSession {
         }
         self.refresh_status();
         self.recompute_lounge();
+        self.schedule_heir_check();
     }
 
     fn refresh_status(&self) {
@@ -931,6 +955,7 @@ impl RoomSession {
             }
             s.control_tick();
             s.sync_tick();
+            s.succession_tick();
         }) as Box<dyn FnMut()>);
         if let Some(w) = window() {
             if let Ok(h) = w.set_interval_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), TICK_MS) {
@@ -984,6 +1009,21 @@ impl RoomSession {
         let _ = js_sys::Reflect::set(&hooks, &"unblockPeer".into(), unblock_peer.as_ref());
         unblock_peer.forget();
         self.install_sync_hooks(&hooks);
+
+        // "active", "dormant" (heir) or "none": what this session holds of the admin secret.
+        let s = self.clone();
+        let admin_state = Closure::wrap(Box::new(move || {
+            let state = if s.is_admin() {
+                "active"
+            } else if s.inner.succession.borrow().has_dormant() {
+                "dormant"
+            } else {
+                "none"
+            };
+            JsValue::from_str(state)
+        }) as Box<dyn Fn() -> JsValue>);
+        let _ = js_sys::Reflect::set(&hooks, &"adminKeyState".into(), admin_state.as_ref());
+        admin_state.forget();
 
         // Pause between uploaded chunks, so upload queues and interruptions can be observed.
         let s = self.clone();
