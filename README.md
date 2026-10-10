@@ -8,99 +8,50 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 
 ## Key Features & Security Guarantees
 
-* **Pure Rust to WebAssembly**: Built with **Leptos (CSR)** targeting `wasm32-unknown-unknown` without Emscripten.
-* **Group Rooms over a P2P Mesh**: One link opens a room for a small group (25 members by default). Every member connects directly to every other member: there is no media or message server, only Nostr relays for the initial handshake.
+### Rooms & Chat
+
+* **Group Rooms over a P2P Mesh**: One link opens a room for a small group (25 members by default; the creator can also limit how many join voice and turn on video). Every member connects directly to every other member: there is no media or message server, only Nostr relays for the initial handshake. Share the invite as a link or a QR code; members without a direct link still get text, relayed through a mutual member.
+* **Signed Messages**: Every room message is signed by its author's session key and passed on to members without a direct link, so nobody can alter it or speak for someone else. Names live for the session only and are shown with a short key tag.
+* **Always-On History**: Whoever joins sees the room's conversation as members see it: messages with their latest edits, deletions, reactions, file cards and the names of members who left. Members sync what they hold on every new connection, so someone whose connection dropped for a while catches up too. Kept in RAM only (up to 32 MB per member), carried through a kick or a new link, gone when the last member leaves.
+* **Chat Extras**: Typing indicator, emoji reactions, editing and deleting your own messages, private messages sealed end-to-end between two members, and @mentions with a highlight, a chime and a count in the tab title (and on the app icon when installed).
+* **Moderation**: Admins can kick a member or move everyone to a new link (new room ID and key, sealed to each remaining member). The admin link is separate from the invite link, and an admin always gets a seat in a full room.
+* **Admin Succession**: When the room's last admin leaves, the member who has been there longest becomes admin after 15 seconds, and admins can make another member an admin with **Make admin**.
+* **10 Languages**: English, Chinese, Hindi, Spanish, French, Arabic (with a right-to-left layout), Bengali, Portuguese, Russian and German, picked from the browser's language with English as the fallback and switchable from the header. The translation table is built into the Wasm (`translations.json` via `include_str!`); the choice stays in RAM.
+
+### Voice, Video & Screen Sharing
+
+* **Voice Lounge**: Discord-style drop-in voice and video with per-person mic, speaker, camera (front/rear flip on mobile) and screen-share toggles, a video grid with fullscreen, a speaking indicator and a *"X joined voice"* prompt. Audio and video are encrypted between members (DTLS-SRTP).
+* **Audio Settings & Devices**: ⚙️ Settings turn noise cancellation, echo cancellation and auto gain control on or off (all on by default), applied live without dropping the call, and pick the microphone, speaker and camera. Switches the browser doesn't support are disabled with a hint. Kept in RAM only.
+* **Low-Latency Video Presets**: Pick how your camera and screen share look to everyone: from **Fastest** (720p, 60 fps, lowest latency) to **Text** (full resolution, 15 fps, crisp and light). Video doesn't wait for voice lip sync, and an ⓘ panel on each tile shows what the connection is doing.
+* **Remote Control**: While you share your screen, the members you allow can control your mouse and keyboard (one at a time, desktop or game mode), TeamViewer-style, and play with game controllers (up to four). A small companion app for Linux and Windows, `dchat-host`, does the input on your computer; nobody gets control without your click. Downloads are published per release with checksums.
+
+### Files
+
+* **Encrypted P2P File Sharing**: Files are posted to the room as cards, and each member pulls the file straight from the sender over their own direct link, in 64 KB chunks each sealed with ChaCha20-Poly1305 (header authenticated too). The sender uploads to two members at once and queues the rest; cards show progress and speed, with cancel and withdraw. Downloads stream to disk where the browser allows it (File System Access API) or are saved from memory; on iPhone and iPad, 💾 Save opens the share sheet. Files are never stored on a server, and a transfer stops if the sender leaves.
+* **Parallel File Connections (experiment)**: Uploads add extra WebRTC connections to the downloader while each one raises the speed, up to a cap set in ⚙️ Settings, for internet links where one connection can't fill the line.
+
+### Privacy & Security
+
 * **Zero Persistence**: Strictly **no** `localStorage`, `sessionStorage`, `indexedDB`, or cookies. Everything is held in volatile RAM.
-* **Zero-Knowledge URL Keys**: The room ID and 256-bit symmetric encryption key reside in the URL fragment (`#room=<id>&key=<secret>`). URL hash fragments are never sent to any server over HTTP or WebSocket handshakes.
-* **Decentralized Nostr Signaling**: Replaces proprietary signaling servers with public, open Nostr relays using NIP-16 Ephemeral Events (Kind 20001, dropped upon dispatch, zero disk storage).
-* **Serverless Architecture**: 100% static client deployable to GitHub Pages, Cloudflare Pages, Netlify, or IPFS. No backend required!
-* **Multi-Relay Pool Resilience**: Broadcasts and subscribes across a concurrent relay pool (`wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.primal.net`) with automatic event deduplication.
+* **Zero-Knowledge URL Keys**: The room ID and 256-bit symmetric encryption key reside in the URL fragment (`#room=<id>&key=<secret>`). URL hash fragments are never sent to any server over HTTP or WebSocket handshakes. Rooms can also require a password, so a leaked link alone doesn't open them.
+* **Dual-Layer E2EE**: In addition to standard WebRTC DTLS, messages and signaling envelopes are encrypted with **ChaCha20-Poly1305** using the URL fragment key. Relays are completely blind to message contents.
 * **Metadata Protection**: WebRTC handshakes (which carry IP addresses) are sealed to their recipient, Google's STUN server is only a fallback, and rooms can hide members' IP addresses from each other by connecting through TURN. See [`docs/PRIVACY.md`](./docs/PRIVACY.md) for who sees what.
 * **Ephemeral Burner Keypairs**: Generates fresh in-memory secp256k1 keypairs in each tab: a member identity that signs room messages (kept when an admin moves the room, so you stay the author of your messages) and a relay key, new every session, that signs the BIP-340 Nostr events, so relays can't link a moved room to the old one. All of them are discarded on exit.
-* **Dual-Layer E2EE**: In addition to standard WebRTC DTLS, messages and signaling envelopes are encrypted with **ChaCha20-Poly1305** using the URL fragment key. Relays are completely blind to message contents.
 * **Instant Destruction**: Reloading the page or closing the tab wipes linear memory, destroys the WebRTC connections, and permanently erases this tab's copy of the conversation. Members still in the room keep theirs (and hand it to whoever joins) until the last one leaves.
+
+### Signaling & Hosting
+
+* **Decentralized Nostr Signaling**: Replaces proprietary signaling servers with public, open Nostr relays using NIP-16 Ephemeral Events (Kind 20001, dropped upon dispatch, zero disk storage). Room topics are hashed (SHA-256), so relays never see room IDs; ICE candidates are batched to stay under relay rate limits; perfect negotiation settles who calls whom. Each room's relays travel in its link (`&relays=`), and a header badge shows how many are connected.
+* **Multi-Relay Pool Resilience**: Broadcasts and subscribes across a concurrent relay pool (`wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.primal.net`) with automatic event deduplication and reconnection.
+* **Serverless Architecture**: 100% static client deployable to GitHub Pages, Cloudflare Pages, Netlify, or IPFS. No backend required!
+* **Installable App**: Install dchat as an app (PWA) on desktop, Android, iPhone and iPad: its own window and icon, room links that open in the app, and **Join with a link** in the lobby. Still nothing stored.
 * **Service Worker Caching**: Caches immutable application shell assets (`.wasm`, `.js`, `.css`) for instant loading, while never storing session or user data.
-* **Remote Control**: While you share your screen, the members you allow can control your mouse and keyboard, TeamViewer-style. A small companion app, `dchat-host`, does the input on your computer; nobody gets control without your click.
-* **Instant Mobile Testing**: Built-in dev HTTPS server auto-generates TLS certificates, includes an in-memory mock Nostr relay, and displays an ASCII QR code in the terminal for instant phone pairing on local Wi-Fi.
 
----
+### Development
 
-## Phased Roadmap
-
-1. **Phase 1: Ephemeral Encrypted Text Chat (Completed)**
-   - P2P text chat via WebRTC `RTCDataChannel`.
-   - ChaCha20-Poly1305 application-layer encryption.
-   - URL hash key generation & QR code sharing modal.
-   - Axum WebSocket signaling relay and dev TLS server.
-   - Comprehensive unit and Playwright multi-browser E2E tests.
-
-2. **Phase 2: Encrypted Audio Calls (Completed)**
-   - Capture microphone audio via `getUserMedia`.
-   - DTLS-SRTP encrypted peer audio streaming.
-   - Mute/unmute microphone controls in the UI.
-
-3. **Phase 3: Video Calls & Screen Sharing (Completed)**
-   - Camera capture with front/back camera toggling on mobile.
-   - Screen capture via `getDisplayMedia`.
-   - Fullscreen video rendering.
-
-4. **Phase 4: Encrypted P2P File Sharing (Completed)**
-   - Zero-knowledge end-to-end encrypted file sharing directly between peers.
-   - Binary WebRTC data channel with 64 KB chunking and backpressure throttling.
-   - Streaming disk write via File System Access API with automatic Blob download fallback; on iPhone and iPad, a 💾 Save tap opens the share sheet instead.
-   - Per-chunk ChaCha20-Poly1305 authenticated encryption with AEAD header authentication.
-   - Interactive file cards in chat with real-time transfer progress, speed metrics, and cancel controls.
-   - Completely ephemeral: files are never stored on any server or persistent browser storage; downloads cease if sender disconnects.
-
-5. **Phase 5: UI Localization & Multi-Language Support (Completed)**
-   - Standalone `translations.json` table embedded directly into Wasm via `include_str!`.
-   - 10 most common global languages: English (`en`), Chinese (`zh`), Hindi (`hi`), Spanish (`es`), French (`fr`), Arabic (`ar`), Bengali (`bn`), Portuguese (`pt`), Russian (`ru`), German (`de`).
-   - Browser localization detection on startup with automatic English fallback.
-   - Header dropdown language switcher with native labels.
-   - Dynamic Right-to-Left (RTL) layout switching (`dir="rtl"`) for Arabic.
-   - Zero Persistence Invariant: language choices reside purely in Wasm RAM.
-
-6. **Phase 6: Decentralized Nostr WebRTC Signaling (Completed)**
-   - Decentralized signaling via Nostr relay pool with NIP-16 Ephemeral Events (Kind 20001).
-   - In-memory secp256k1 ephemeral burner keypairs (`k256`) with BIP-340 Schnorr signatures in pure Wasm.
-   - SHA-256 room topic hashing (`["d", sha256(room_id)]`) to prevent leaking room IDs to relays.
-   - Perfect negotiation and deterministic initiator/responder role assignment.
-   - Batched ICE candidate exchange with 100ms debouncing to eliminate relay rate-limiting.
-   - URL fragment relay configuration (`#room=...&key=...&relays=wss://...`).
-   - Interactive Nostr relay badge and status modal in header.
-   - In-memory mock Nostr relay in dev server for 100% offline, deterministic automated testing.
-
-7. **Phase 7: Audio Processing Controls & Speaker Mute (Completed)**
-   - ⚙️ Audio settings modal with three checkboxes, all on by default: noise cancellation, echo cancellation and auto gain control (browser-native `getUserMedia` constraints).
-   - Changes apply live mid-call by re-capturing the mic and swapping the sent track (`replaceTrack`, no renegotiation); mic mute state is kept.
-   - Switches the browser doesn't support are disabled with a hint.
-   - Speaker mute silences incoming peer audio locally in audio, video and screen-share calls; it resets when the call ends.
-   - Zero Persistence Invariant: settings live in Wasm RAM only and reset to all-on on reload.
-
-8. **Phase 8: Discord-like Group Rooms over a Serverless Mesh (Completed)**
-   - **8a Mesh core (Completed)**: one `RTCPeerConnection` per member pair with perfect negotiation; recipient-addressed signaling; session nicknames shown with a short key tag; live member list; room messages signed by their author and gossip-relayed to members without a direct link; per-room member cap with deterministic "latest joiner loses" and an admin seat; admin link vs invite link; optional TURN server in the URL.
-   - **8b Voice lounge (Completed)**: Discord-style drop-in voice/video lounge replacing the 1:1 ring flow; per-person mic, speaker, camera (with front/rear flip) and screen-share toggles; video grid with fullscreen; speaking indicator; "X joined voice" prompt; per-room voice and video limits; audio processing settings carry over.
-   - **8c Group file sharing (Completed)**: room-wide file cards; each member pulls the file straight from the sender over their own direct link; the sender uploads to at most 2 members at once and queues the rest; cancel and withdraw; transfers stop if the sender leaves.
-   - **8d Moderation & history (Completed)**: admins can kick a member or move everyone to a new link (the room ID and key change, sealed to each remaining member); opt-in history so late joiners see the last 200 messages (replaced by always-on history in Phase 13).
-   - **8e Chat extras (Completed)**: typing indicator, emoji reactions, editing and deleting your own messages, private DMs sealed end-to-end between two members, and @mentions with a highlight, a title badge and a chime.
-
-9. **Phase 9: Remote Control (Completed)**
-   - Members you allow can control your mouse and keyboard (one at a time, desktop or game mode) and play with game controllers (up to four) while you share your screen, through the `dchat-host` companion app for Linux and Windows. Downloads are published per release with checksums.
-
-10. **Phase 10: Low-Latency Video with Quality Presets (Completed)**
-   - Pick how your camera and screen share look to everyone: from **Fastest** (720p, 60 fps, lowest latency) to **Text** (full resolution, 15 fps, crisp and light). Video no longer waits for voice lip sync, pointer moves are sent at once, and an ⓘ panel on each tile shows what the connection is doing.
-
-11. **Phase 11: Installable App (Completed)**
-   - Install dchat as an app (PWA) on desktop, Android, iPhone and iPad: its own window and icon, room links that open in the app, **Join with a link** in the lobby, and @mentions counted on the app icon. Still nothing stored; remote control still uses `dchat-host`.
-
-12. **Phase 12: Parallel File Connections (Experiment)**
-   - Uploads add extra WebRTC connections to the downloader while each one raises the speed, up to a cap set in ⚙️ Settings, for internet links where one connection can't fill the line.
-
-13. **Phase 13: Always-On History (Completed)**
-   - Whoever joins sees the room's conversation as members see it: messages with their latest edits, deletions, reactions, file cards and the names of members who left. Members sync what they hold on every new connection, so someone whose connection dropped for a while catches up too. Kept in RAM only (up to 32 MB per member), carried through a kick or a new link, gone when the last member leaves.
-
-14. **Phase 14: Admin Succession (Completed)**
-   - When the room's last admin leaves, the member who has been there longest becomes admin after 15 seconds, and admins can make another member an admin with **Make admin**.
+* **Pure Rust to WebAssembly**: Built with **Leptos (CSR)** targeting `wasm32-unknown-unknown` without Emscripten.
+* **Instant Mobile Testing**: Built-in dev HTTPS server auto-generates TLS certificates, includes an in-memory Nostr relay, and displays an ASCII QR code in the terminal for instant phone pairing on local Wi-Fi.
+* **Automated Tests**: Rust unit and integration tests, plus a Playwright suite that runs several browser members against each other offline (see [Automated Verification & Testing](#automated-verification--testing)).
 
 ---
 
