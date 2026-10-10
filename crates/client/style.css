@@ -826,6 +826,11 @@ header {
   transition: width 0.15s ease-out;
 }
 
+/* Waiting for the sender's link to come back. */
+.file-paused .file-progress-fill {
+  opacity: 0.45;
+}
+
 .file-progress-meta {
   display: flex;
   align-items: center;
@@ -1099,6 +1104,7 @@ select.lobby-input {
 .link-direct { background-color: #10b981; }
 .link-via { background: linear-gradient(90deg, #10b981 50%, #f59e0b 50%); }
 .link-connecting { background-color: #f59e0b; animation: pulse 1.5s infinite; }
+.link-away { background-color: var(--text-muted); }
 
 .member-name {
   font-weight: 600;
@@ -1131,6 +1137,12 @@ select.lobby-input {
 .member-row[data-link="via"] .member-link {
   color: #fbbf24;
   cursor: help;
+}
+
+/* Out of reach for now (a phone that switched apps): still listed, dimmed. */
+.member-row[data-link="away"] .member-name,
+.member-row[data-link="away"] .member-tag {
+  opacity: 0.55;
 }
 
 .message-author {
@@ -1387,6 +1399,19 @@ select.lobby-input {
   align-self: center;
   font-size: 0.75rem;
   color: var(--text-muted);
+}
+
+.dm-delivery {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+}
+
+.dm-delivery.not-delivered {
+  color: #f87171;
+}
+
+.dm-line[data-delivery="waiting"] .dm-text {
+  opacity: 0.7;
 }
 
 .dm-input-row {

@@ -323,6 +323,9 @@ test('files need a direct link, and a transfer stops when the sender leaves', as
   await bo.page.evaluate(() => { delete window.showSaveFilePicker; });
   await bo.page.locator('.file-download-btn').click({ timeout: 10000 });
   await expect(bo.page.locator('.file-progress-label')).toBeVisible({ timeout: 10000 });
+  // Gone without a word: away first (the download pauses), left once the grace (shortened
+  // here) runs out.
+  for (const m of [bo, cy]) await m.page.evaluate(() => window.__dchat.awayGraceMs(2000));
   await ana.context.close();
   await expect(bo.page.locator('.file-card')).toContainText(/Interrupted|Sender left the room/, { timeout: 20000 });
   await expect(cy.page.locator('.file-card')).toContainText('Sender left the room', { timeout: 20000 });

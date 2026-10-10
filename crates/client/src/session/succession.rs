@@ -38,7 +38,9 @@ impl RoomSession {
         }
         let present = self.present_members();
         let present: Vec<&Member> = present.iter().collect();
-        let heir = self.inner.succession.borrow_mut().update(&self.inner.me, &present, js_sys::Date::now() as u64);
+        let away = self.away_members();
+        let away: Vec<&Member> = away.iter().collect();
+        let heir = self.inner.succession.borrow_mut().update(&self.inner.me, &present, &away, js_sys::Date::now() as u64);
         if let Some(heir) = heir {
             if !self.hand_over(&heir, false) {
                 self.inner.succession.borrow_mut().forget_handover();
@@ -51,8 +53,11 @@ impl RoomSession {
         let Some(admin) = self.inner.admin_key.borrow().clone() else {
             return false;
         };
-        let present: Vec<String> = self.inner.present.borrow().iter().filter(|p| **p != self.inner.me).cloned().collect();
-        let ranking = self.inner.succession.borrow().seen.order(present.iter().map(String::as_str));
+        // Away members keep their rank: they may be back.
+        let away = self.inner.absences.borrow().away();
+        let around: Vec<String> =
+            self.inner.present.borrow().iter().chain(&away).filter(|p| **p != self.inner.me).cloned().collect();
+        let ranking = self.inner.succession.borrow().seen.order(around.iter().map(String::as_str));
         let content = HandoverContent { admsk: admin.secret_hex(), ranking };
         let Ok(sealed) = seal_json(&self.inner.identity, to, &content) else {
             return false;

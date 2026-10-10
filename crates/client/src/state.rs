@@ -67,6 +67,9 @@ pub enum LinkUi {
     Via(String),
     /// A direct link is being negotiated and no relay path exists yet.
     Connecting,
+    /// Out of reach without having left (a phone that switched apps): kept in the list for
+    /// `protocol::presence::AWAY_GRACE_MS`.
+    Away,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -263,6 +266,9 @@ pub enum FileTransferStatus {
     SenderLeft,
     /// The direct link dropped mid-transfer.
     Interrupted,
+    /// The link to the sender dropped mid-transfer (one of us switched apps): it goes on
+    /// from where it stopped once the link is back.
+    Paused { progress: u8 },
     /// Our own offer: uploads running, waiting, finished.
     Sharing {
         active: usize,
@@ -397,6 +403,18 @@ pub struct DmUi {
     pub time: String,
     /// "The other member left" marker (text holds their name).
     pub notice: bool,
+    pub delivery: DmDelivery,
+}
+
+/// Where one of our DMs is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DmDelivery {
+    #[default]
+    Sent,
+    /// The member is away: it waits in RAM and goes out when they are back.
+    Waiting,
+    /// They left (or stayed away too long) before it could go out.
+    NotDelivered,
 }
 
 /// Parameters of the current URL fragment (empty when unavailable).

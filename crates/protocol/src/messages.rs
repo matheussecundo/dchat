@@ -71,6 +71,13 @@ pub enum SignalPayload {
         candidates: Vec<IceCandidateData>,
     },
     PeerLeft,
+    /// Relays only, to a member who was away when an admin moved the room: the admin's
+    /// signed `RoomBody::AdminRekey`, which holds `to`'s sealed grant (or names it kicked).
+    /// Sent on the old room's topic by members who moved, while `to`'s grace may still run.
+    RekeyForward {
+        to: String,
+        envelope: Box<RoomEnvelope>,
+    },
 }
 
 impl SignalPayload {
@@ -79,7 +86,8 @@ impl SignalPayload {
         match self {
             SignalPayload::Offer { to, .. }
             | SignalPayload::Answer { to, .. }
-            | SignalPayload::IceBatch { to, .. } => Some(to),
+            | SignalPayload::IceBatch { to, .. }
+            | SignalPayload::RekeyForward { to, .. } => Some(to),
             SignalPayload::Presence | SignalPayload::PeerLeft => None,
         }
     }
@@ -103,12 +111,13 @@ impl RelaySignal {
         Ok(match signal {
             SignalPayload::Presence => Self::Presence,
             SignalPayload::PeerLeft => Self::PeerLeft,
-            SignalPayload::Offer { to, .. } | SignalPayload::Answer { to, .. } | SignalPayload::IceBatch { to, .. } => {
-                Self::Sealed {
-                    to: to.clone(),
-                    sealed: seal_json(sender, to, signal)?,
-                }
-            }
+            SignalPayload::Offer { to, .. }
+            | SignalPayload::Answer { to, .. }
+            | SignalPayload::IceBatch { to, .. }
+            | SignalPayload::RekeyForward { to, .. } => Self::Sealed {
+                to: to.clone(),
+                sealed: seal_json(sender, to, signal)?,
+            },
         })
     }
 
@@ -224,8 +233,10 @@ pub enum RoomBody {
         caption: Option<String>,
         media: Option<MediaInfo>,
     },
-    /// Ask the author (`to`) to send their file over our direct link.
-    FileRequest { to: String, file_id: String },
+    /// Ask the author (`to`) to send their file over our direct link, from chunk
+    /// `from_chunk` on (0 for a new download; the first missing chunk to resume one that
+    /// stopped when a link dropped).
+    FileRequest { to: String, file_id: String, from_chunk: u32 },
     /// The author withdraws the offer for everyone (`to: None`), or one side stops a
     /// single transfer (`to: Some(peer)`).
     FileCancel { to: Option<String>, file_id: String },
@@ -275,6 +286,10 @@ pub enum RoomBody {
     ControlGrant { to: String, mouse_keyboard: bool, pad: Option<u8>, reason: Option<ControlEnd> },
     /// The viewer gives back everything it holds on `to`'s computer and drops its request.
     ControlRelease { to: String },
+    /// Is this link still alive? Sent by a tab that was frozen (a phone that switched apps)
+    /// over each link it still holds; `to` answers with `reply: true`. A link that stays
+    /// silent is dropped and dialed again.
+    LinkCheck { to: String, reply: bool },
     /// Admin only: move the room to a new ID and key. Each remaining member gets its own
     /// grant sealed to its session key; `kicked` (if any) gets none.
     AdminRekey { kicked: Option<String>, grants: Vec<SealedGrant> },
@@ -303,7 +318,8 @@ impl RoomBody {
             | RoomBody::LinkSignal { to, .. }
             | RoomBody::ControlRequest { to, .. }
             | RoomBody::ControlGrant { to, .. }
-            | RoomBody::ControlRelease { to } => Some(to),
+            | RoomBody::ControlRelease { to }
+            | RoomBody::LinkCheck { to, .. } => Some(to),
             RoomBody::FileCancel { to, .. } => to.as_deref(),
             _ => None,
         }
@@ -486,7 +502,7 @@ mod tests {
 
     #[test]
     fn test_room_body_recipient() {
-        let request = RoomBody::FileRequest { to: "a".into(), file_id: "f".into() };
+        let request = RoomBody::FileRequest { to: "a".into(), file_id: "f".into(), from_chunk: 0 };
         assert_eq!(request.recipient(), Some("a"));
         let withdraw = RoomBody::FileCancel { to: None, file_id: "f".into() };
         assert_eq!(withdraw.recipient(), None);
@@ -505,6 +521,7 @@ mod tests {
         }
         assert_eq!(RoomBody::ControlRequest { to: "s".into(), mouse_keyboard: true, controller: false }.recipient(), Some("s"));
         assert_eq!(RoomBody::ControlRelease { to: "s".into() }.recipient(), Some("s"));
+        assert_eq!(RoomBody::LinkCheck { to: "s".into(), reply: false }.recipient(), Some("s"), "link checks are direct-only");
         let status = RoomBody::ControlStatus { seq: 1, available: true, controllers: 4, mouse_keyboard: None, pads: vec![] };
         assert_eq!(status.recipient(), None, "everyone sees who controls what");
         let rekey = RoomBody::AdminRekey { kicked: Some("x".into()), grants: vec![] };
@@ -622,6 +639,29 @@ mod tests {
             assert_eq!(relayed.recipient(), None);
             assert_eq!(relayed.open(&cy, ana.pubkey()), Some(signal));
         }
+    }
+
+    #[test]
+    fn test_forwarded_rekeys_are_sealed_to_the_member_who_was_away() {
+        let admin = NostrBurnerKey::generate().unwrap();
+        let ana = NostrBurnerKey::generate().unwrap();
+        let bo = NostrBurnerKey::generate().unwrap();
+        let cy = NostrBurnerKey::generate().unwrap();
+        let grant = RoomGrant { room: "new-room".into(), key: "new-key".into() };
+        let rekey = RoomBody::AdminRekey { kicked: None, grants: vec![SealedGrant::seal(&admin, bo.pubkey(), &grant).unwrap()] };
+        let envelope = RoomEnvelope::sign(&admin, "adm", 1, rekey).unwrap();
+        let forward = SignalPayload::RekeyForward { to: bo.pubkey().into(), envelope: Box::new(envelope.clone()) };
+
+        let relayed = RelaySignal::seal(&ana, &forward).unwrap();
+        assert_eq!(relayed.recipient(), Some(bo.pubkey()));
+        // With the room key alone, nobody learns that the room moved.
+        let with_room_key = serde_json::to_string(&relayed).unwrap();
+        assert!(!with_room_key.contains(&envelope.sig) && !with_room_key.contains("AdminRekey"));
+        let Some(SignalPayload::RekeyForward { envelope: opened, .. }) = relayed.open(&bo, ana.pubkey()) else {
+            panic!("Bo opens the forward");
+        };
+        assert!(opened.verify("adm"), "still the admin's signed original");
+        assert_eq!(relayed.open(&cy, ana.pubkey()), None);
     }
 
     #[test]

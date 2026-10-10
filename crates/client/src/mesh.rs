@@ -61,6 +61,8 @@ pub struct PeerLink {
     pub remote: String,
     pub id: u64,
     pub created_at: f64,
+    /// When the chat channel opened (0 until then), set by the session on `LinkEvent::Open`.
+    opened_at: Cell<f64>,
     pc: RtcPeerConnection,
     /// The polite side yields when both offer at once (higher pubkey is polite).
     polite: bool,
@@ -108,6 +110,7 @@ impl PeerLink {
             remote: remote.to_string(),
             id,
             created_at: js_sys::Date::now(),
+            opened_at: Cell::new(0.0),
             pc,
             polite: self_pubkey > remote,
             making_offer: Rc::new(Cell::new(false)),
@@ -196,6 +199,18 @@ impl PeerLink {
             .borrow()
             .as_ref()
             .is_some_and(|dc| dc.ready_state() == RtcDataChannelState::Open)
+    }
+
+    pub fn mark_opened(&self) {
+        self.opened_at.set(js_sys::Date::now());
+    }
+
+    /// How long the chat channel has been open (0 if it hasn't).
+    pub fn open_for(&self) -> f64 {
+        match self.opened_at.get() {
+            at if at > 0.0 && self.is_open() => js_sys::Date::now() - at,
+            _ => 0.0,
+        }
     }
 
     /// Send a text frame on the chat channel; returns whether it was handed to the browser.

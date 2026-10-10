@@ -7,11 +7,12 @@ use serde::{Deserialize, Serialize};
 /// Bump whenever members on the old and new code could misunderstand each other: the
 /// encoding of any signal or room message (the `wire_format_matches_protocol_version`
 /// test catches those), signed bytes, the file chunk layout, or a rule every member must
-/// apply alike (caps, gossip, the chat log's rules and sync, rekey, admin succession).
+/// apply alike (caps, gossip, the chat log's rules and sync, rekey, admin succession, the
+/// away grace).
 ///
 /// Never change how a plain room's relay topic is derived (`hash_room_topic`): members on
 /// different versions only notice each other (and show the reload banner) on a shared topic.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// What travels through the relays (encrypted with the room key): the sender's protocol
 /// version and its signal. Every version must keep `v` readable, whatever `payload` becomes.
@@ -62,11 +63,12 @@ mod tests {
     use crate::chat_log;
     use crate::media::{self, MediaInfo, MediaKind, Thumbnail, WAVEFORM_BARS};
     use crate::succession;
+    use crate::presence;
     use sha2::{Digest, Sha256};
 
     /// The wire fingerprint recorded for the current version. When the test below fails,
     /// bump `PROTOCOL_VERSION` and record the new pair here.
-    const RECORDED: (u32, &str) = (8, "457a259541985977773a6db246e8f87f375c9c3f61218f6aee1dd1b152d11d31");
+    const RECORDED: (u32, &str) = (9, "a892ff06fff9c7ba1dc599a4347e6066bd39533a5b2b028ab3f77580e46d1a5b");
 
     fn sealed() -> EncryptedPayload {
         EncryptedPayload { nonce: "n".into(), ciphertext: "c".into() }
@@ -110,6 +112,16 @@ mod tests {
                 }],
             },
             SignalPayload::PeerLeft,
+            SignalPayload::RekeyForward {
+                to: "b".into(),
+                envelope: Box::new(RoomEnvelope {
+                    id: "id".into(),
+                    author: "a".into(),
+                    ts: 1,
+                    body: RoomBody::AdminRekey { kicked: None, grants: vec![SealedGrant { to: "b".into(), payload: sealed() }] },
+                    sig: "sig".into(),
+                }),
+            },
         ]
     }
 
@@ -120,6 +132,7 @@ mod tests {
             SignalPayload::Answer { .. } => "Answer",
             SignalPayload::IceBatch { .. } => "IceBatch",
             SignalPayload::PeerLeft => "PeerLeft",
+            SignalPayload::RekeyForward { .. } => "RekeyForward",
         }
     }
 
@@ -161,7 +174,7 @@ mod tests {
                     waveform: Some(vec![5; WAVEFORM_BARS]),
                 }),
             },
-            RoomBody::FileRequest { to: "b".into(), file_id: "f".into() },
+            RoomBody::FileRequest { to: "b".into(), file_id: "f".into(), from_chunk: 7 },
             RoomBody::FileCancel { to: Some("b".into()), file_id: "f".into() },
             RoomBody::FileQueued { to: "b".into(), file_id: "f".into(), position: 1 },
             RoomBody::FileLinkSignal {
@@ -190,6 +203,7 @@ mod tests {
             RoomBody::ControlRequest { to: "s".into(), mouse_keyboard: true, controller: true },
             RoomBody::ControlGrant { to: "b".into(), mouse_keyboard: false, pad: Some(1), reason: Some(ControlEnd::TakenOver) },
             RoomBody::ControlRelease { to: "s".into() },
+            RoomBody::LinkCheck { to: "b".into(), reply: true },
             RoomBody::Leave,
         ]
     }
@@ -222,6 +236,7 @@ mod tests {
             RoomBody::ControlRequest { .. } => "ControlRequest",
             RoomBody::ControlGrant { .. } => "ControlGrant",
             RoomBody::ControlRelease { .. } => "ControlRelease",
+            RoomBody::LinkCheck { .. } => "LinkCheck",
             RoomBody::Leave => "Leave",
         }
     }
@@ -247,6 +262,8 @@ mod tests {
         wire.push(String::from_utf8(admin_proof_message("r", "s")).unwrap());
         wire.push(serde_json::to_string(&HandoverContent { admsk: "k".into(), ranking: vec!["b".into()] }).unwrap());
         wire.push(format!("{} {}", succession::ADMIN_ABSENT_MS, MAX_RANKING));
+        // Away and return: how long a member out of reach keeps its place.
+        wire.push(presence::AWAY_GRACE_MS.to_string());
         wire.push(hash_room_topic("r"));
         // Remote-control input: every event's binary encoding, the packet header, the keys.
         wire.push(hex::encode(encode_events(&crate::input::tests::samples()).unwrap()));

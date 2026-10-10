@@ -279,8 +279,10 @@ test('a late joiner sees the thumbnail after the sender left', async ({ browser 
   await shareMedia(ana.page, [{ name: 'souvenir.png', mimeType: 'image/png', buffer: await picture(ana.page) }]);
   await expect(bo.page.locator('.media-card .media-image')).toBeVisible({ timeout: 15000 });
   const invite = inviteFrom(ana.page.url());
+  // Gone without a word: away first, left once the grace (shortened here) runs out.
+  await bo.page.evaluate(() => window.__dchat.awayGraceMs(2000));
   await ana.context.close();
-  await expect(bo.page.locator('.member-row')).toHaveCount(1, { timeout: 20000 });
+  await expect(bo.page.locator('.member-row')).toHaveCount(1, { timeout: 30000 });
 
   const cy = await newMember(browser, 'Cy');
   await joinRoom(cy.page, invite, 'Cy');

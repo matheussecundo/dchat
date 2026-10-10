@@ -392,7 +392,9 @@ fn visual_frame(
                     }
                     .into_view()
                 }
-                Some(FileTransferStatus::Queued { .. }) => view! { <span class="media-progress-ring waiting"></span> }.into_view(),
+                Some(FileTransferStatus::Queued { .. } | FileTransferStatus::Paused { .. }) => {
+                    view! { <span class="media-progress-ring waiting"></span> }.into_view()
+                }
                 // Said below the picture (withdrawn, sender left): the thumbnail stays.
                 Some(FileTransferStatus::Withdrawn | FileTransferStatus::SenderLeft | FileTransferStatus::Completed { withdrawn: true, .. }) => {
                     ().into_view()
@@ -515,7 +517,12 @@ fn voice_bubble(
             el.set_playback_rate(SPEEDS[next]);
         }
     };
-    let loading = move || matches!(live.get(), Some(FileTransferStatus::Downloading { .. } | FileTransferStatus::Queued { .. }));
+    let loading = move || {
+        matches!(
+            live.get(),
+            Some(FileTransferStatus::Downloading { .. } | FileTransferStatus::Queued { .. } | FileTransferStatus::Paused { .. })
+        )
+    };
     view! {
         <div class="voice-bubble" node_ref=bubble class:playing=playing>
             <button class="voice-play" disabled=move || !ready()
