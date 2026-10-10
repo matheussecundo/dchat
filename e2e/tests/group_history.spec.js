@@ -297,3 +297,32 @@ test("a message from another room can't be replayed into this one", async ({ bro
 
   for (const m of [ana, bo, cy, mallory]) await m.context.close();
 });
+
+test('alone in the room: messages, files and voice messages wait for whoever joins', async ({ browser }) => {
+  const ana = await newMember(browser, 'Ana');
+  const admin = await createRoom(ana.page, { name: 'Ana' });
+  const input = ana.page.locator('footer.input-bar input');
+  await expect(input).toHaveAttribute('placeholder', 'Nobody else is here yet: whoever joins will see your messages');
+  await expect(ana.page.locator('footer.input-bar .attach-btn')).toBeEnabled();
+
+  await sendMessage(ana.page, 'Hello, whoever comes');
+  await expect(row(ana.page, 'Hello, whoever comes')).toBeVisible();
+  await shareFile(ana.page, 'agenda.pdf', 'the agenda', 'For later');
+  await expect(card(ana.page, 'agenda.pdf')).toContainText('Shared with the room');
+  await ana.page.locator('footer.input-bar .record-btn').click();
+  await ana.page.waitForTimeout(1000);
+  await ana.page.locator('footer.input-bar .record-btn').click();
+  await ana.page.locator('.recorder-review .rec-send').click();
+  await expect(ana.page.locator('.media-card[data-media-kind="voice"]')).toHaveCount(1);
+
+  const bo = await newMember(browser, 'Bo');
+  await joinRoom(bo.page, inviteFrom(admin), 'Bo');
+  await expect(row(bo.page, 'Hello, whoever comes')).toBeVisible({ timeout: 20000 });
+  await expect(bo.page.locator('.file-caption', { hasText: 'For later' })).toBeVisible();
+  const got = await downloadVia(bo.page, card(bo.page, 'agenda.pdf'));
+  expect(got.text).toBe('the agenda');
+  await expect(bo.page.locator('.media-card[data-media-kind="voice"] .voice-play')).toBeEnabled({ timeout: 15000 });
+  await expect(input).toHaveAttribute('placeholder', 'Type an encrypted message...');
+
+  for (const m of [ana, bo]) await m.context.close();
+});

@@ -170,6 +170,8 @@ pub enum Ignored {
     Future,
     TooLarge,
     BadReaction,
+    /// Fails `RoomBody::is_well_formed` (e.g. a file card's preview breaks the limits).
+    Malformed,
     /// Not part of the log (typing, DMs, voice state, direct-only messages…).
     NotLogged,
 }
@@ -269,6 +271,11 @@ impl ChatLog {
         let kind = kind(envelope);
         if matches!(kind, Kind::NotLogged) {
             return Merge::Ignored(Ignored::NotLogged);
+        }
+        // Before anything that would show it anyway (dated ahead, too large to keep).
+        if !envelope.body.is_well_formed() {
+            self.dropped.insert(&envelope.id);
+            return Merge::Ignored(Ignored::Malformed);
         }
         if envelope.ts > now.saturating_add(MAX_FUTURE_SKEW_MS) {
             return Merge::Ignored(Ignored::Future);
@@ -978,6 +985,7 @@ mod tests {
                 size: 3,
                 mime_type: "text/plain".into(),
                 caption: None,
+                media: None,
             },
         )
     }
@@ -1149,6 +1157,44 @@ mod tests {
         assert!(log.wants("m"), "not refused for good");
         assert!(matches!(log.merge(&ahead, NOW + 2), Merge::Added(_)));
         assert!(matches!(log.merge(&chat("n", "ana", NOW + MAX_FUTURE_SKEW_MS, "ok"), NOW), Merge::Added(_)));
+    }
+
+    #[test]
+    fn test_malformed_previews_are_refused_by_everyone() {
+        use crate::media::{MediaInfo, MediaKind, Thumbnail, THUMB_MAX_BYTES};
+        use base64::Engine;
+        let card = |id: &str, mime: &str, media: MediaInfo, ts: u64| {
+            env(
+                id,
+                "ana",
+                ts,
+                RoomBody::FileOffer {
+                    file_id: format!("f-{id}"),
+                    name: "x".into(),
+                    size: 3,
+                    mime_type: mime.into(),
+                    caption: None,
+                    media: Some(media),
+                },
+            )
+        };
+        let photo = MediaInfo { kind: MediaKind::Image, width: 10, height: 10, duration_ms: 0, thumb: None, waveform: None };
+        let mut log = ChatLog::new();
+        assert!(matches!(log.merge(&card("ok", "image/png", photo.clone(), NOW), NOW), Merge::Added(_)));
+        // An "image" that is a web page, and a thumbnail past the limit, never enter any log;
+        // nor does one dated ahead (it would otherwise be shown without being logged).
+        let page = card("page", "text/html", photo.clone(), NOW);
+        assert_eq!(log.merge(&page, NOW), Merge::Ignored(Ignored::Malformed));
+        assert!(!log.wants("page"), "refused for good");
+        let big = Thumbnail {
+            mime_type: "image/webp".into(),
+            data: base64::engine::general_purpose::STANDARD.encode(vec![0u8; THUMB_MAX_BYTES + 1]),
+        };
+        let fat = card("fat", "image/png", MediaInfo { thumb: Some(big), ..photo.clone() }, NOW);
+        assert_eq!(log.merge(&fat, NOW), Merge::Ignored(Ignored::Malformed));
+        let ahead = card("ahead", "image/svg+xml", photo, NOW + MAX_FUTURE_SKEW_MS + 1);
+        assert_eq!(log.merge(&ahead, NOW), Merge::Ignored(Ignored::Malformed));
+        assert_eq!(log.file_offers().len(), 1);
     }
 
     #[test]

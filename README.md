@@ -12,7 +12,7 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 
 * **Group Rooms over a P2P Mesh**: One link opens a room for a small group (25 members by default; the creator can also limit how many join voice and turn on video). Every member connects directly to every other member: there is no media or message server, only Nostr relays for the initial handshake. Share the invite as a link or a QR code; members without a direct link still get text, relayed through a mutual member.
 * **Signed Messages**: Every room message is signed by its author's session key and passed on to members without a direct link, so nobody can alter it or speak for someone else. Names live for the session only and are shown with a short key tag.
-* **Always-On History**: Whoever joins sees the room's conversation as members see it: messages with their latest edits, deletions, reactions, file cards and the names of members who left. Members sync what they hold on every new connection, so someone whose connection dropped for a while catches up too. Kept in RAM only (up to 32 MB per member), carried through a kick or a new link, gone when the last member leaves.
+* **Always-On History**: Whoever joins sees the room's conversation as members see it: messages with their latest edits, deletions, reactions, file cards and the names of members who left. Members sync what they hold on every new connection, so someone whose connection dropped for a while catches up too. Kept in RAM only (up to 32 MB per member), carried through a kick or a new link, gone when the last member leaves. You can write and share files while alone: whoever joins later gets them.
 * **Chat Extras**: Typing indicator, emoji reactions, editing and deleting your own messages, private messages sealed end-to-end between two members, and @mentions with a highlight, a chime and a count in the tab title (and on the app icon when installed).
 * **Moderation**: Admins can kick a member or move everyone to a new link (new room ID and key, sealed to each remaining member). The admin link is separate from the invite link, and an admin always gets a seat in a full room.
 * **Admin Succession**: When the room's last admin leaves, the member who has been there longest becomes admin after 15 seconds, and admins can make another member an admin with **Make admin**.
@@ -29,6 +29,8 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 
 * **Encrypted P2P File Sharing**: Files are posted to the room as cards, and each member pulls the file straight from the sender over their own direct link, in 64 KB chunks each sealed with ChaCha20-Poly1305 (header authenticated too). The sender uploads to two members at once and queues the rest; cards show progress and speed, with cancel and withdraw. Downloads stream to disk where the browser allows it (File System Access API) or are saved from memory; on iPhone and iPad, 💾 Save opens the share sheet. Files are never stored on a server, and a transfer stops if the sender leaves.
 * **Parallel File Connections (experiment)**: Uploads add extra WebRTC connections to the downloader while each one raises the speed, up to a cap set in ⚙️ Settings, for internet links where one connection can't fill the line.
+* **Photos, Videos and Audio in the Chat**: Pictures, GIFs, videos and audio files show right in the conversation, WhatsApp-style: small ones load by themselves once on screen, larger ones on a tap, and a tap on a picture opens it fullscreen. **⬇️ Download** still saves the file, from the copy already in memory. Drag files onto the room or paste a screenshot to attach them, several at a time; a photo that records where it was taken says so, with a one-tap **Remove location**.
+* **Voice Messages**: Tap 🎤 (or hold it) to record from your microphone, listen back, then send or discard. Every browser records MP3, which every browser and phone plays. The recording stays on your device, in memory, and members pull it from you like any shared file.
 
 ### Privacy & Security
 
@@ -118,6 +120,25 @@ Tap **📎**, pick a file, optionally add a caption and send. Everyone in the ro
 - A finished download shows its size, how long it took (from the first byte) and its average speed, and offers **⬇️ Download again** while the sender still offers the file. During a transfer, the speed shown is averaged over the last 5 s.
 - On iPhone and iPad a finished download waits on the card: tap **💾 Save** to open the share sheet (Save to Files, AirDrop, …) over dchat. Closing the sheet keeps the button. dchat never hands the file over unasked, because iOS would open it in another app and suspend dchat, which drops you from the room.
 - If you have no direct link to the sender (`via` in the member list), the card says *Sender not directly reachable*. If the sender leaves, pending offers are marked unavailable and running transfers stop.
+- **Several at once, by drag and drop or paste.** Drop files anywhere on the room (a *Drop to attach* overlay shows while you drag), paste a screenshot or copied files into the message box, or pick several with 📎: up to 10 wait above the message box, each with its own ✕, and **Send** posts one card per file in order, with your caption on the first.
+
+#### Photos, videos and audio in the chat
+
+- **Pictures** (PNG, JPEG, GIF, WebP, AVIF, BMP), **videos** and **audio files** your browser can play show in the chat instead of as a plain file card. The sender's card carries a small blurred thumbnail (made from the picture itself, so it carries none of the photo's metadata), its size and length, so the chat keeps its layout before anything loads.
+- Files up to **16 MB** load by themselves once their card is on screen (scrolling up through history loads what you look at, nothing else). Larger ones show ▶ or ⬇ with their size: tap to load. Above **200 MB** a file stays a plain download, so it never sits in memory.
+- Tap a picture (or ⛶ on a video) for the fullscreen viewer; Esc, ✕ or a tap beside it closes it. One video or audio plays at a time.
+- **⬇️ Download** saves the copy already loaded (nothing is pulled again); for media not loaded yet it loads first, then saves. On iPhone and iPad it opens the share sheet.
+- What you viewed stays in memory for the session (also through a kick or **🔄 New Link**), up to 512 MB: past that the ones you looked at longest ago go back to their thumbnail and load again on a tap. A reload forgets everything.
+- SVG files never preview (they can carry scripts). Audio and video your browser says it can't play show as plain file cards. If a loaded file then fails to open, the card retries a few times, then says why (the browser's own reason), and **⬇️ Download** still saves it.
+- While a picture or video loads, its card shows the same progress, speed and connections as any file card, and afterwards its size, time and average speed.
+- **Photo location:** a JPEG that records where it was taken shows *📍 This photo contains its location* on its chip before you send it; **Remove location** clears the GPS data without re-encoding the picture (its orientation stays).
+
+#### Voice messages
+
+- With nothing typed, **🎤** takes the place of **Send**. **Tap** it to record hands-free (🗑 to cancel, ⏹ to stop), or **hold** it: release to stop, slide toward the start of the line to cancel, slide up to keep recording without holding.
+- Stopping always shows the recording first: play it back (tap the waveform to seek), then **➤** sends it or **🗑** discards it. Nothing reaches the chat before you send.
+- Recording uses the microphone chosen in ⚙️ Settings with its noise and echo settings and stops by itself at 15:00. Whatever the browser, it is saved as MP3 (24 kHz mono, 48 kbps, about 350 KB a minute), encoded in the app itself, so any browser or phone can play it. If you are in the voice lounge, your mic there is muted while you record and comes back as it was.
+- The recording lives in your tab's memory and is offered like a shared file: members pull it from your device (it loads by itself), and they see a waveform, its length and a 1× / 1.5× / 2× speed button; consecutive voice messages play one after another. **💾 Save** on your own card keeps a copy on your disk.
 
 ### Remote Control
 

@@ -1,5 +1,6 @@
 use crate::crypto::EncryptedPayload;
 use crate::crypto::{decrypt_json, encrypt_json};
+use crate::media::MediaInfo;
 use crate::nostr::{verify_message, NostrBurnerKey, NostrError};
 use serde::{Deserialize, Serialize};
 
@@ -212,13 +213,16 @@ pub enum RoomBody {
         video_ts: u64,
     },
     /// A file the author shares with the room. Each member who wants it pulls it from
-    /// the author over their direct link; files are never relayed.
+    /// the author over their direct link; files are never relayed. `media`: what an image,
+    /// video, audio file or voice message looks like before anyone pulls it
+    /// (`protocol::media`, checked by `RoomBody::is_well_formed`).
     FileOffer {
         file_id: String,
         name: String,
         size: u64,
         mime_type: String,
         caption: Option<String>,
+        media: Option<MediaInfo>,
     },
     /// Ask the author (`to`) to send their file over our direct link.
     FileRequest { to: String, file_id: String },
@@ -302,6 +306,15 @@ impl RoomBody {
             | RoomBody::ControlRelease { to } => Some(to),
             RoomBody::FileCancel { to, .. } => to.as_deref(),
             _ => None,
+        }
+    }
+
+    /// Whether every member may show and log this message. Applied alike by all (the chat
+    /// log refuses what fails it), so no member keeps what another drops.
+    pub fn is_well_formed(&self) -> bool {
+        match self {
+            RoomBody::FileOffer { media: Some(media), mime_type, .. } => media.is_valid(mime_type),
+            _ => true,
         }
     }
 }
@@ -535,6 +548,7 @@ mod tests {
             size: 1,
             mime_type: "text/plain".into(),
             caption: Some("c".into()),
+            media: None,
         };
         let env = RoomEnvelope::sign(&key, "adm", 1, offer).unwrap();
         let mut json: serde_json::Value = serde_json::to_value(&env).unwrap();

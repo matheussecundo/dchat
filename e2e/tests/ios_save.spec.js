@@ -177,16 +177,46 @@ test('a 20 MB file is folded as it arrives and shared byte-exact', async ({ brow
   const { ana, bo } = await room(browser);
   // Not one repeated byte: a dropped, doubled or reordered chunk changes the hash.
   const content = crypto.randomBytes(20 * 1024 * 1024 + 12345);
-  await shareFile(ana.page, 'clip.mp4', content, 'video/mp4');
+  await shareFile(ana.page, 'backup.bin', content, 'application/octet-stream');
   const card = await downloadToReady(bo, 90000);
 
   await card.locator('.file-save-btn').click();
   await expect(card).toContainText('Download complete');
   const file = await shared(bo.page);
-  expect(file.name).toBe('clip.mp4');
-  expect(file.type).toBe('video/mp4');
+  expect(file.name).toBe('backup.bin');
+  expect(file.type).toBe('application/octet-stream');
   expect(file.size).toBe(content.length);
   expect(file.sha256).toBe(sha256(content));
+  expect(bo.downloads).toHaveLength(0);
+
+  for (const m of [ana, bo]) await m.context.close();
+});
+
+test('a photo shows in the chat by itself; Download hands the copy already here to the share sheet', async ({ browser }) => {
+  const { ana, bo } = await room(browser);
+  const b64 = await ana.page.evaluate(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 200;
+    canvas.height = 150;
+    canvas.getContext('2d').fillRect(20, 20, 100, 80);
+    return canvas.toDataURL('image/png').split(',')[1];
+  });
+  const photo = Buffer.from(b64, 'base64');
+  await shareFile(ana.page, 'snap.png', photo, 'image/png');
+
+  const card = bo.page.locator('.media-card');
+  await expect(card.locator('.media-image')).toBeVisible({ timeout: 15000 });
+  // Viewing hands nothing to the system.
+  await bo.page.waitForTimeout(500);
+  expect(bo.downloads).toHaveLength(0);
+  expect(await bo.page.evaluate(() => window.__shareCalls)).toBe(0);
+
+  await card.locator('.media-download-btn').click();
+  await expect.poll(() => bo.page.evaluate(() => window.__shared.length)).toBe(1);
+  const file = await shared(bo.page);
+  expect(file.name).toBe('snap.png');
+  expect(file.type).toBe('image/png');
+  expect(file.sha256).toBe(sha256(photo));
   expect(bo.downloads).toHaveLength(0);
 
   for (const m of [ana, bo]) await m.context.close();
