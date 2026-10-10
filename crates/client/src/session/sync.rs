@@ -8,7 +8,7 @@
 use super::history::Mode;
 use super::RoomSession;
 use crate::names::pubkey_tag;
-use leptos::*;
+use leptos::prelude::*;
 use protocol::chat_log::{DiffFrame, Merge, PullRound, PullStep, SyncQueue, SYNC_WANT_MAX};
 use protocol::{RoomBody, RoomEnvelope, SyncWindow};
 use std::cell::RefCell;

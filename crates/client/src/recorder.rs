@@ -11,7 +11,8 @@ use crate::media::capture_microphone;
 use crate::media_card::clock;
 use crate::state::AudioSettings;
 use crate::voice_mp3::{VoiceEncoder, VOICE_MIME};
-use leptos::*;
+use leptos::html;
+use leptos::prelude::*;
 use protocol::media::{waveform_from_levels, MediaInfo, MediaKind};
 use std::cell::Cell;
 use std::rc::Rc;
@@ -138,19 +139,19 @@ thread_local! {
 #[derive(Clone, Copy)]
 pub struct Recorder {
     pub phase: RwSignal<Phase>,
-    live: StoredValue<Option<Live>>,
+    live: StoredValue<Option<Live>, LocalStorage>,
     /// An audio context made during a tap or press (browsers only start audio from one).
-    prepared: StoredValue<Option<AudioContext>>,
+    prepared: StoredValue<Option<AudioContext>, LocalStorage>,
     cap_ms: StoredValue<f64>,
 }
 
 impl Recorder {
     pub fn new() -> Self {
         Self {
-            phase: create_rw_signal(Phase::Idle),
-            live: store_value(None),
-            prepared: store_value(None),
-            cap_ms: store_value(MAX_RECORDING_MS),
+            phase: RwSignal::new(Phase::Idle),
+            live: StoredValue::new_local(None),
+            prepared: StoredValue::new_local(None),
+            cap_ms: StoredValue::new(MAX_RECORDING_MS),
         }
     }
 
@@ -494,15 +495,15 @@ struct Press {
 #[derive(Clone, Copy)]
 pub struct MicPress {
     recorder: Recorder,
-    start: StoredValue<Rc<dyn Fn(bool)>>,
-    press: StoredValue<Option<Press>>,
+    start: StoredValue<Rc<dyn Fn(bool)>, LocalStorage>,
+    press: StoredValue<Option<Press>, LocalStorage>,
     skip_click: StoredValue<bool>,
 }
 
 impl MicPress {
     /// `start(held)` opens the microphone and records.
     pub fn new(recorder: Recorder, start: impl Fn(bool) + 'static) -> Self {
-        Self { recorder, start: store_value(Rc::new(start)), press: store_value(None), skip_click: store_value(false) }
+        Self { recorder, start: StoredValue::new_local(Rc::new(start)), press: StoredValue::new_local(None), skip_click: StoredValue::new(false) }
     }
 
     pub fn down(self, ev: web_sys::PointerEvent) {
@@ -631,14 +632,14 @@ pub fn review_panel(
     lang: ReadSignal<crate::i18n::Language>,
     take: Take,
     recorder: Recorder,
-    can_send: impl Fn() -> bool + 'static,
+    can_send: impl Fn() -> bool + Send + Sync + 'static,
     send: impl Fn() + 'static,
 ) -> impl IntoView {
     use crate::i18n::t;
-    let audio = create_node_ref::<html::Audio>();
-    let wave = create_node_ref::<html::Div>();
-    let (playing, set_playing) = create_signal(false);
-    let (position, set_position) = create_signal(0.0_f64);
+    let audio = NodeRef::<html::Audio>::new();
+    let wave = NodeRef::<html::Div>::new();
+    let (playing, set_playing) = signal(false);
+    let (position, set_position) = signal(0.0_f64);
     let duration = take.duration_ms as f64 / 1000.0;
     let element = move || audio.get().map(|a| {
         let el: &web_sys::HtmlMediaElement = a.as_ref();

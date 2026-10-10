@@ -11,7 +11,7 @@ use super::RoomSession;
 use crate::media::sleep_ms;
 use crate::mesh::{wait_for_room, ChunkRoute};
 use crate::state::{current_time_string, ChatMessageUi, DownloadSummary, FileOfferInfo, FileTransferStatus};
-use leptos::*;
+use leptos::prelude::*;
 use protocol::media::{mime_from_name, preview_type, MediaInfo};
 use protocol::transfer::{in_send_window, AckPacer, Growth, LinkGrowth, RateMeter, Reorder};
 use protocol::{

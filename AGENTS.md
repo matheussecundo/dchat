@@ -148,7 +148,9 @@ dchat/
 │   │       ├── main.rs         # CLI args, LAN IP detection, QR code banner, /nostr (crates/relay) & /ws routing
 │   │       ├── signaling.rs    # Legacy room manager
 │   │       └── tls.rs          # rcgen self-signed dev certificate generator
-│   └── client/                 # Leptos CSR frontend targeting wasm32-unknown-unknown
+│   └── client/                 # Leptos 0.8 CSR frontend targeting wasm32-unknown-unknown. Signals and stored values holding
+│                               #   browser objects or Rc use local storage (`signal_local`, `StoredValue::new_local`); views and
+│                               #   effects update on the next microtask, so code reading the DOM after a signal change waits a frame
 │       ├── Trunk.toml          # public_url = "./": relative asset paths (works under any path)
 │       ├── index.html          # Trunk entry point, Service Worker registration, PWA links, early beforeinstallprompt capture
 │       ├── manifest.webmanifest # Installable app: relative id/start_url/scope, standalone, launch_handler, icons

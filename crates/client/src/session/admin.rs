@@ -11,7 +11,7 @@
 use super::RoomSession;
 use crate::names::pubkey_tag;
 use crate::state::{current_fragment, replace_fragment, RekeyTarget, SessionCarry};
-use leptos::*;
+use leptos::prelude::*;
 use protocol::{
     generate_key, generate_room_id, key_from_base64, key_to_base64, RoomBody, RoomEnvelope, RoomGrant, SealedGrant,
     SignalPayload,

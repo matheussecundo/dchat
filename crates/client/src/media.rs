@@ -405,15 +405,16 @@ pub fn attach_video(element_id: String, stream: &MediaStream) {
     // `Clone::clone` copies the JS handle; the inherent `MediaStream::clone` would call
     // JS `clone()`, duplicating tracks that then hold devices open.
     let stream = Clone::clone(stream);
-    if try_attach_video(&element_id, &stream) {
-        return;
-    }
     wasm_bindgen_futures::spawn_local(async move {
+        // Callers attach right after changing the lounge, and the view re-renders its tiles
+        // (new <video> elements) on the next microtask: wait for that, or the stream would go
+        // to an element about to be replaced.
+        sleep_ms(0).await;
         for _ in 0..20 {
-            sleep_ms(30).await;
             if try_attach_video(&element_id, &stream) {
                 break;
             }
+            sleep_ms(30).await;
         }
     });
 }

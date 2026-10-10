@@ -22,7 +22,7 @@ use i18n::{
     detect_browser_language, large_file_warning_desc, t, t_replace_1, update_document_direction,
     Language,
 };
-use leptos::*;
+use leptos::prelude::*;
 use names::{pubkey_tag, random_name, sanitize_name, MAX_NAME_CHARS};
 use protocol::video::{CameraPreset, ScreenPreset, VideoPresets};
 use protocol::{
@@ -73,36 +73,36 @@ enum Screen {
 
 #[component]
 fn App() -> impl IntoView {
-    let (lang, set_lang) = create_signal(detect_browser_language());
-    create_effect(move |_| {
+    let (lang, set_lang) = signal(detect_browser_language());
+    Effect::new(move |_| {
         update_document_direction(lang.get());
     });
 
     let initial_screen = if read_credentials().is_some() { Screen::Join } else { Screen::Create };
-    let (screen, set_screen) = create_signal(initial_screen);
-    let (name_input, set_name_input) = create_signal(random_name());
-    let (cap_input, set_cap_input) = create_signal(DEFAULT_MEMBER_CAP.to_string());
-    let (voice_cap_input, set_voice_cap_input) = create_signal(DEFAULT_VOICE_CAP.to_string());
-    let (video_cap_input, set_video_cap_input) = create_signal(DEFAULT_VIDEO_CAP.to_string());
-    let (hide_ip_input, set_hide_ip_input) = create_signal(false);
+    let (screen, set_screen) = signal(initial_screen);
+    let (name_input, set_name_input) = signal(random_name());
+    let (cap_input, set_cap_input) = signal(DEFAULT_MEMBER_CAP.to_string());
+    let (voice_cap_input, set_voice_cap_input) = signal(DEFAULT_VOICE_CAP.to_string());
+    let (video_cap_input, set_video_cap_input) = signal(DEFAULT_VIDEO_CAP.to_string());
+    let (hide_ip_input, set_hide_ip_input) = signal(false);
     // Typed at creation or on the join screen; cleared once stretched.
-    let (password_input, set_password_input) = create_signal(String::new());
+    let (password_input, set_password_input) = signal(String::new());
     // Creating a password room is opt-in: the box exists only while this is ticked, so a
     // password the browser saved earlier is never filled into a new room by itself.
-    let (password_wanted, set_password_wanted) = create_signal(false);
+    let (password_wanted, set_password_wanted) = signal(false);
     // Spell checking the message boxes (some browsers' enhanced spell check sends text away).
-    let (spellcheck_on, set_spellcheck_on) = create_signal(true);
+    let (spellcheck_on, set_spellcheck_on) = signal(true);
     // Relay choice: what the link already says, else public; a deployment can pre-fill its
     // own relay address at build time (DCHAT_RELAY_URL).
     let initial_relays = fragment_relay_choice();
-    let (relay_mode, set_relay_mode) = create_signal(initial_relays.as_ref().map_or(RelayMode::Public, |c| c.0));
-    let (relay_input, set_relay_input) = create_signal(
+    let (relay_mode, set_relay_mode) = signal(initial_relays.as_ref().map_or(RelayMode::Public, |c| c.0));
+    let (relay_input, set_relay_input) = signal(
         initial_relays
             .map(|c| c.1)
             .unwrap_or_else(|| option_env!("DCHAT_RELAY_URL").unwrap_or_default().to_string()),
     );
     // The custom relay URLs, or `None` while what was typed isn't usable.
-    let custom_relays = create_memo(move |_| {
+    let custom_relays = Memo::new(move |_| {
         let (valid, invalid) = split_relay_input(&relay_input.get());
         let page_is_https = window().and_then(|w| w.location().protocol().ok()).as_deref() == Some("https:");
         // An HTTPS page can only open encrypted (wss://) connections.
@@ -111,35 +111,35 @@ fn App() -> impl IntoView {
     });
     let relay_choice_valid = move || relay_mode.get() == RelayMode::Public || custom_relays.get().is_some();
 
-    let (status, set_status) = create_signal(ConnectionStatus::Idle);
-    let (messages, set_messages) = create_signal(Vec::<ChatMessageUi>::new());
+    let (status, set_status) = signal(ConnectionStatus::Idle);
+    let (messages, set_messages) = signal(Vec::<ChatMessageUi>::new());
     // The room's chat log (signed originals, synced with members): RAM only, carried across
     // rekeys, emptied on a fresh entry or removal.
-    let chat_log = store_value(Rc::new(RefCell::new(ChatLog::new())));
-    let (history_loading, set_history_loading) = create_signal(false);
-    let (members, set_members) = create_signal(Vec::<MemberUi>::new());
-    let (names, set_names) = create_signal(HashMap::<String, String>::new());
-    let (room_full, set_room_full) = create_signal(false);
-    let (removed, set_removed) = create_signal(false);
-    let (rekey, set_rekey) = create_signal(None::<RekeyTarget>);
-    let (connected_relays, set_connected_relays) = create_signal(0usize);
-    let (input_text, set_input_text) = create_signal(String::new());
-    let (show_qr, set_show_qr) = create_signal(false);
-    let (show_relays, set_show_relays) = create_signal(false);
-    let (show_members, set_show_members) = create_signal(false);
-    let (copied, set_copied) = create_signal(false);
-    let (room_id_sig, set_room_id_sig) = create_signal(String::new());
-    let (toast, set_toast) = create_signal(Option::<&'static str>::None);
-    let (update_required, set_update_required) = create_signal(false);
+    let chat_log = StoredValue::new_local(Rc::new(RefCell::new(ChatLog::new())));
+    let (history_loading, set_history_loading) = signal(false);
+    let (members, set_members) = signal(Vec::<MemberUi>::new());
+    let (names, set_names) = signal(HashMap::<String, String>::new());
+    let (room_full, set_room_full) = signal(false);
+    let (removed, set_removed) = signal(false);
+    let (rekey, set_rekey) = signal_local(None::<RekeyTarget>);
+    let (connected_relays, set_connected_relays) = signal(0usize);
+    let (input_text, set_input_text) = signal(String::new());
+    let (show_qr, set_show_qr) = signal(false);
+    let (show_relays, set_show_relays) = signal(false);
+    let (show_members, set_show_members) = signal(false);
+    let (copied, set_copied) = signal(false);
+    let (room_id_sig, set_room_id_sig) = signal(String::new());
+    let (toast, set_toast) = signal(Option::<&'static str>::None);
+    let (update_required, set_update_required) = signal(false);
 
     // Installing the app (PWA): the browser's install offer, read again whenever it changes.
     let installed = pwa::is_installed();
     let apple_install_hint = pwa::apple_install_hint();
-    let (install_offered, set_install_offered) = create_signal(pwa::install_available());
+    let (install_offered, set_install_offered) = signal(pwa::install_available());
     pwa::on_install_change(move || set_install_offered.set(pwa::install_available()));
     // "Join with a link" in the lobby: any dchat site's link, of which only the fragment is used.
-    let (join_link_input, set_join_link_input) = create_signal(String::new());
-    let (join_link_invalid, set_join_link_invalid) = create_signal(false);
+    let (join_link_input, set_join_link_input) = signal(String::new());
+    let (join_link_invalid, set_join_link_invalid) = signal(false);
     let join_with_link = move || match FragmentParams::from_link(&join_link_input.get_untracked()) {
         Some(params) => state::join_link(&params),
         None => set_join_link_invalid.set(true),
@@ -147,90 +147,90 @@ fn App() -> impl IntoView {
 
     // Remote control: the paired dchat-host app (app level: it survives a room rekey) and
     // which shared screen this tab is controlling right now.
-    let (control, set_control) = create_signal(ControlUi::default());
-    let (agent_status, set_agent_status) = create_signal(AgentStatus::Off);
-    let (agent_monitors, set_agent_monitors) = create_signal(None::<(Vec<MonitorInfo>, Option<u32>)>);
-    let (agent_warning, set_agent_warning) = create_signal(None::<String>);
-    let agent_link = store_value(None::<Rc<AgentLink>>);
-    let (show_control_host, set_show_control_host) = create_signal(false);
-    let (agent_port_input, set_agent_port_input) = create_signal(DEFAULT_AGENT_PORT.to_string());
-    let (agent_code_input, set_agent_code_input) = create_signal(String::new());
-    let (allow_control, set_allow_control) = create_signal(true);
-    let (controlling, set_controlling) = create_signal(None::<String>);
-    let capture = store_value(None::<InputCapture>);
-    let pad_poller = store_value(None::<PadPoller>);
+    let (control, set_control) = signal(ControlUi::default());
+    let (agent_status, set_agent_status) = signal(AgentStatus::Off);
+    let (agent_monitors, set_agent_monitors) = signal(None::<(Vec<MonitorInfo>, Option<u32>)>);
+    let (agent_warning, set_agent_warning) = signal(None::<String>);
+    let agent_link = StoredValue::new_local(None::<Rc<AgentLink>>);
+    let (show_control_host, set_show_control_host) = signal(false);
+    let (agent_port_input, set_agent_port_input) = signal(DEFAULT_AGENT_PORT.to_string());
+    let (agent_code_input, set_agent_code_input) = signal(String::new());
+    let (allow_control, set_allow_control) = signal(true);
+    let (controlling, set_controlling) = signal(None::<String>);
+    let capture = StoredValue::new_local(None::<InputCapture>);
+    let pad_poller = StoredValue::new_local(None::<PadPoller>);
     // Toasts and control prompts live in one layer that moves into whatever element is in
     // fullscreen, so they stay visible there.
-    let overlay_ref = create_node_ref::<leptos::html::Div>();
-    let overlay_home = store_value(None::<web_sys::Node>);
-    let chat_container_ref = create_node_ref::<leptos::html::Main>();
-    let chat_at_bottom = store_value(true);
-    let (no_turn, set_no_turn) = create_signal(false);
+    let overlay_ref = NodeRef::<leptos::html::Div>::new();
+    let overlay_home = StoredValue::new_local(None::<web_sys::Node>);
+    let chat_container_ref = NodeRef::<leptos::html::Main>::new();
+    let chat_at_bottom = StoredValue::new(true);
+    let (no_turn, set_no_turn) = signal(false);
 
     // Voice lounge
-    let (lounge, set_lounge) = create_signal(Vec::<LoungeMemberUi>::new());
-    let (my_voice, set_my_voice) = create_signal(MyVoiceUi::default());
-    let (speaking, set_speaking) = create_signal(HashSet::<String>::new());
-    let (voice_prompt, set_voice_prompt) = create_signal(Option::<String>::None);
-    let (audio_settings, set_audio_settings) = create_signal(AudioSettings::default());
+    let (lounge, set_lounge) = signal(Vec::<LoungeMemberUi>::new());
+    let (my_voice, set_my_voice) = signal(MyVoiceUi::default());
+    let (speaking, set_speaking) = signal(HashSet::<String>::new());
+    let (voice_prompt, set_voice_prompt) = signal(Option::<String>::None);
+    let (audio_settings, set_audio_settings) = signal(AudioSettings::default());
     // The sharer's video quality presets: RAM only, kept across voice rejoins and rekeys.
-    let (video_presets, set_video_presets) = create_signal(VideoPresets::default());
+    let (video_presets, set_video_presets) = signal(VideoPresets::default());
     // Microphone, speaker and camera (None: the system default). RAM only, kept across
     // voice rejoins and rekeys.
-    let (device_choice, set_device_choice) = create_signal(DeviceChoice::default());
+    let (device_choice, set_device_choice) = signal(DeviceChoice::default());
     // Most connections one of our uploads may use (1 = the main link only). RAM only, kept
     // across rekeys.
-    let (file_connections, set_file_connections) = create_signal(protocol::transfer::MAX_FILE_CONNECTIONS);
+    let (file_connections, set_file_connections) = signal(protocol::transfer::MAX_FILE_CONNECTIONS);
     // What the browser lists, refreshed while the settings are open.
-    let (device_list, set_device_list) = create_signal(Vec::<DeviceEntry>::new());
+    let (device_list, set_device_list) = signal(Vec::<DeviceEntry>::new());
     // A speaker picked in the browser's own chooser (Firefox), which it may not list.
-    let (picked_speaker, set_picked_speaker) = create_signal(None::<DeviceEntry>);
+    let (picked_speaker, set_picked_speaker) = signal(None::<DeviceEntry>);
     // Safari can't choose where audio plays.
     let speaker_supported = media::speaker_selection_supported();
     // The open ▾ quality menu (camera or screen), placed next to its button.
-    let (quality_menu, set_quality_menu) = create_signal(None::<QualityMenu>);
+    let (quality_menu, set_quality_menu) = signal(None::<QualityMenu>);
     // Mobile browsers can't share a screen: no screen quality controls there.
     let screen_supported = media::screen_capture_supported();
 
     // Chat extras
-    let (typing, set_typing) = create_signal(Vec::<String>::new());
-    let (mention_count, set_mention_count) = create_signal(0usize);
-    let (dms, set_dms) = create_signal(HashMap::<String, Vec<DmUi>>::new());
-    let (dm_unread, set_dm_unread) = create_signal(HashMap::<String, usize>::new());
-    let (dm_open, set_dm_open) = create_signal(Option::<String>::None);
-    let dm_thread_ref = create_node_ref::<leptos::html::Div>();
-    let dm_at_bottom = store_value(true);
-    let (dm_input, set_dm_input) = create_signal(String::new());
-    let (editing, set_editing) = create_signal(Option::<String>::None);
-    let (react_picker, set_react_picker) = create_signal(Option::<String>::None);
+    let (typing, set_typing) = signal(Vec::<String>::new());
+    let (mention_count, set_mention_count) = signal(0usize);
+    let (dms, set_dms) = signal(HashMap::<String, Vec<DmUi>>::new());
+    let (dm_unread, set_dm_unread) = signal(HashMap::<String, usize>::new());
+    let (dm_open, set_dm_open) = signal(Option::<String>::None);
+    let dm_thread_ref = NodeRef::<leptos::html::Div>::new();
+    let dm_at_bottom = StoredValue::new(true);
+    let (dm_input, set_dm_input) = signal(String::new());
+    let (editing, set_editing) = signal(Option::<String>::None);
+    let (react_picker, set_react_picker) = signal(Option::<String>::None);
 
     // File sharing: files waiting to be sent (picked, dropped or pasted).
-    let staged = create_rw_signal(Vec::<StagedFile>::new());
+    let staged = RwSignal::new_local(Vec::<StagedFile>::new());
     // Media loaded for viewing in the chat (RAM only, kept across rekeys), files this browser
     // couldn't decode, and the fullscreen viewer.
-    let held_media = create_rw_signal(HeldMedia::default());
-    let failed_media = create_rw_signal(HashMap::<String, String>::new());
-    let viewer = create_rw_signal(None::<ViewerItem>);
+    let held_media = RwSignal::new(HeldMedia::default());
+    let failed_media = RwSignal::new(HashMap::<String, String>::new());
+    let viewer = RwSignal::new(None::<ViewerItem>);
     let media_ctx = MediaCtx { lang, members, held: held_media, failed: failed_media, viewer, messages: set_messages };
     media_card::install_playback_rules();
     // Voice messages: app level, so a recording under review survives a rekey.
     let recorder = Recorder::new();
     // Files dragged over the window (a counter: enter and leave fire for every element).
-    let drag_depth = store_value(0_i32);
-    let (dragging, set_dragging) = create_signal(false);
-    let (large_file_warning, set_large_file_warning) = create_signal(Option::<(String, String)>::None);
+    let drag_depth = StoredValue::new(0_i32);
+    let (dragging, set_dragging) = signal(false);
+    let (large_file_warning, set_large_file_warning) = signal(Option::<(String, String)>::None);
     // Finished downloads waiting for a tap on Save (iOS), by file id: RAM only, kept across
     // rekeys, dropped once handed over or when this tab leaves the room.
-    let ready_files = store_value(HashMap::<String, web_sys::File>::new());
-    let (show_audio_settings, set_show_audio_settings) = create_signal(false);
+    let ready_files = StoredValue::new_local(HashMap::<String, web_sys::File>::new());
+    let (show_audio_settings, set_show_audio_settings) = signal(false);
 
-    let session_ref = store_value(None::<RoomSession>);
+    let session_ref = StoredValue::new_local(None::<RoomSession>);
     // The session name, reused when an admin moves the room to a new link.
-    let my_name = store_value(String::new());
+    let my_name = StoredValue::new(String::new());
     // TURN servers the host offered (fetched once, reused if the room moves).
-    let host_ice = store_value(None::<js_sys::Array>);
+    let host_ice = StoredValue::new_local(None::<js_sys::Array>);
     // A password room's stretched password, RAM only: it also opens the room after a rekey.
-    let stretched_password = store_value(None::<[u8; KEY_LENGTH]>);
+    let stretched_password = StoredValue::new(None::<[u8; KEY_LENGTH]>);
 
     let start_session = move |room_id: String, link_key: [u8; KEY_LENGTH], carry: Option<SessionCarry>| -> Option<RoomSession> {
         if carry.is_none() {
@@ -289,7 +289,7 @@ fn App() -> impl IntoView {
         }
     };
 
-    let (entering, set_entering) = create_signal(false);
+    let (entering, set_entering) = signal(false);
     let enter_room = move || {
         let Some((room_id, key)) = read_credentials() else {
             return;
@@ -323,7 +323,7 @@ fn App() -> impl IntoView {
     };
 
     // An admin moved the room: follow it with a fresh session, keeping the chat on screen.
-    create_effect(move |_| {
+    Effect::new(move |_| {
         if let Some(target) = rekey.get() {
             set_rekey.set(None);
             if let Some(session) = start_session(target.room, target.key, Some(target.carry)) {
@@ -333,7 +333,7 @@ fn App() -> impl IntoView {
             }
         }
     });
-    create_effect(move |_| {
+    Effect::new(move |_| {
         if removed.get() {
             ready_files.update_value(|ready| ready.clear());
             viewer.set(None);
@@ -365,7 +365,7 @@ fn App() -> impl IntoView {
         }
     };
 
-    create_effect(move |_| {
+    Effect::new(move |_| {
         if room_full.get() {
             set_screen.set(Screen::Full);
         }
@@ -463,7 +463,7 @@ fn App() -> impl IntoView {
     };
     // What the message bar shows of the recorder (changes only between modes, not with
     // every level sample).
-    let rec_mode = create_memo(move |_| recorder.phase.with(RecMode::of));
+    let rec_mode = Memo::new(move |_| recorder.phase.with(RecMode::of));
     // 🎤 stands in for Send while there is nothing to send.
     let show_mic = move || {
         rec_mode.get() == RecMode::Idle
@@ -476,7 +476,7 @@ fn App() -> impl IntoView {
     };
     let mic_press = MicPress::new(recorder, start_recording);
 
-    create_effect(move |_| {
+    Effect::new(move |_| {
         let count = messages.with(|m| m.len());
         let in_room = screen.get() == Screen::Room;
         if in_room && count > 0 && chat_at_bottom.get_value() {
@@ -541,9 +541,9 @@ fn App() -> impl IntoView {
     };
     // Recording a voice message mutes our lounge mic (people in voice don't hear what is
     // recorded for the chat), and puts it back as it was afterwards.
-    let capturing = create_memo(move |_| recorder.phase.with(Phase::capturing));
-    let unmute_after_recording = store_value(false);
-    create_effect(move |_| {
+    let capturing = Memo::new(move |_| recorder.phase.with(Phase::capturing));
+    let unmute_after_recording = StoredValue::new(false);
+    Effect::new(move |_| {
         let voice = my_voice.get_untracked();
         if capturing.get() {
             if voice.in_voice && !voice.mic_muted {
@@ -638,8 +638,8 @@ fn App() -> impl IntoView {
         }
     };
     // A controller slot anywhere: read this viewer's game controller while it lasts.
-    let holds_pad = create_memo(move |_| control.with(|c| c.mine.values().any(|m| m.pad.is_some())));
-    create_effect(move |_| {
+    let holds_pad = Memo::new(move |_| control.with(|c| c.mine.values().any(|m| m.pad.is_some())));
+    Effect::new(move |_| {
         if !holds_pad.get() {
             pad_poller.set_value(None);
             return;
@@ -652,7 +652,7 @@ fn App() -> impl IntoView {
         }
     });
     // Rights gone (revoked, taken over, share ended): stop capturing right away.
-    create_effect(move |_| {
+    Effect::new(move |_| {
         let Some(sharer) = controlling.get() else {
             return;
         };
@@ -687,16 +687,20 @@ fn App() -> impl IntoView {
             let pos = MenuPos::next_to(&anchor, lang.get_untracked().is_rtl());
             set_quality_menu.set(Some(QualityMenu { source, pos }));
             // Keyboard users land on the current choice (Escape closes). Without scrolling:
-            // a scroll of the page would close the menu again.
-            if let Some(selected) =
-                window().and_then(|w| w.document()).and_then(|d| d.query_selector(".quality-menu .quality-option.selected").ok().flatten())
-            {
-                let options = js_sys::Object::new();
-                let _ = js_sys::Reflect::set(&options, &"preventScroll".into(), &true.into());
-                if let Ok(focus) = js_sys::Reflect::get(&selected, &"focus".into()).and_then(|f| f.dyn_into::<js_sys::Function>()) {
-                    let _ = focus.call1(&selected, &options);
+            // a scroll of the page would close the menu again. Next frame: the menu renders
+            // after this handler returns.
+            request_animation_frame(|| {
+                if let Some(selected) = window()
+                    .and_then(|w| w.document())
+                    .and_then(|d| d.query_selector(".quality-menu .quality-option.selected").ok().flatten())
+                {
+                    let options = js_sys::Object::new();
+                    let _ = js_sys::Reflect::set(&options, &"preventScroll".into(), &true.into());
+                    if let Ok(focus) = js_sys::Reflect::get(&selected, &"focus".into()).and_then(|f| f.dyn_into::<js_sys::Function>()) {
+                        let _ = focus.call1(&selected, &options);
+                    }
                 }
-            }
+            });
         }
     };
     let pick_quality = move |presets: VideoPresets| {
@@ -704,7 +708,7 @@ fn App() -> impl IntoView {
         set_quality_menu.set(None);
     };
     // The menus belong to the in-voice controls.
-    create_effect(move |_| {
+    Effect::new(move |_| {
         if !my_voice.with(|v| v.in_voice) && quality_menu.with_untracked(Option::is_some) {
             set_quality_menu.set(None);
         }
@@ -802,8 +806,8 @@ fn App() -> impl IntoView {
     };
     // Fullscreen for the whole video grid or a single tile. Browsers without element
     // fullscreen (iPhone Safari) get the grid expanded over the page instead.
-    let (grid_expanded, set_grid_expanded) = create_signal(false);
-    let (fullscreen_on, set_fullscreen_on) = create_signal(false);
+    let (grid_expanded, set_grid_expanded) = signal(false);
+    let (fullscreen_on, set_fullscreen_on) = signal(false);
     let toggle_fullscreen = move |tile_pubkey: Option<String>| {
         let Some(doc) = window().and_then(|w| w.document()) else {
             return;
@@ -911,8 +915,8 @@ fn App() -> impl IntoView {
         on_drag.forget();
     }
     // The grid's content box, measured live so tiles always fit (resizes, fullscreen).
-    let (grid_box, set_grid_box) = create_signal((0.0_f64, 0.0_f64));
-    let grid_observer = store_value(None::<web_sys::ResizeObserver>);
+    let (grid_box, set_grid_box) = signal((0.0_f64, 0.0_f64));
+    let grid_observer = StoredValue::new_local(None::<web_sys::ResizeObserver>);
     let voice_cap = move || session_ref.with_value(|s| s.as_ref().and_then(|s| s.voice_cap()));
     let video_cap = move || session_ref.with_value(|s| s.as_ref().and_then(|s| s.video_cap()));
     let voice_full = move || {
@@ -926,12 +930,12 @@ fn App() -> impl IntoView {
     let video_members = move || {
         lounge.with(|l| l.iter().filter(|m| m.video != VideoKind::None).cloned().collect::<Vec<_>>())
     };
-    let show_video_grid = create_memo(move |_| {
+    let show_video_grid = Memo::new(move |_| {
         my_voice.get().in_voice && lounge.with(|l| l.iter().any(|m| m.video != VideoKind::None))
     });
     // Video elements are recreated when the grid appears: point them at their streams,
     // and start measuring the new grid element.
-    create_effect(move |_| {
+    Effect::new(move |_| {
         if !show_video_grid.get() {
             set_grid_expanded.set(false);
             return;
@@ -970,7 +974,7 @@ fn App() -> impl IntoView {
         )
     };
     let grid_fullscreen_active = move || fullscreen_on.get() || grid_expanded.get();
-    create_effect(move |_| {
+    Effect::new(move |_| {
         if let Some(name) = voice_prompt.get() {
             set_timeout(
                 move || {
@@ -1047,17 +1051,20 @@ fn App() -> impl IntoView {
         FileAction::Withdraw => with_session(&|s| s.withdraw_file(&file_id)),
         FileAction::Load => with_session(&|s| s.load_media(&file_id, false)),
     };
-    let has_messages = create_memo(move |_| messages.with(|m| !m.is_empty()));
+    let has_messages = Memo::new(move |_| messages.with(|m| !m.is_empty()));
     let start_edit = move |id: String, text: String| {
         set_editing.set(Some(id));
         set_input_text.set(text);
-        if let Some(input) = window()
-            .and_then(|w| w.document())
-            .and_then(|d| d.query_selector("footer.input-bar input[type=text]").ok().flatten())
-            .and_then(|el| el.dyn_into::<HtmlInputElement>().ok())
-        {
-            let _ = input.focus();
-        }
+        // Next frame: the input shows the text once the view has updated.
+        request_animation_frame(|| {
+            if let Some(input) = window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.query_selector("footer.input-bar input[type=text]").ok().flatten())
+                .and_then(|el| el.dyn_into::<HtmlInputElement>().ok())
+            {
+                let _ = input.focus();
+            }
+        });
     };
     let delete_message = move |id: String| {
         let ok = window()
@@ -1079,7 +1086,7 @@ fn App() -> impl IntoView {
         set_dm_open.set(Some(pubkey));
     };
     // Reading an open conversation clears its unread count.
-    create_effect(move |_| {
+    Effect::new(move |_| {
         if let Some(peer) = dm_open.get() {
             if dm_unread.with(|u| u.get(&peer).copied().unwrap_or(0)) > 0 {
                 set_dm_unread.update(|u| {
@@ -1110,7 +1117,7 @@ fn App() -> impl IntoView {
             None => {}
         }
     };
-    create_effect(move |_| {
+    Effect::new(move |_| {
         if let Some(peer) = dm_open.get() {
             let _ = dms.with(|d| d.get(&peer).map(|v| v.len()));
             if dm_at_bottom.get_value() {
@@ -1125,7 +1132,7 @@ fn App() -> impl IntoView {
     // @mentions: chime, and a "(n)" title badge while the tab is in the background.
     let base_title = window().and_then(|w| w.document()).map(|d| d.title()).unwrap_or_default();
     let page_hidden = || window().and_then(|w| w.document()).is_some_and(|d| d.hidden());
-    create_effect(move |previous: Option<usize>| {
+    Effect::new(move |previous: Option<usize>| {
         let count = mention_count.get();
         if count > previous.unwrap_or(0) {
             media::play_chime();
@@ -1155,7 +1162,7 @@ fn App() -> impl IntoView {
         }
         on_visible.forget();
     }
-    let am_admin = create_memo(move |_| members.with(|m| m.iter().any(|x| x.link == LinkUi::Me && x.is_admin)));
+    let am_admin = Memo::new(move |_| members.with(|m| m.iter().any(|x| x.link == LinkUi::Me && x.is_admin)));
     let confirm = |text: String| window().and_then(|w| w.confirm_with_message(&text).ok()).unwrap_or(false);
     // A room link handed to the installed app's open window (Android has only one). A new
     // window (desktop) gets the link it was opened with: same room, nothing to do.
@@ -1491,7 +1498,7 @@ fn App() -> impl IntoView {
                     }}
                 </div>
             }
-            .into_view();
+            .into_any();
         }
         let row_class = match (msg.is_self, msg.mentions_me) {
             (true, _) => "message-row self",
@@ -1503,32 +1510,33 @@ fn App() -> impl IntoView {
         let body = match msg.file {
             Some(file) => {
                 let file_id = file.file_id.clone();
-                let live = create_memo(move |_| {
+                let live = Memo::new(move |_| {
                     messages.with(|msgs| msgs.iter().find(|m| m.id == file_id).and_then(|m| m.file.as_ref().map(|f| f.status.clone())))
                 });
                 match failed_media.with_untracked(|failed| preview_of(&file, failed)) {
                     Some(preview) => {
                         let actions = file_actions(lang, &file, live, msg.author.clone(), members, file_action, Some((held_media, preview.kind)));
                         media_card(media_ctx, preview, file, live, msg.text.clone(), msg.author.clone(), msg.is_self, actions, file_action)
-                            .into_view()
+                            .into_any()
                     }
-                    None => file_card(lang, file, live, msg.text.clone(), msg.author.clone(), members, file_action).into_view(),
+                    None => file_card(lang, file, live, msg.text.clone(), msg.author.clone(), members, file_action).into_any(),
                 }
             }
-            None => view! { <div class="message-bubble" dir="auto">{msg.text.clone()}</div> }.into_view(),
+            None => view! { <div class="message-bubble" dir="auto">{msg.text.clone()}</div> }.into_any(),
         };
         let id = msg.id.clone();
         let me = members.with_untracked(|m| m.iter().find(|x| x.link == LinkUi::Me).map(|x| x.pubkey.clone()));
         // Read live: a reaction changes this, not the row (a video playing in it keeps playing).
         let reactions = {
             let id = id.clone();
-            create_memo(move |_| messages.with(|msgs| msgs.iter().find(|m| m.id == id).map(|m| m.reactions.clone()).unwrap_or_default()))
+            Memo::new(move |_| messages.with(|msgs| msgs.iter().find(|m| m.id == id).map(|m| m.reactions.clone()).unwrap_or_default()))
         };
         let (id_pick, id_edit, id_delete, id_picker) = (id.clone(), id.clone(), id.clone(), id.clone());
         let text_for_edit = msg.text.clone();
         let is_self = msg.is_self;
+        let row_id = id.clone();
         view! {
-            <div class=row_class data-message-id=id.clone()>
+            <div class=row_class data-message-id=row_id>
                 {body}
                 <div class="message-actions">
                     <button class="msg-action react-btn" title=move || t(lang.get(), "title_react")
@@ -1588,7 +1596,7 @@ fn App() -> impl IntoView {
                 </div>
             </div>
         }
-        .into_view()
+        .into_any()
     };
 
     let room_view = move || {
@@ -1687,7 +1695,7 @@ fn App() -> impl IntoView {
                                 >
                                     {move || if voice_full() { t(lang.get(), "voice_full") } else { t(lang.get(), "btn_join_voice") }}
                                 </button>
-                            }.into_view();
+                            }.into_any();
                         }
                         view! {
                             <button
@@ -1761,7 +1769,7 @@ fn App() -> impl IntoView {
                             >
                                 {move || t(lang.get(), "btn_leave_voice")}
                             </button>
-                        }.into_view()
+                        }.into_any()
                     }}
                     <button
                         id="audio-settings-btn"
@@ -1899,7 +1907,7 @@ fn App() -> impl IntoView {
                                     </div>
                                 </div>
                             }
-                            .into_view()
+                            .into_any()
                         } else {
                             view! {
                                 <For
@@ -1908,7 +1916,7 @@ fn App() -> impl IntoView {
                                     children=message_view
                                 />
                             }
-                            .into_view()
+                            .into_any()
                         }
                     }}
                 </main>
@@ -1985,12 +1993,12 @@ fn App() -> impl IntoView {
                     "📎"
                 </button>
                 {move || match rec_mode.get() {
-                    RecMode::Idle => ().into_view(),
+                    RecMode::Idle => ().into_any(),
                     RecMode::Review => match recorder.phase.get_untracked() {
-                        Phase::Review(take) => review_panel(lang, take, recorder, can_post, send_take).into_view(),
-                        _ => ().into_view(),
+                        Phase::Review(take) => review_panel(lang, take, recorder, can_post, send_take).into_any(),
+                        _ => ().into_any(),
                     },
-                    mode => recording_panel(lang, recorder, mode).into_view(),
+                    mode => recording_panel(lang, recorder, mode).into_any(),
                 }}
                 <input
                     type="text"
@@ -2111,11 +2119,11 @@ fn App() -> impl IntoView {
             </header>
 
             {move || match screen.get() {
-                Screen::Create => create_view().into_view(),
-                Screen::Join => join_view().into_view(),
-                Screen::Room => room_view().into_view(),
-                Screen::Full => full_view().into_view(),
-                Screen::Removed => removed_view().into_view(),
+                Screen::Create => create_view().into_any(),
+                Screen::Join => join_view().into_any(),
+                Screen::Room => room_view().into_any(),
+                Screen::Full => full_view().into_any(),
+                Screen::Removed => removed_view().into_any(),
             }}
 
             // QR code of the invite link (never the admin link) for phone pairing
@@ -2188,7 +2196,7 @@ fn App() -> impl IntoView {
                             <p class="dm-empty">{move || t_replace_1(lang.get(), "dm_empty", "{name}", &name.get())}</p>
                             {move || dms.with(|d| d.get(&thread_peer).cloned().unwrap_or_default()).into_iter().map(|line| {
                                 if line.notice {
-                                    view! { <div class="dm-notice">{move || t_replace_1(lang.get(), "dm_peer_left", "{name}", &line.text)}</div> }.into_view()
+                                    view! { <div class="dm-notice">{move || t_replace_1(lang.get(), "dm_peer_left", "{name}", &line.text)}</div> }.into_any()
                                 } else {
                                     let delivery = match line.delivery {
                                         DmDelivery::Sent => None,
@@ -2204,7 +2212,7 @@ fn App() -> impl IntoView {
                                                 <span class=format!("dm-delivery {kind}")>{move || t_replace_1(lang.get(), key, "{name}", &name.get())}</span>
                                             })}
                                         </div>
-                                    }.into_view()
+                                    }.into_any()
                                 }
                             }).collect_view()}
                         </div>
@@ -2387,8 +2395,8 @@ fn App() -> impl IntoView {
                                         </a>
                                         " · "
                                         <span>{move || t(lang.get(), "agent_download_hint")}</span>
-                                    }.into_view(),
-                                    None => view! { <span>{move || t(lang.get(), "agent_download_ask")}</span> }.into_view(),
+                                    }.into_any(),
+                                    None => view! { <span>{move || t(lang.get(), "agent_download_ask")}</span> }.into_any(),
                                 }}
                             </p>
                         })}
@@ -2566,7 +2574,7 @@ fn file_card(
     caption: String,
     author: String,
     members: ReadSignal<Vec<MemberUi>>,
-    on_action: impl Fn(FileAction, String) + Copy + 'static,
+    on_action: impl Fn(FileAction, String) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let actions = file_actions(lang, &file, live, author, members, on_action, None);
     view! {
@@ -2593,13 +2601,13 @@ fn file_actions(
     live: Memo<Option<FileTransferStatus>>,
     author: String,
     members: ReadSignal<Vec<MemberUi>>,
-    on_action: impl Fn(FileAction, String) + Copy + 'static,
+    on_action: impl Fn(FileAction, String) + Copy + Send + Sync + 'static,
     media: Option<(RwSignal<HeldMedia>, MediaKind)>,
-) -> View {
+) -> AnyView {
     let id = file.file_id.clone();
     let held = {
         let id = id.clone();
-        create_memo(move |_| media.is_some_and(|(store, _)| store.with(|h| h.url(&id).is_some())))
+        Memo::new(move |_| media.is_some_and(|(store, _)| store.with(|h| h.url(&id).is_some())))
     };
     let button = move |action: FileAction, class: &'static str, key: &'static str| {
         let id = id.clone();
@@ -2610,7 +2618,7 @@ fn file_actions(
         }
     };
     let status_line = |key: &'static str, class: &'static str| {
-        view! { <span class=format!("file-status-text {class}")>{move || t(lang.get(), key)}</span> }.into_view()
+        view! { <span class=format!("file-status-text {class}")>{move || t(lang.get(), key)}</span> }.into_any()
     };
     let display_name = move |pubkey: &str| {
         members.with(|m| {
@@ -2697,7 +2705,7 @@ fn file_actions(
                 {active_list}
                 {queued_list}
             }
-            .into_view()
+            .into_any()
         }
         FileTransferStatus::Offered => {
             let download = button(FileAction::Download, "btn btn-sm btn-primary file-download-btn", "file_download");
@@ -2705,7 +2713,7 @@ fn file_actions(
             view! {
                 <div class="file-status-row">
                     {move || if reachable() {
-                        view! { {download.clone()} }.into_view()
+                        view! { {download.clone()} }.into_any()
                     } else if author_away() {
                         let author_name = author_name.clone();
                         view! {
@@ -2713,13 +2721,13 @@ fn file_actions(
                                 {move || t_replace_1(lang.get(), "file_sender_away", "{name}", &author_name())}
                             </span>
                         }
-                        .into_view()
+                        .into_any()
                     } else {
-                        view! { <span class="file-status-text cancelled file-unreachable">{move || t(lang.get(), "file_unreachable")}</span> }.into_view()
+                        view! { <span class="file-status-text cancelled file-unreachable">{move || t(lang.get(), "file_unreachable")}</span> }.into_any()
                     }}
                 </div>
             }
-            .into_view()
+            .into_any()
         }
         FileTransferStatus::Paused { progress } => {
             let author_name = author_name.clone();
@@ -2736,7 +2744,7 @@ fn file_actions(
                     </div>
                 </div>
             }
-            .into_view()
+            .into_any()
         }
         FileTransferStatus::Queued { position } => view! {
             <div class="file-status-row">
@@ -2744,7 +2752,7 @@ fn file_actions(
                 {button(FileAction::Cancel, "btn btn-sm btn-danger file-cancel-btn", "btn_cancel")}
             </div>
         }
-        .into_view(),
+        .into_any(),
         FileTransferStatus::Downloading { .. } => {
             // As for Sharing: the numbers follow the live status, the Cancel button stays put.
             let numbers = move || match live.get() {
@@ -2767,7 +2775,7 @@ fn file_actions(
                     </div>
                 </div>
             }
-            .into_view()
+            .into_any()
         }
         FileTransferStatus::ReadyToSave { summary, .. } => view! {
             <div class="file-status-row">
@@ -2776,7 +2784,7 @@ fn file_actions(
             </div>
             <div class="file-summary">{move || download_summary(lang.get(), summary)}</div>
         }
-        .into_view(),
+        .into_any(),
         // Viewed media: Download saves the copy held here (or loads it again, if released).
         FileTransferStatus::Completed { summary, withdrawn } if media.is_some() => {
             let download = button(FileAction::Download, "btn btn-sm btn-secondary file-download-btn media-download-btn", "file_download");
@@ -2786,7 +2794,7 @@ fn file_actions(
                     {move || (held.get() || (!withdrawn && reachable())).then(|| download.clone())}
                 </div>
             }
-            .into_view()
+            .into_any()
         }
         // The offer still stands (unless withdrawn): the file can be downloaded again.
         FileTransferStatus::Completed { summary, withdrawn } => {
@@ -2798,7 +2806,7 @@ fn file_actions(
                 </div>
                 <div class="file-summary">{move || download_summary(lang.get(), summary)}</div>
             }
-            .into_view()
+            .into_any()
         }
         // The offer still stands: the download can be started again.
         status @ (FileTransferStatus::Cancelled | FileTransferStatus::Interrupted) => {
@@ -2810,7 +2818,7 @@ fn file_actions(
                     {move || reachable().then(|| download.clone())}
                 </div>
             }
-            .into_view()
+            .into_any()
         }
         // Viewed before the sender withdrew or left: it can still be saved from here.
         status @ (FileTransferStatus::Withdrawn | FileTransferStatus::SenderLeft) => {
@@ -2822,7 +2830,7 @@ fn file_actions(
                     {move || held.get().then(|| download.clone())}
                 </div>
             }
-            .into_view()
+            .into_any()
         }
     }
 }
@@ -2899,16 +2907,16 @@ fn video_tile(
     member: LoungeMemberUi,
     lounge: ReadSignal<Vec<LoungeMemberUi>>,
     speaking: ReadSignal<HashSet<String>>,
-    on_fullscreen: impl Fn(Option<String>) + Copy + 'static,
+    on_fullscreen: impl Fn(Option<String>) + Copy + Send + Sync + 'static,
     control: ReadSignal<ControlUi>,
     controlling: ReadSignal<Option<String>>,
     names: ReadSignal<HashMap<String, String>>,
-    on_control: impl Fn(String, TileControlAction) + Copy + 'static,
-    session: StoredValue<Option<RoomSession>>,
+    on_control: impl Fn(String, TileControlAction) + Copy + Send + Sync + 'static,
+    session: StoredValue<Option<RoomSession>, LocalStorage>,
 ) -> impl IntoView {
-    let video_ref = create_node_ref::<leptos::html::Video>();
+    let video_ref = NodeRef::<leptos::html::Video>::new();
     // The ⓘ panel; it polls only while open and stops when it closes or the tile goes.
-    let (stats_open, set_stats_open) = create_signal(false);
+    let (stats_open, set_stats_open) = signal(false);
     let pk_stats = member.pubkey.clone();
     let pk_speaking = member.pubkey.clone();
     let pk_mic = member.pubkey.clone();
@@ -2920,7 +2928,7 @@ fn video_tile(
     // Memos, so the capture surface is only rebuilt when control really starts or stops.
     let tile_control = {
         let pk = pk.clone();
-        create_memo(move |_| {
+        Memo::new(move |_| {
             if !controllable {
                 return TileControl::Hidden;
             }
@@ -2935,11 +2943,11 @@ fn video_tile(
             }
         })
     };
-    let has_surface = create_memo(move |_| matches!(tile_control.get(), TileControl::Granted | TileControl::Engaged));
+    let has_surface = Memo::new(move |_| matches!(tile_control.get(), TileControl::Granted | TileControl::Engaged));
     // Everything the tile's buttons depend on, so they re-render only when it changes.
     let bar_info = {
         let pk = pk.clone();
-        create_memo(move |_| {
+        Memo::new(move |_| {
             control.with(|c| {
                 let mine = c.mine.get(&pk).copied().unwrap_or_default();
                 let controllers = c.offers.get(&pk).map_or(0, |o| o.controllers);
@@ -3045,7 +3053,7 @@ fn video_tile(
                             </button>
                             {pad_button}
                         </div>
-                    }.into_view(),
+                    }.into_any(),
                     TileControl::PadOnly => {
                         let pk_release = pk.clone();
                         view! {
@@ -3061,7 +3069,7 @@ fn video_tile(
                                     {move || t(lang.get(), "btn_release_control")}
                                 </button>
                             </div>
-                        }.into_view()
+                        }.into_any()
                     }
                     TileControl::Requested => view! {
                         <div class="control-bar">
@@ -3070,7 +3078,7 @@ fn video_tile(
                                 {move || t(lang.get(), "btn_cancel")}
                             </button>
                         </div>
-                    }.into_view(),
+                    }.into_any(),
                     TileControl::Granted => {
                         let pk_mode = pk.clone();
                         let game = mode == PointerMode::Game;
@@ -3091,9 +3099,9 @@ fn video_tile(
                                     {move || if game { t(lang.get(), "control_mode_game") } else { t(lang.get(), "control_mode_desktop") }}
                                 </button>
                             </div>
-                        }.into_view()
+                        }.into_any()
                     }
-                    TileControl::Engaged | TileControl::Hidden => ().into_view(),
+                    TileControl::Engaged | TileControl::Hidden => ().into_any(),
                 }
             }}
             <span class="tile-label">
@@ -3250,7 +3258,7 @@ fn quality_button(
     lang: ReadSignal<Language>,
     source: QualitySource,
     menu: ReadSignal<Option<QualityMenu>>,
-    on_toggle: impl Fn(QualitySource, web_sys::MouseEvent) + Copy + 'static,
+    on_toggle: impl Fn(QualitySource, web_sys::MouseEvent) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let open = move || menu.with(|m| m.is_some_and(|m| m.source == source));
     view! {
@@ -3275,7 +3283,7 @@ fn quality_menu_view(
     lang: ReadSignal<Language>,
     menu: QualityMenu,
     presets: ReadSignal<VideoPresets>,
-    on_pick: impl Fn(VideoPresets) + Copy + 'static,
+    on_pick: impl Fn(VideoPresets) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let source = menu.source;
     view! {
@@ -3313,18 +3321,20 @@ fn preset_group(
     lang: ReadSignal<Language>,
     source: QualitySource,
     presets: ReadSignal<VideoPresets>,
-    on_pick: impl Fn(VideoPresets) + Copy + 'static,
+    on_pick: impl Fn(VideoPresets) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let group = source.key();
     let heading_id = format!("{group}-preset-heading");
+    let labelled_by = heading_id.clone();
     view! {
-        <div id=format!("{group}-preset-group") class="preset-group" role="radiogroup" aria-labelledby=heading_id.clone()>
+        <div id=format!("{group}-preset-group") class="preset-group" role="radiogroup" aria-labelledby=labelled_by>
             <h5 id=heading_id class="settings-subsection">{move || t(lang.get(), source.title_key())}</h5>
             <div class="audio-options">
                 {source.choices().into_iter().map(|(id, name_key, desc_key)| {
                     let input_id = format!("{group}-preset-{id}");
+                    let label_for = input_id.clone();
                     view! {
-                        <label class="audio-option preset-option" for=input_id.clone()>
+                        <label class="audio-option preset-option" for=label_for>
                             <input
                                 type="radio"
                                 id=input_id
@@ -3365,7 +3375,7 @@ fn control_prompt(
     lang: ReadSignal<Language>,
     prompt: ControlPromptUi,
     names: ReadSignal<HashMap<String, String>>,
-    on_answer: impl Fn(String, bool) + Copy + 'static,
+    on_answer: impl Fn(String, bool) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let label = move |pk: &str| {
         let name = names.with_untracked(|n| n.get(pk).cloned()).unwrap_or_default();
@@ -3516,12 +3526,12 @@ fn member_row(
     lang: ReadSignal<Language>,
     member: MemberUi,
     am_admin: Memo<bool>,
-    on_kick: impl Fn(String, String) + Copy + 'static,
-    on_make_admin: impl Fn(String, String) + Copy + 'static,
+    on_kick: impl Fn(String, String) + Copy + Send + Sync + 'static,
+    on_make_admin: impl Fn(String, String) + Copy + Send + Sync + 'static,
     dm_unread: ReadSignal<HashMap<String, usize>>,
-    on_dm: impl Fn(String) + Copy + 'static,
+    on_dm: impl Fn(String) + Copy + Send + Sync + 'static,
     control: ReadSignal<ControlUi>,
-    on_revoke: impl Fn(String) + Copy + 'static,
+    on_revoke: impl Fn(String) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let control_pk = member.pubkey.clone();
     // What this member controls on this computer (shown to the sharer, with a revoke button).
