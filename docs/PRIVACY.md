@@ -1,18 +1,18 @@
 # Privacy in dchat
 
-Messages, voice, video and files are end-to-end encrypted, and nothing is stored: a reload wipes everything. This page covers the rest, the metadata: who can see your IP address, when you're online, and who you talk to.
+Messages, voice, video and files are end-to-end encrypted, and nothing is written to disk: a reload wipes your tab's copy, and the room's conversation lives only in the memory of the members still in it. This page covers the rest, the metadata: who can see your IP address, when you're online, and who you talk to.
 
 ## Who sees what
 
 | Who | Can see | Never sees |
 |---|---|---|
-| **Other members** (anyone who gets in) | Your name, your messages, and your IP address from the direct WebRTC link. Once you allow the microphone or camera, browsers also reveal your local network address. In a room that hides IP addresses (`hideip=1`) they see only the TURN server's address. When a private message has to be relayed, the members relaying it see that you sent one and roughly how long it is. | The text of private messages between others, and whom they were sent to |
-| **Nostr relays** | Your IP address, the room's topic (a hash), your session's public key, and when you join, stay (a presence beacon every 15 s) and leave | The room ID, the key, names, messages, and your handshakes (sealed, see below) |
+| **Other members** (anyone who gets in) | Your name, your messages (including the ones you sent before they joined, see [Room history](#room-history-always-on)), and your IP address from the direct WebRTC link. Once you allow the microphone or camera, browsers also reveal your local network address. In a room that hides IP addresses (`hideip=1`) they see only the TURN server's address. When a private message has to be relayed, the members relaying it see that you sent one and roughly how long it is. | The text of private messages between others, and whom they were sent to |
+| **Nostr relays** | Your IP address, the room's topic (a hash), a relay key that is new every session (your member identity travels inside the encryption), and when you join, stay (a presence beacon every 15 s) and leave | The room ID, the key, names, messages, and your handshakes (sealed, see below) |
 | **The STUN server** | Your IP address each time you open a connection | Anything about the room |
 | **A TURN server** (when used) | The IP addresses of members whose traffic it relays, and how much and when | Content: it only forwards encrypted packets |
 | **The website host** | Your IP address when you load the page (and, on Cloudflare, when the app asks for TURN credentials) | The part of the link after `#`, which browsers never send |
 | **dchat-host** (only if you run it to allow remote control) | Input from the members you allow, their names, and your shared screen's size. It listens only on `127.0.0.1` and talks only to your own dchat tab. | Anything else in the room. It connects nowhere, writes no files and logs no input. |
-| **Someone who gets the link later** | Can join the room while it exists, unless it has a password. From recorded relay traffic, only presence beacons: handshakes were sealed to session keys that died with the tabs. | In a password room without the password: anything at all, not even the room's relay traffic |
+| **Someone who gets the link later** | Can join the room while it exists, unless it has a password, and then reads the conversation the members still hold. From recorded relay traffic, only presence beacons: handshakes were sealed to session keys that died with the tabs. | In a password room without the password: anything at all, not even the room's relay traffic |
 
 ## Protections
 
@@ -36,8 +36,18 @@ Messages, voice, video and files are end-to-end encrypted, and nothing is stored
 - **Remote control only with your click.** Members can ask to control your mouse and keyboard (one person at a time) or to plug in a game controller while you share your screen, but nothing happens until you allow it. Their input reaches only your computer, sealed over your direct link; your tab and `dchat-host` both drop anything from someone you didn't allow. Everything held down is released when control ends.
 - **Video quality and stats stay on your device.** The camera and screen presets are local settings: nothing about them is sent to anyone beyond what the video itself shows. Choosing a codec asks your own browser which encoders it has (`MediaCapabilities`); members can infer from the negotiated codec whether you have, say, a hardware H.265 encoder, but WebRTC's handshake already listed your browser's codecs to them. The ⓘ stats panel reads only your own connection's statistics, never shows addresses or candidates, and stores nothing.
 - **Installing the app changes nothing.** The installed app (PWA) is the same site under the same rules: nothing is stored, and the cache holds only the app's own files and icons. A room link opened in the app, or pasted into **Join with a link**, is read on your device; only its part after `#` is used, written into the address in place and never sent. The app keeps no list of rooms. The badge on its icon is a count of unread @mentions while it is open.
-- **No long-term identity.** Each tab makes a fresh session key; nothing ties two visits together.
+- **No long-term identity.** Each tab makes a fresh session key; nothing ties two visits together. When an admin moves the room (kick or new link), you keep your key inside the room, so you stay the author of your earlier messages, but your relay events are signed by a new key, so relays can't tie the new room to the old one.
 - **Short-lived relay events.** Signaling uses ephemeral Nostr events (kind 20001), which compliant relays forward without storing. `dchat-relay` stores nothing and logs no IP addresses.
+
+## Room history (always on)
+
+Whoever joins a room sees its conversation as the members see it. There is no switch: start a new room for a fresh one.
+
+- **What is shared:** messages with their latest edit, reactions, file cards (name, size, type and caption; the file itself only from its sender, while they are in the room) and the names of members who already left. Never private messages, typing, voice or anything else.
+- **Who gets it:** anyone who gets in with the link (and the password, in a password room), while at least one member is still there. A member whose connection dropped for a while also gets what it missed.
+- **Where it lives:** in each member's memory only, never on disk, up to 32 MB per member (the oldest messages go first). It survives a kick or a new link, and the kicked member's earlier messages stay in it. It is gone once the last member leaves.
+- **What protects it:** every message travels as its author's signed original, bound to this room, so no member can alter it, put words in someone else's mouth, or replay messages from another room. A deleted message is dropped for good and can't be brought back by a member who still holds it.
+- **Limits:** deletions and edits are honored only by unmodified clients, and anyone present can copy what they see.
 
 ## Possible improvements
 
@@ -51,7 +61,7 @@ Not implemented yet. Roughly in order of value for effort within each group.
 ### What relays and the network see
 - **Show relays less.**
   - Pad signals to a few fixed sizes, so relays can't tell a presence beacon from a handshake.
-  - Sign each relay event with a throwaway key and carry the session key inside the encryption, so relays can't count members or follow a session.
+  - Relay events are signed with a key that is new every session, and the member identity travels inside the encryption. A new key for every event would also stop relays from counting members or following a session.
   - Send fewer presence beacons once connected.
   - A bigger change: only one or two members stay on the relays to introduce newcomers, and newcomers' other handshakes travel over the mesh. Relays would then see two IP addresses per room instead of everyone's.
 - **Host-chosen default relays.** Let a self-hosted site default to its own relay (for example from a small config file next to the app), so its rooms don't use public relays unless asked to.
@@ -67,7 +77,7 @@ Not implemented yet. Roughly in order of value for effort within each group.
 - **Join voice muted.** Joining voice turns the microphone on right away. Starting muted, or a "join muted" setting, prevents accidentally broadcasting a room.
 - **Safer screen sharing.** Ask the browser to leave the dchat tab out of the share picker and to suggest a single window rather than the whole screen, which also shows notifications.
 - **Don't send "is typing".** A per-member switch.
-- **Disappearing messages.** A per-room timer (`&ttl=`) that removes messages from every screen after a while, enforced by honest clients. It protects long-open tabs from shoulder-surfing and later screenshots.
+- **Disappearing messages.** A per-room timer (`&ttl=`) that removes messages from every screen, and from the room's history, after a while, enforced by honest clients. It protects long-open tabs from shoulder-surfing and later screenshots, and limits what someone who gets the link later can read.
 - **Camera background blur.** It would need a segmentation model running in WebAssembly, so it is heavy.
 
 ### On your device
@@ -87,6 +97,7 @@ Not implemented yet. Roughly in order of value for effort within each group.
 - Anyone who gets in sees everyone who is there, and can screenshot or copy what they see.
 - Allowing someone your mouse and keyboard gives them full use of your computer while it lasts, including approving others. Only allow people you trust.
 - Deleted and edited messages are only removed by unmodified clients.
+- Room history can't be turned off: whoever gets in reads what the room still holds.
 - Relays, STUN and TURN servers and the website host see IP addresses. Use a VPN to hide yours from them.
 - Browsers may still offer to save a room password in their password manager; decline if you don't want it kept.
 - Tor Browser disables WebRTC, so dchat can't run there.

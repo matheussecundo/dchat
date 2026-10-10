@@ -37,7 +37,8 @@ test('3-member mesh: names, member list, fan-out messages, zero storage, reload 
 
   await expect(ana.page.locator('.system-notice', { hasText: 'Bo joined' })).toBeVisible();
   await expect(ana.page.locator('.system-notice', { hasText: 'Cy joined' })).toBeVisible();
-  await expect(cy.page.locator('.system-notice', { hasText: "Messages sent before you joined aren't visible." })).toBeVisible();
+  // History is always on: nothing was sent before Cy joined, so there is nothing to show.
+  await expect(cy.page.locator('.system-notice', { hasText: 'Earlier messages' })).toHaveCount(0);
 
   // Every message reaches both other members, attributed to its author.
   const lines = [

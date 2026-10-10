@@ -217,6 +217,9 @@ impl RoomSession {
 
     fn on_file_request(&self, requester: &str, file_id: &str) {
         if !self.inner.files.outgoing.borrow().contains_key(file_id) {
+            // A card from history whose file this tab no longer has: say so, so the
+            // requester's card doesn't wait forever.
+            self.send_direct(requester, RoomBody::FileCancel { to: Some(requester.to_string()), file_id: file_id.to_string() });
             return;
         }
         let decision = self.inner.files.queue.borrow_mut().request(file_id, requester);
@@ -714,12 +717,14 @@ impl RoomSession {
 
     // ---- Messages ---------------------------------------------------------------------
 
-    pub(super) fn on_file_offer(&self, envelope: &RoomEnvelope) {
+    /// Register a file card (once) and build its row. `live`: posted just now; otherwise it
+    /// comes from history and offers Download only while its author is in the room.
+    pub(super) fn file_card_row(&self, envelope: &RoomEnvelope, withdrawn: bool, live: bool) -> Option<ChatMessageUi> {
         let RoomBody::FileOffer { file_id, name, size, mime_type, caption } = &envelope.body else {
-            return;
+            return None;
         };
         if self.inner.files.offers.borrow().contains_key(file_id) {
-            return;
+            return None;
         }
         self.inner.files.offers.borrow_mut().insert(
             file_id.clone(),
@@ -731,7 +736,9 @@ impl RoomSession {
             },
         );
         let is_self = envelope.author == self.inner.me;
-        let status = if is_self {
+        let status = if withdrawn {
+            FileTransferStatus::Withdrawn
+        } else if is_self {
             FileTransferStatus::Sharing {
                 active: 0,
                 waiting: 0,
@@ -739,10 +746,12 @@ impl RoomSession {
                 active_peers: Vec::new(),
                 queued_peers: Vec::new(),
             }
-        } else {
+        } else if live || self.inner.present.borrow().contains(&envelope.author) {
             FileTransferStatus::Offered
+        } else {
+            FileTransferStatus::SenderLeft
         };
-        self.push_message(ChatMessageUi {
+        Some(ChatMessageUi {
             id: file_id.clone(),
             author: envelope.author.clone(),
             is_self,
@@ -757,7 +766,37 @@ impl RoomSession {
                 status,
             }),
             ..Default::default()
-        });
+        })
+    }
+
+    /// After a rekey: the cards on screen came from the log, so their offers are known again,
+    /// and the files we offered stay downloadable from us.
+    pub(super) fn restore_files(&self, shared: HashMap<String, web_sys::File>) {
+        let offers: Vec<(String, Offer)> = self
+            .inner
+            .log
+            .borrow()
+            .file_offers()
+            .into_iter()
+            .filter_map(|(envelope, _)| match &envelope.body {
+                RoomBody::FileOffer { file_id, name, size, mime_type, .. } => Some((
+                    file_id.clone(),
+                    Offer { author: envelope.author.clone(), name: name.clone(), size: *size, mime_type: mime_type.clone() },
+                )),
+                _ => None,
+            })
+            .collect();
+        self.inner.files.offers.borrow_mut().extend(offers);
+        let mine: Vec<String> = shared.keys().cloned().collect();
+        *self.inner.files.outgoing.borrow_mut() = shared;
+        for file_id in mine {
+            self.refresh_sharing_card(&file_id);
+        }
+    }
+
+    /// Files this tab offers, for the next session after a rekey.
+    pub(super) fn shared_files(&self) -> HashMap<String, web_sys::File> {
+        self.inner.files.outgoing.borrow().clone()
     }
 
     /// Route a file message by its author and (direct-only) recipient.
@@ -840,7 +879,7 @@ impl RoomSession {
         });
     }
 
-    fn set_file_status(&self, file_id: &str, status: FileTransferStatus) {
+    pub(super) fn set_file_status(&self, file_id: &str, status: FileTransferStatus) {
         self.inner.signals.messages.update(|msgs| {
             if let Some(msg) = msgs.iter_mut().find(|m| m.id == file_id) {
                 if let Some(file) = msg.file.as_mut() {

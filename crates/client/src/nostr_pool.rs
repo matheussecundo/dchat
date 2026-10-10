@@ -4,9 +4,9 @@ use gloo_net::websocket::futures::WebSocket;
 use gloo_net::websocket::Message;
 use protocol::crypto::{decrypt_bytes, encrypt_bytes, EncryptedPayload};
 use protocol::{
-    decode_signal, encode_signal, verify_event, ClientRelayMessage, DecodedSignal, GossipDedup,
-    NostrBurnerKey, NostrFilter, RelayClientMessage, RelaySignal, SignalPayload, KIND_EPHEMERAL_SIGNAL,
-    KEY_LENGTH, PROTOCOL_VERSION,
+    decode_signal, encode_signal, relay_key_message, verify_event, verify_message, ClientRelayMessage, DecodedSignal,
+    GossipDedup, NostrBurnerKey, NostrFilter, RelayClientMessage, RelayFrame, RelaySignal, SignalPayload,
+    KIND_EPHEMERAL_SIGNAL, KEY_LENGTH, PROTOCOL_VERSION,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -33,11 +33,14 @@ pub fn protocol_version() -> u32 {
     PROTOCOL_VERSION
 }
 
+/// Relay keys whose identity certificate was checked, at most this many remembered.
+const CERTIFIED_CAPACITY: usize = 1024;
+
 /// What the pool reports to the session.
 pub struct PoolEvents {
-    /// A signal from the member `pubkey`, addressed to us or to everyone.
+    /// A signal from the member `pubkey` (its identity), addressed to us or to everyone.
     pub on_signal: Box<dyn Fn(String, SignalPayload)>,
-    /// The member `pubkey` speaks another protocol version; its signals are dropped.
+    /// The member behind relay key `pubkey` speaks another protocol version; its signals are dropped.
     pub on_other_version: Box<dyn Fn(String, u32)>,
     /// How many relays are connected now.
     pub on_relay_connected: Box<dyn Fn(usize)>,
@@ -46,7 +49,14 @@ pub struct PoolEvents {
 /// Connections to the room's relays. Each relay runs its own loop that keeps the
 /// subscription alive and reconnects with backoff until the pool is closed.
 pub struct NostrRelayPool {
-    pub burner_key: Rc<NostrBurnerKey>,
+    /// Signs this session's relay events. Fresh every session, so relays can't link rooms.
+    relay_key: NostrBurnerKey,
+    /// The member's identity: addressing, sealing, and the certificate below.
+    identity: Rc<NostrBurnerKey>,
+    /// `identity`'s signature over `relay_key_message(topic, relay key)`.
+    cert: String,
+    /// Relay key → the identity whose certificate it carried.
+    certified: RefCell<HashMap<String, String>>,
     pub key: [u8; KEY_LENGTH],
     pub topic: String,
     /// Signals carry it; members on another version are reported, never linked.
@@ -59,19 +69,27 @@ pub struct NostrRelayPool {
 }
 
 impl NostrRelayPool {
-    /// `burner_key` is the session identity: it signs relay events here and room
-    /// envelopes in the session, so peers can tie both to the same member.
-    /// `topic` is the room's relay topic (`hash_room_topic`, or `password_room_topic`).
+    /// `identity` is the member's session key (it also signs room envelopes, and survives a
+    /// rekey); relay events are signed by a fresh key that `identity` certifies inside each
+    /// encrypted frame. `topic` is the room's relay topic (`hash_room_topic`, or
+    /// `password_room_topic`).
     pub fn new(
         topic: String,
         key: [u8; KEY_LENGTH],
-        burner_key: Rc<NostrBurnerKey>,
+        identity: Rc<NostrBurnerKey>,
         relays: Vec<String>,
         events: PoolEvents,
-    ) -> Rc<Self> {
+    ) -> Result<Rc<Self>, String> {
         let events = Rc::new(events);
+        let relay_key = NostrBurnerKey::generate().map_err(|e| e.to_string())?;
+        let cert = identity
+            .sign_message(&relay_key_message(&topic, relay_key.pubkey()))
+            .map_err(|e| e.to_string())?;
         let pool = Rc::new(Self {
-            burner_key,
+            relay_key,
+            identity,
+            cert,
+            certified: RefCell::new(HashMap::new()),
             key,
             topic,
             version: protocol_version(),
@@ -88,7 +106,7 @@ impl NostrRelayPool {
                 pool.run_relay(index, url, events).await;
             });
         }
-        pool
+        Ok(pool)
     }
 
     /// Stop every relay loop and close their connections.
@@ -187,7 +205,7 @@ impl NostrRelayPool {
 
     fn handle_event(&self, event: protocol::NostrEvent, events: &PoolEvents) {
         // 1. Our own events echo back from some relays.
-        if event.pubkey == self.burner_key.pubkey() {
+        if event.pubkey == self.relay_key.pubkey() {
             return;
         }
         // 2. The same event arrives from every relay in the pool.
@@ -207,15 +225,19 @@ impl NostrRelayPool {
             log::warn!("Failed to decrypt incoming Nostr signal payload with room key");
             return;
         };
-        // 5. Same protocol version only; signals addressed to other members are dropped, and
-        // ours are opened with our session key.
+        // 5. Same protocol version only; the relay key must be certified by the member it
+        // claims; signals addressed to other members are dropped, and ours are opened with
+        // our identity.
         match decode_signal(&plaintext, self.version) {
-            DecodedSignal::Signal(relayed) => {
-                if relayed.recipient().is_some_and(|to| to != self.burner_key.pubkey()) {
+            DecodedSignal::Signal(RelayFrame { from, cert, signal: relayed }) => {
+                if from == self.identity.pubkey() || !self.certifies(&event.pubkey, &from, &cert) {
                     return;
                 }
-                match relayed.open(&self.burner_key, &event.pubkey) {
-                    Some(signal) => (events.on_signal)(event.pubkey, signal),
+                if relayed.recipient().is_some_and(|to| to != self.identity.pubkey()) {
+                    return;
+                }
+                match relayed.open(&self.identity, &from) {
+                    Some(signal) => (events.on_signal)(from, signal),
                     None => log::warn!("Dropping a sealed signal that does not open"),
                 }
             }
@@ -224,19 +246,38 @@ impl NostrRelayPool {
         }
     }
 
+    /// Whether `identity` certified `relay_pubkey` (checked once per relay key). A relay key
+    /// speaks for one member only.
+    fn certifies(&self, relay_pubkey: &str, identity: &str, cert: &str) -> bool {
+        if let Some(known) = self.certified.borrow().get(relay_pubkey) {
+            return known == identity;
+        }
+        if !verify_message(identity, &relay_key_message(&self.topic, relay_pubkey), cert) {
+            log::warn!("Dropping a signal whose relay key is not certified");
+            return false;
+        }
+        let mut certified = self.certified.borrow_mut();
+        if certified.len() >= CERTIFIED_CAPACITY {
+            certified.clear();
+        }
+        certified.insert(relay_pubkey.to_string(), identity.to_string());
+        true
+    }
+
     /// Seal (when addressed), encrypt, sign and serialize `signal` as an EVENT message.
     fn signed_event_json(&self, signal: &SignalPayload) -> Option<String> {
-        let relayed = RelaySignal::seal(&self.burner_key, signal)
+        let relayed = RelaySignal::seal(&self.identity, signal)
             .map_err(|e| log::error!("Failed to seal signaling payload: {:?}", e))
             .ok()?;
-        let plaintext = encode_signal(&relayed, self.version).ok()?;
+        let frame = RelayFrame { from: self.identity.pubkey().to_string(), cert: self.cert.clone(), signal: relayed };
+        let plaintext = encode_signal(&frame, self.version).ok()?;
         let encrypted = encrypt_bytes(&self.key, &plaintext)
             .map_err(|e| log::error!("Failed to encrypt signaling payload: {:?}", e))
             .ok()?;
         let content = serde_json::to_string(&encrypted).ok()?;
         let now_sec = (js_sys::Date::now() / 1000.0) as u64;
         let event = self
-            .burner_key
+            .relay_key
             .create_event(KIND_EPHEMERAL_SIGNAL, vec![vec!["d".to_string(), self.topic.clone()]], content, now_sec)
             .map_err(|e| log::error!("Failed to create Nostr event: {:?}", e))
             .ok()?;

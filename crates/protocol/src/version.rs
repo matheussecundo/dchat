@@ -1,17 +1,17 @@
 //! Protocol version: members link only with members on the same version, so the
 //! messages they exchange never need to stay compatible with older or newer clients.
 
-use crate::messages::RelaySignal;
+use crate::messages::RelayFrame;
 use serde::{Deserialize, Serialize};
 
 /// Bump whenever members on the old and new code could misunderstand each other: the
 /// encoding of any signal or room message (the `wire_format_matches_protocol_version`
 /// test catches those), signed bytes, the file chunk layout, or a rule every member must
-/// apply alike (caps, gossip, history, rekey).
+/// apply alike (caps, gossip, the chat log's rules and sync, rekey).
 ///
 /// Never change how a plain room's relay topic is derived (`hash_room_topic`): members on
 /// different versions only notice each other (and show the reload banner) on a shared topic.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// What travels through the relays (encrypted with the room key): the sender's protocol
 /// version and its signal. Every version must keep `v` readable, whatever `payload` becomes.
@@ -23,13 +23,13 @@ pub struct VersionedSignal<T> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodedSignal {
-    Signal(RelaySignal),
+    Signal(RelayFrame),
     /// From a member on another protocol version: its payload is not parsed.
     OtherVersion(u32),
     Invalid,
 }
 
-pub fn encode_signal(signal: &RelaySignal, version: u32) -> serde_json::Result<Vec<u8>> {
+pub fn encode_signal(signal: &RelayFrame, version: u32) -> serde_json::Result<Vec<u8>> {
     serde_json::to_vec(&VersionedSignal { v: version, payload: signal })
 }
 
@@ -41,7 +41,7 @@ pub fn decode_signal(json: &[u8], version: u32) -> DecodedSignal {
     }
     match serde_json::from_slice::<VersionOnly>(json) {
         Ok(VersionOnly { v }) if v != version => DecodedSignal::OtherVersion(v),
-        Ok(_) => match serde_json::from_slice::<VersionedSignal<RelaySignal>>(json) {
+        Ok(_) => match serde_json::from_slice::<VersionedSignal<RelayFrame>>(json) {
             Ok(signal) => DecodedSignal::Signal(signal.payload),
             Err(_) => DecodedSignal::Invalid,
         },
@@ -59,11 +59,12 @@ mod tests {
     use crate::input::{encode_events, seal_input, InputEvent, InputLane};
     use crate::keycodes::DomCode;
     use crate::password::{password_room_key, password_room_topic, stretch_password};
+    use crate::chat_log;
     use sha2::{Digest, Sha256};
 
     /// The wire fingerprint recorded for the current version. When the test below fails,
     /// bump `PROTOCOL_VERSION` and record the new pair here.
-    const RECORDED: (u32, &str) = (5, "ab61e6101ae9fa708befe0e4d944c6755ab3e0cee5d5c6d34d2dddc0b1c986aa");
+    const RECORDED: (u32, &str) = (6, "bbbaea12e27de027b6b9b72dc5e09d871d69a9a65991b8c6d375204dac260a97");
 
     fn sealed() -> EncryptedPayload {
         EncryptedPayload { nonce: "n".into(), ciphertext: "c".into() }
@@ -77,6 +78,10 @@ mod tests {
             RelaySignal::PeerLeft,
             RelaySignal::Sealed { to: "b".into(), sealed: sealed() },
         ]
+    }
+
+    fn frame(signal: RelaySignal) -> RelayFrame {
+        RelayFrame { from: "a".into(), cert: "c".into(), signal }
     }
 
     fn relay_signal_kind(signal: &RelaySignal) -> &'static str {
@@ -123,13 +128,14 @@ mod tests {
             id: "id".into(),
             author: "a".into(),
             ts: 1,
-            body: RoomBody::Chat { text: "hi".into(), shareable: true },
+            body: RoomBody::Chat { text: "hi".into() },
             sig: "sig".into(),
         };
+        let window = SyncWindow { start: 0, count: 1, hash: 2 };
         vec![
             RoomBody::Hello { name: "Ana".into(), join_ts: 1, admin_proof: Some("p".into()) },
             RoomBody::LinkState { seq: 1, direct: vec!["b".into()] },
-            RoomBody::Chat { text: "hi".into(), shareable: true },
+            RoomBody::Chat { text: "hi".into() },
             RoomBody::VoiceState {
                 seq: 1,
                 in_voice: true,
@@ -154,8 +160,11 @@ mod tests {
                 from_dialer: true,
                 signal: SignalPayload::Offer { to: "b".into(), sdp: "v=0".into() },
             },
-            RoomBody::HistoryRequest { to: "b".into() },
-            RoomBody::HistoryChunk { to: "b".into(), envelopes: vec![envelope] },
+            RoomBody::SyncSummary { to: "b".into(), horizon: Some(1), windows: vec![window] },
+            RoomBody::SyncAsk { to: "b".into(), horizon: None, level: 1, starts: vec![0] },
+            RoomBody::SyncDiff { to: "b".into(), ids: vec!["id".into()], level: 2, windows: vec![window], last: true },
+            RoomBody::SyncWant { to: "b".into(), ids: vec!["id".into()] },
+            RoomBody::SyncBatch { to: "b".into(), envelopes: vec![envelope], last: false },
             RoomBody::Typing,
             RoomBody::Reaction { target: "m".into(), emoji: "👍".into(), on: true },
             RoomBody::Edit { target: "m".into(), text: "hello".into() },
@@ -185,8 +194,11 @@ mod tests {
             RoomBody::FileCancel { .. } => "FileCancel",
             RoomBody::FileQueued { .. } => "FileQueued",
             RoomBody::FileLinkSignal { .. } => "FileLinkSignal",
-            RoomBody::HistoryRequest { .. } => "HistoryRequest",
-            RoomBody::HistoryChunk { .. } => "HistoryChunk",
+            RoomBody::SyncSummary { .. } => "SyncSummary",
+            RoomBody::SyncAsk { .. } => "SyncAsk",
+            RoomBody::SyncDiff { .. } => "SyncDiff",
+            RoomBody::SyncWant { .. } => "SyncWant",
+            RoomBody::SyncBatch { .. } => "SyncBatch",
             RoomBody::Typing => "Typing",
             RoomBody::Reaction { .. } => "Reaction",
             RoomBody::Edit { .. } => "Edit",
@@ -206,13 +218,14 @@ mod tests {
     fn wire_fingerprint() -> String {
         let mut wire: Vec<String> = Vec::new();
         for signal in relay_signals() {
-            wire.push(String::from_utf8(encode_signal(&signal, 0).unwrap()).unwrap());
+            wire.push(String::from_utf8(encode_signal(&frame(signal), 0).unwrap()).unwrap());
         }
+        wire.push(String::from_utf8(relay_key_message("t", "k")).unwrap());
         for signal in signals() {
             wire.push(serde_json::to_string(&signal).unwrap());
         }
         for body in bodies() {
-            wire.push(String::from_utf8(RoomEnvelope::signed_bytes("id", "a", 1, &body).unwrap()).unwrap());
+            wire.push(String::from_utf8(RoomEnvelope::signed_bytes("adm", "id", "a", 1, &body).unwrap()).unwrap());
         }
         for video in [VideoKind::None, VideoKind::Camera, VideoKind::Screen] {
             wire.push(serde_json::to_string(&video).unwrap());
@@ -237,6 +250,18 @@ mod tests {
             transfer::SEND_WINDOW_CHUNKS,
             transfer::ACK_EVERY_CHUNKS,
             transfer::ACK_EVERY_MS
+        ));
+        // The chat log: what every member keeps and how members compare logs.
+        wire.push(format!(
+            "{} {} {} {} {:?} {} {} {}",
+            chat_log::CHAT_LOG_BUDGET,
+            chat_log::MAX_FUTURE_SKEW_MS,
+            chat_log::MAX_ENTRY_BYTES,
+            chat_log::MAX_ID_CHARS,
+            chat_log::SYNC_SPANS,
+            chat_log::SYNC_LIST_MAX,
+            chat_log::SYNC_WANT_MAX,
+            chat_log::entry_fingerprint("id")
         ));
         hex::encode(Sha256::digest(wire.join("\n").as_bytes()))
     }
@@ -268,8 +293,8 @@ mod tests {
     #[test]
     fn test_same_version_signals_roundtrip() {
         for signal in relay_signals() {
-            let json = encode_signal(&signal, 4).unwrap();
-            assert_eq!(decode_signal(&json, 4), DecodedSignal::Signal(signal));
+            let json = encode_signal(&frame(signal.clone()), 4).unwrap();
+            assert_eq!(decode_signal(&json, 4), DecodedSignal::Signal(frame(signal)));
         }
     }
 
@@ -278,7 +303,7 @@ mod tests {
         // A future version may send a payload this one cannot parse; the version still reads.
         let future = br#"{"v":9,"payload":{"kind":"Teleport","content":{"to":"b"}}}"#;
         assert_eq!(decode_signal(future, 4), DecodedSignal::OtherVersion(9));
-        let older = encode_signal(&RelaySignal::Presence, 3).unwrap();
+        let older = encode_signal(&frame(RelaySignal::Presence), 3).unwrap();
         assert_eq!(decode_signal(&older, 4), DecodedSignal::OtherVersion(3));
         let unknown_payload = br#"{"v":4,"payload":{"kind":"Teleport"}}"#;
         assert_eq!(decode_signal(unknown_payload, 4), DecodedSignal::Invalid);

@@ -10,6 +10,7 @@ mod files;
 mod history;
 mod lounge;
 mod quality;
+mod sync;
 
 pub use files::{save_finished, start_save};
 
@@ -18,18 +19,18 @@ use crate::names::pubkey_tag;
 use crate::nostr_pool::{protocol_version, NostrRelayPool, PoolEvents};
 use crate::state::{
     current_fragment, current_time_string, get_default_relays, ChatMessageUi, ConnectionStatus,
-    DmUi, LinkUi, LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RekeyTarget,
+    DmUi, LinkUi, LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RekeyTarget, SessionCarry,
 };
 use control::Control;
 use file_links::FileLinks;
 use files::Files;
 use lounge::{Lounge, VoiceInfo};
 use leptos::*;
+use protocol::chat_log::ChatLog;
 use protocol::crypto::{decrypt_json, encrypt_json};
 use protocol::{
-    admin_proof_message, hash_room_topic, password_room_topic, plan_ice, verify_message, EncryptedPayload, GossipDedup, HistoryBuffer, IcePlan,
-    Member, NostrBurnerKey, Reactions, RoomBody, RoomEnvelope, RoomParams, Roster, SignalPayload,
-    FALLBACK_STUN_URL, HISTORY_LIMIT, KEY_LENGTH,
+    admin_proof_message, hash_room_topic, password_room_topic, plan_ice, verify_message, EncryptedPayload, GossipDedup, IcePlan,
+    Member, NostrBurnerKey, RoomBody, RoomEnvelope, RoomParams, Roster, SignalPayload, FALLBACK_STUN_URL, KEY_LENGTH,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -94,6 +95,11 @@ pub struct SessionSignals {
     /// Finished downloads waiting for a tap on Save (iOS), by file id. App level, so a
     /// rekey keeps them; the Save button takes them out.
     pub ready_files: StoredValue<HashMap<String, web_sys::File>>,
+    /// The room's chat log (`protocol::chat_log`). App level, so a rekey carries it into the
+    /// new room; a fresh entry starts it empty.
+    pub chat_log: StoredValue<Rc<RefCell<ChatLog>>>,
+    /// Earlier messages are being fetched from a member.
+    pub history_loading: WriteSignal<bool>,
 }
 
 #[derive(Clone)]
@@ -124,7 +130,6 @@ struct Inner {
     /// Display names by pubkey, kept after a member leaves for the "left" notice.
     names: RefCell<HashMap<String, String>>,
     present: RefCell<HashSet<String>>,
-    late_join_noted: Cell<bool>,
     /// Members this tab refuses direct links with (test hook only).
     blocked: RefCell<HashSet<String>>,
     relays_connected: Cell<usize>,
@@ -133,20 +138,15 @@ struct Inner {
     lounge: Lounge,
     files: Files,
     file_links: FileLinks,
-    /// Shareable recent messages for late joiners (only kept when the room has `hist=1`).
-    history: RefCell<HistoryBuffer>,
-    history_requests: Cell<usize>,
+    /// The room's chat log, shared with the next session after a rekey.
+    log: Rc<RefCell<ChatLog>>,
+    sync: sync::SyncState,
+    /// The "earlier messages shown above" line is in the timeline.
     history_noted: Cell<bool>,
-    /// Every Hello ever seen, kept after members leave to label history.
-    hello_archive: RefCell<HashMap<String, RoomEnvelope>>,
     rekeying: Cell<bool>,
     quiet_until: f64,
     last_typing_sent: Cell<f64>,
     typing: RefCell<HashMap<String, f64>>,
-    reactions: RefCell<Reactions>,
-    /// Author of every chat message we hold: only they may edit or delete it.
-    message_authors: RefCell<HashMap<String, String>>,
-    last_edit: RefCell<HashMap<String, u64>>,
     dm_peers: RefCell<HashSet<String>>,
     /// Members already reported as running another protocol version.
     other_versions: RefCell<HashSet<String>>,
@@ -154,18 +154,22 @@ struct Inner {
 }
 
 impl RoomSession {
-    /// Join `room_id`. `migrated` is set when an admin moved the room here from another link.
-    /// `host_ice` are extra ICE servers the host offered (see `ice.rs`).
+    /// Join `room_id`. `carry` comes from the previous session when an admin moved the room
+    /// here from another link. `host_ice` are extra ICE servers the host offered (see `ice.rs`).
     pub fn start(
         room_id: String,
         key: [u8; KEY_LENGTH],
         name: String,
         signals: SessionSignals,
-        migrated: bool,
+        carry: Option<SessionCarry>,
         host_ice: Option<js_sys::Array>,
     ) -> Result<Self, String> {
         let params = RoomParams::from_fragment(&current_fragment());
-        let identity = Rc::new(NostrBurnerKey::generate().map_err(|e| e.to_string())?);
+        let migrated = carry.is_some();
+        let (identity, shared_files) = match carry {
+            Some(carry) => (carry.identity, carry.shared_files),
+            None => (Rc::new(NostrBurnerKey::generate().map_err(|e| e.to_string())?), HashMap::new()),
+        };
         let me = identity.pubkey().to_string();
         let started_at = js_sys::Date::now();
         let admin_proof = params
@@ -202,7 +206,6 @@ impl RoomSession {
                 link_seq: Cell::new(0),
                 names: RefCell::new(HashMap::new()),
                 present: RefCell::new(HashSet::new()),
-                late_join_noted: Cell::new(false),
                 blocked: RefCell::new(HashSet::new()),
                 relays_connected: Cell::new(0),
                 last_presence_echo: Cell::new(0.0),
@@ -210,25 +213,21 @@ impl RoomSession {
                 lounge: Lounge::default(),
                 files: Files::default(),
                 file_links: FileLinks::default(),
-                history: RefCell::new(HistoryBuffer::new(HISTORY_LIMIT)),
-                history_requests: Cell::new(0),
-                history_noted: Cell::new(false),
-                hello_archive: RefCell::new(HashMap::new()),
+                log: signals.chat_log.get_value(),
+                sync: sync::SyncState::default(),
+                history_noted: Cell::new(migrated),
                 rekeying: Cell::new(false),
                 quiet_until: if migrated { started_at + MIGRATION_QUIET_MS } else { 0.0 },
                 last_typing_sent: Cell::new(0.0),
                 typing: RefCell::new(HashMap::new()),
-                reactions: RefCell::new(Reactions::default()),
-                message_authors: RefCell::new(HashMap::new()),
-                last_edit: RefCell::new(HashMap::new()),
                 dm_peers: RefCell::new(HashSet::new()),
                 other_versions: RefCell::new(HashSet::new()),
                 control: Control::default(),
             }),
         };
         if migrated {
-            session.inner.late_join_noted.set(true);
             session.push_notice(Notice::Rekeyed);
+            session.restore_files(shared_files);
         }
 
         session.publish(RoomBody::Hello {
@@ -256,7 +255,7 @@ impl RoomSession {
                 })
             },
         };
-        let pool = NostrRelayPool::new(topic, key, identity, get_default_relays(), events);
+        let pool = NostrRelayPool::new(topic, key, identity, get_default_relays(), events)?;
         *session.inner.pool.borrow_mut() = Some(pool);
 
         session.start_ticker();
@@ -272,10 +271,7 @@ impl RoomSession {
         if !self.has_open_link() {
             return Err("No member is connected yet".into());
         }
-        self.publish(RoomBody::Chat {
-            text: text.to_string(),
-            shareable: self.inner.params.history,
-        })
+        self.publish(RoomBody::Chat { text: text.to_string() })
             .map(|_| ())
             .ok_or_else(|| "Failed to sign message".into())
     }
@@ -441,7 +437,7 @@ impl RoomSession {
                 self.inner.retry_after.borrow_mut().remove(remote);
                 self.publish_link_state();
                 self.sync_to(remote);
-                self.maybe_request_history(remote);
+                self.sync_link_opened(remote);
                 self.recompute();
             }
             LinkEvent::Closed => self.drop_link(remote, true),
@@ -463,6 +459,7 @@ impl RoomSession {
         self.forget_member_media(remote, false);
         self.on_file_peer_lost(remote);
         self.on_control_peer_lost(remote);
+        self.sync_peer_lost(remote);
         if failed {
             self.inner
                 .retry_after
@@ -478,7 +475,7 @@ impl RoomSession {
     /// Sign `body` as this member, apply it locally and send it to every direct neighbor
     /// (they relay it to members without a direct link to us).
     fn publish(&self, body: RoomBody) -> Option<RoomEnvelope> {
-        let envelope = RoomEnvelope::sign(&self.inner.identity, js_sys::Date::now() as u64, body).ok()?;
+        let envelope = RoomEnvelope::sign(&self.inner.identity, self.adm(), js_sys::Date::now() as u64, body).ok()?;
         self.inner.dedup.borrow_mut().insert(&envelope.id);
         self.apply(&envelope);
         if let Some(frame) = self.encode(&envelope) {
@@ -541,7 +538,7 @@ impl RoomSession {
             return;
         }
         // Verify before recording the id, so a forged copy cannot shadow the real one.
-        if !envelope.verify() {
+        if !envelope.verify(self.adm()) {
             log::warn!("Dropping room message with an invalid signature");
             return;
         }
@@ -592,7 +589,8 @@ impl RoomSession {
                     return;
                 }
                 self.inner.hellos.borrow_mut().insert(author.to_string(), envelope.clone());
-                self.inner.hello_archive.borrow_mut().insert(author.to_string(), envelope.clone());
+                // Kept in the log too, to name the author in history after they leave.
+                self.log_merge(envelope);
                 let name = clean_remote_name(name, author);
                 let is_admin = admin_proof
                     .as_deref()
@@ -620,20 +618,7 @@ impl RoomSession {
                     self.recompute();
                 }
             }
-            RoomBody::Chat { text, .. } => {
-                self.record_history(envelope);
-                let mentions_me = self.track_chat(envelope, text);
-                self.push_message(ChatMessageUi {
-                    id: envelope.id.clone(),
-                    author: author.to_string(),
-                    is_self: author == self.inner.me,
-                    text: text.clone(),
-                    time: current_time_string(),
-                    ts: envelope.ts,
-                    mentions_me,
-                    ..Default::default()
-                });
-            }
+            RoomBody::Chat { .. } | RoomBody::FileOffer { .. } => self.on_logged(envelope),
             RoomBody::Typing
             | RoomBody::Reaction { .. }
             | RoomBody::Edit { .. }
@@ -650,10 +635,17 @@ impl RoomSession {
                 };
                 self.on_voice_state(envelope, info);
             }
-            RoomBody::FileOffer { .. } => self.on_file_offer(envelope),
-            RoomBody::HistoryRequest { .. } => self.on_history_request(author),
-            RoomBody::HistoryChunk { envelopes, .. } => self.on_history_chunk(envelopes),
+            RoomBody::SyncSummary { horizon, windows, .. } => self.on_sync_summary(author, *horizon, windows),
+            RoomBody::SyncAsk { horizon, level, starts, .. } => self.on_sync_ask(author, *horizon, *level, starts),
+            RoomBody::SyncDiff { ids, level, windows, last, .. } => self.on_sync_diff(author, ids, *level, windows, *last),
+            RoomBody::SyncWant { ids, .. } => self.on_sync_want(author, ids),
+            RoomBody::SyncBatch { envelopes, last, .. } => self.on_sync_batch(author, envelopes, *last),
             RoomBody::AdminRekey { kicked, grants } => self.on_admin_rekey(author, kicked.as_deref(), grants),
+            RoomBody::FileCancel { to: None, .. } => {
+                // A withdrawal is part of the card's history.
+                self.log_merge(envelope);
+                self.on_file_message(author, &envelope.body);
+            }
             RoomBody::FileRequest { .. } | RoomBody::FileQueued { .. } | RoomBody::FileCancel { .. } => {
                 self.on_file_message(author, &envelope.body);
             }
@@ -689,11 +681,26 @@ impl RoomSession {
         let Some(link) = self.link(to) else {
             return false;
         };
-        let Ok(envelope) = RoomEnvelope::sign(&self.inner.identity, js_sys::Date::now() as u64, body) else {
+        let Ok(envelope) = RoomEnvelope::sign(&self.inner.identity, self.adm(), js_sys::Date::now() as u64, body) else {
             return false;
         };
         self.inner.dedup.borrow_mut().insert(&envelope.id);
         self.encode(&envelope).is_some_and(|frame| link.send(&frame))
+    }
+
+    /// The room's admin pubkey: every room message is signed for it (`""` without one).
+    fn adm(&self) -> &str {
+        self.inner.params.admin_pubkey.as_deref().unwrap_or("")
+    }
+
+    /// The room connects only through TURN, hiding members' IP addresses from each other.
+    pub fn hides_ip(&self) -> bool {
+        self.inner.params.hide_ip
+    }
+
+    /// Joining the room needs a password as well as the link.
+    pub fn has_password(&self) -> bool {
+        self.inner.params.password_salt.is_some()
     }
 
     fn is_valid_admin_proof(&self, author: &str, proof: &str) -> bool {
@@ -716,6 +723,7 @@ impl RoomSession {
         self.forget_member_media(pubkey, true);
         self.on_file_peer_lost(pubkey);
         self.on_control_peer_lost(pubkey);
+        self.sync_peer_lost(pubkey);
         self.publish_link_state();
         self.recompute();
     }
@@ -750,12 +758,8 @@ impl RoomSession {
         let mut notices = Vec::new();
         let quiet = js_sys::Date::now() < self.inner.quiet_until;
         for pk in present.difference(&previous) {
-            if let Some(member) = roster.get(pk).filter(|_| *pk != me && !quiet) {
-                if member.join_ts > self.inner.join_ts {
-                    notices.push(Notice::Joined(member.name.clone()));
-                } else if !self.inner.params.history && !self.inner.late_join_noted.replace(true) {
-                    notices.push(Notice::LateJoin);
-                }
+            if let Some(member) = roster.get(pk).filter(|m| *pk != me && !quiet && m.join_ts > self.inner.join_ts) {
+                notices.push(Notice::Joined(member.name.clone()));
             }
         }
         let names = self.inner.names.borrow();
@@ -926,6 +930,7 @@ impl RoomSession {
                 s.drop_link(&remote, true);
             }
             s.control_tick();
+            s.sync_tick();
         }) as Box<dyn FnMut()>);
         if let Some(w) = window() {
             if let Ok(h) = w.set_interval_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), TICK_MS) {
@@ -966,6 +971,19 @@ impl RoomSession {
         }) as Box<dyn Fn(String)>);
         let _ = js_sys::Reflect::set(&hooks, &"blockPeer".into(), block_peer.as_ref());
         block_peer.forget();
+
+        // Allow links with `pubkey` again (after `blockPeer`) and announce ourselves.
+        let s = self.clone();
+        let unblock_peer = Closure::wrap(Box::new(move |pubkey: String| {
+            s.inner.blocked.borrow_mut().remove(&pubkey);
+            s.inner.retry_after.borrow_mut().remove(&pubkey);
+            if let Some(pool) = s.pool() {
+                pool.broadcast_signal(&SignalPayload::Presence);
+            }
+        }) as Box<dyn Fn(String)>);
+        let _ = js_sys::Reflect::set(&hooks, &"unblockPeer".into(), unblock_peer.as_ref());
+        unblock_peer.forget();
+        self.install_sync_hooks(&hooks);
 
         // Pause between uploaded chunks, so upload queues and interruptions can be observed.
         let s = self.clone();

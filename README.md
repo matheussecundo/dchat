@@ -2,7 +2,7 @@
 
 > **Disposable, browser-cached peer-to-peer chat built in pure Rust and WebAssembly, bypassing Emscripten entirely.**
 
-All chat state, keys, and message history reside strictly in WebAssembly linear memory. If a user refreshes or closes the page, the session vanishes forever.
+All chat state, keys, and message history reside strictly in WebAssembly linear memory, never on disk. Refreshing or closing the page wipes that tab's copy forever; the room's conversation lives only in the memory of the members still in it, and is gone for good once the last one leaves.
 
 ---
 
@@ -16,9 +16,9 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 * **Serverless Architecture**: 100% static client deployable to GitHub Pages, Cloudflare Pages, Netlify, or IPFS. No backend required!
 * **Multi-Relay Pool Resilience**: Broadcasts and subscribes across a concurrent relay pool (`wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.primal.net`) with automatic event deduplication.
 * **Metadata Protection**: WebRTC handshakes (which carry IP addresses) are sealed to their recipient, Google's STUN server is only a fallback, and rooms can hide members' IP addresses from each other by connecting through TURN. See [`docs/PRIVACY.md`](./docs/PRIVACY.md) for who sees what.
-* **Ephemeral Burner Keypairs**: Generates fresh in-memory secp256k1 burner keypairs per session for BIP-340 Schnorr event signatures, discarding them on exit.
+* **Ephemeral Burner Keypairs**: Generates fresh in-memory secp256k1 keypairs in each tab: a member identity that signs room messages (kept when an admin moves the room, so you stay the author of your messages) and a relay key, new every session, that signs the BIP-340 Nostr events, so relays can't link a moved room to the old one. All of them are discarded on exit.
 * **Dual-Layer E2EE**: In addition to standard WebRTC DTLS, messages and signaling envelopes are encrypted with **ChaCha20-Poly1305** using the URL fragment key. Relays are completely blind to message contents.
-* **Instant Destruction**: Reloading the page or closing the tab wipes linear memory, destroys the WebRTC connection, and permanently erases all history.
+* **Instant Destruction**: Reloading the page or closing the tab wipes linear memory, destroys the WebRTC connections, and permanently erases this tab's copy of the conversation. Members still in the room keep theirs (and hand it to whoever joins) until the last one leaves.
 * **Service Worker Caching**: Caches immutable application shell assets (`.wasm`, `.js`, `.css`) for instant loading, while never storing session or user data.
 * **Remote Control**: While you share your screen, the members you allow can control your mouse and keyboard, TeamViewer-style. A small companion app, `dchat-host`, does the input on your computer; nobody gets control without your click.
 * **Instant Mobile Testing**: Built-in dev HTTPS server auto-generates TLS certificates, includes an in-memory mock Nostr relay, and displays an ASCII QR code in the terminal for instant phone pairing on local Wi-Fi.
@@ -81,7 +81,7 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
    - **8a Mesh core (Completed)**: one `RTCPeerConnection` per member pair with perfect negotiation; recipient-addressed signaling; session nicknames shown with a short key tag; live member list; room messages signed by their author and gossip-relayed to members without a direct link; per-room member cap with deterministic "latest joiner loses" and an admin seat; admin link vs invite link; optional TURN server in the URL.
    - **8b Voice lounge (Completed)**: Discord-style drop-in voice/video lounge replacing the 1:1 ring flow; per-person mic, speaker, camera (with front/rear flip) and screen-share toggles; video grid with fullscreen; speaking indicator; "X joined voice" prompt; per-room voice and video limits; audio processing settings carry over.
    - **8c Group file sharing (Completed)**: room-wide file cards; each member pulls the file straight from the sender over their own direct link; the sender uploads to at most 2 members at once and queues the rest; cancel and withdraw; transfers stop if the sender leaves.
-   - **8d Moderation & history (Completed)**: admins can kick a member or move everyone to a new link (the room ID and key change, sealed to each remaining member); opt-in history so late joiners see the last 200 messages.
+   - **8d Moderation & history (Completed)**: admins can kick a member or move everyone to a new link (the room ID and key change, sealed to each remaining member); opt-in history so late joiners see the last 200 messages (replaced by always-on history in Phase 13).
    - **8e Chat extras (Completed)**: typing indicator, emoji reactions, editing and deleting your own messages, private DMs sealed end-to-end between two members, and @mentions with a highlight, a title badge and a chime.
 
 9. **Phase 9: Remote Control (Completed)**
@@ -96,6 +96,9 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 12. **Phase 12: Parallel File Connections (Experiment)**
    - Uploads add extra WebRTC connections to the downloader while each one raises the speed, up to a cap set in ⚙️ Settings, for internet links where one connection can't fill the line.
 
+13. **Phase 13: Always-On History (Completed)**
+   - Whoever joins sees the room's conversation as members see it: messages with their latest edits, deletions, reactions, file cards and the names of members who left. Members sync what they hold on every new connection, so someone whose connection dropped for a while catches up too. Kept in RAM only (up to 32 MB per member), carried through a kick or a new link, gone when the last member leaves.
+
 ---
 
 ## Group Rooms
@@ -104,7 +107,7 @@ All chat state, keys, and message history reside strictly in WebAssembly linear 
 2. **Invite**: tap **🔗 Copy Link** or **📱 Scan QR**. Both share the *invite* link. Only the creator also sees **🔑 Copy Admin Link**, which adds the admin secret (`admsk`); share it only with co-moderators.
 3. **Join**: whoever opens the invite picks a name and taps **🚪 Enter Room**. Names live in memory only and are shown with a 4-character key tag (`Ana · 3f2a`), so two people with the same name stay distinct. The tag tells people apart; it is not proof of identity.
 4. **Member list**: each member shows how you reach them: `direct`, `via <name>` (no direct link, text is relayed through that member), or `connecting…`. The admin carries an `ADMIN` badge.
-5. **Moderation (admin link only)**: next to each member, **Kick** moves everyone else to a new room ID and key; the kicked member sees *You were removed from the room*. **🔄 New Link** does the same without removing anyone, so the old invite stops working. Chat history on screen is kept and anyone in voice is reconnected automatically. Share the new invite (**🔗 Copy Link**) with anyone who was offline during the move: they can't follow on their own. Kicking needs an admin online, and admins can't kick each other.
+5. **Moderation (admin link only)**: next to each member, **Kick** moves everyone else to a new room ID and key; the kicked member sees *You were removed from the room*. **🔄 New Link** does the same without removing anyone, so the old invite stops working. The conversation is kept (whoever joins the new room gets it too), you stay the author of your earlier messages, files you shared stay downloadable, and anyone in voice is reconnected automatically. Share the new invite (**🔗 Copy Link**) with anyone who was offline during the move: they can't follow on their own. Kicking needs an admin online, and admins can't kick each other.
 6. **Member limit**: when a room is full, the member who joined last sees *Room is full*. Everyone applies the same rule (join time, then key), so all members agree on who stays. An admin session always gets a seat and bumps the latest non-admin.
 
 Every room message is signed with its author's session key, so a member relaying it cannot alter it or forge messages from someone else.
@@ -115,13 +118,13 @@ Every room message is signed with its author's session key, so a member relaying
 
 **Versions**: members connect only with members running the same dchat protocol version. If someone in the room has a newer version, you see *Someone in this room is using a newer version of dchat* with a **Reload** button; reloading loads the latest version and keeps the room link (like any reload, it clears this tab's chat). Members on the newer version see a short notice instead. Updates that only change the interface don't affect who can connect.
 
-**History for late joiners** is off by default: you only see messages sent while you are in the room. The creator can tick *Let late joiners see the last 200 messages*, which adds `&hist=1` to the link and shows a 🕒 badge. Members then keep recent messages in memory (never on disk) and hand them to newcomers as signed originals, so they can't be altered. Each message carries its author's own setting: someone who joined with a link without `hist=1` keeps their messages out of history. History disappears when the last member leaves. Like any chat, "off" can't stop someone who is present from copying a message.
+**History (always on)**: whoever joins sees the room's conversation as the members see it: every message with its latest edit, reactions and file cards (*Download* while the sender is still in the room), minus deleted messages, with the names of members who already left. There is nothing to switch on, and no way to switch it off: anyone who gets in with the link (and password) can read what the room still holds, so start a new room for a fresh one. Members keep the conversation in memory only (never on disk, up to 32 MB each; the oldest messages go first) and compare what they hold on every new connection, so a member whose connection dropped for a while also gets what it missed. *Loading earlier messages…* shows while that runs; chat keeps working meanwhile. Messages travel as their authors' signed originals, bound to this room, so no member can alter them or replay messages from another room. A kick or **🔄 New Link** carries the conversation into the new room (the kicked member's earlier messages stay). It disappears when the last member leaves.
 
 ### Chat Extras
 
 - **Typing**: *"Bo is typing…"* appears above the message box.
 - **Reactions**: hover a message and tap 😀 to add 👍 ❤️ 😂 😮 😢 🎉; tap a reaction chip to add or remove yours.
-- **Edit / delete your own messages**: ✏️ puts the text back in the box (Enter saves, Esc cancels) and others see *(edited)*. 🗑️ removes it for everyone. Both are signed by you; deletion is best effort, since anyone may have already read or copied the message. Edited or deleted messages leave the history shown to late joiners.
+- **Edit / delete your own messages**: ✏️ puts the text back in the box (Enter saves, Esc cancels) and others see *(edited)*. 🗑️ removes it for everyone. Both are signed by you; deletion is best effort, since anyone may have already read or copied the message. Members who join later see the latest edit, and deleted messages are gone for them too.
 - **Private messages**: ✉️ next to a member opens a private chat. Messages are sealed with a key only the two of you can derive (ECDH between your session keys). With a direct link they travel only over that link; otherwise other members relay them without being able to read them or see whom they are for. The conversation ends when either of you leaves, because session keys are per tab.
 - **@mentions**: write `@Name` and that member sees the message highlighted, hears a short chime and, if the tab is in the background, gets a `(n)` badge in the tab title (and on the app icon when dchat is installed).
 
@@ -202,7 +205,7 @@ Everything after `#` stays in the browser and is never sent to any server.
 | `max` | `max=10` | Member limit; default 25, `0` = unlimited (no hard ceiling; large rooms load every member) |
 | `maxa` | `maxa=4` | Voice limit: members in the lounge at once; default 8, `0` = unlimited |
 | `maxv` | `maxv=2` | Video limit: cameras/screens on at once; default 6, `0` = unlimited |
-| `hist` | `hist=1` | Late joiners may see the last 200 shareable messages (off when absent) |
+| `hist` | `hist=1` | Ignored: history is always on. Links from older versions that carry it still work |
 | `relays` | `relays=wss://a,nostr` | The room's Nostr relays, exactly; `nostr` stands for the public relays (default when absent) |
 | `turn` | `turn=turns:turn.example.com:5349` | Optional TURN server(s), comma-separated |
 | `turnuser`, `turnpass` | `turnuser=me&turnpass=s3cret` | TURN credentials (percent-encode special characters) |
@@ -370,7 +373,7 @@ The server will bind to `0.0.0.0:8443`, detect your machine's LAN IP, and render
 
 ### Step 4: Chat & Verify Ephemerality
 - Type messages on either phone and watch them appear in real time over the direct encrypted `RTCDataChannel`.
-- Tap **"💥 Wipe Session"** or refresh the browser: all message history is permanently destroyed from RAM.
+- Tap **"💥 Wipe Session"** or refresh the browser: this phone's copy of the conversation is destroyed from RAM. Entering again brings back what the other phone still holds; once both have left, nothing of it remains anywhere.
 
 ---
 
@@ -385,7 +388,7 @@ cargo test --workspace
 ```
 
 ### 2. Playwright Multi-Browser End-to-End (E2E) Tests
-Simulates several isolated browser members: WebRTC mesh handshakes, signed message fan-out, member caps and the admin seat, text relayed between members without a direct link, empty `localStorage`/`sessionStorage`, and memory wipe on reload.
+Simulates several isolated browser members: WebRTC mesh handshakes, signed message fan-out, member caps and the admin seat, text relayed between members without a direct link, history synced to whoever joins or reconnects, empty `localStorage`/`sessionStorage`, and memory wipe on reload.
 
 The E2E suite runs against a separate bundle built with the `e2e-hooks` feature (test-only `window.__dchat` probes, e.g. to simulate a pair that cannot connect). That bundle goes to `crates/client/dist-e2e/` and is never deployed; production builds contain no hooks.
 ```bash
