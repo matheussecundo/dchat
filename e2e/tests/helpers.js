@@ -470,6 +470,26 @@ export function openWithRoomKey(roomUrl, payload) {
   return Buffer.concat([decipher.update(data.subarray(0, data.length - 16)), decipher.final()]).toString();
 }
 
+/**
+ * Record every EVENT `member` publishes to its relays, opened with the room key of `roomUrl()`
+ * (a function, as the link is known only once the room exists). Each entry is
+ * `{ at, content, signal }`, `signal` being the decrypted `{ v, payload }` frame.
+ */
+export async function recordPublished(member, roomUrl) {
+  const published = [];
+  await member.context.routeWebSocket('**/nostr', (ws) => {
+    const server = ws.connectToServer();
+    ws.onMessage((message) => {
+      const [type, event] = JSON.parse(message);
+      if (type === 'EVENT') {
+        published.push({ at: Date.now(), content: event.content, pubkey: event.pubkey, signal: JSON.parse(openWithRoomKey(roomUrl(), JSON.parse(event.content))) });
+      }
+      server.send(message);
+    });
+  });
+  return published;
+}
+
 /** Init script: record every text frame the page sends on a data channel (`window.__sentFrames`). */
 export const RECORD_SENT_FRAMES = () => {
   window.__sentFrames = [];
