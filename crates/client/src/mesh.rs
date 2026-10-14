@@ -1,6 +1,7 @@
 //! One WebRTC link per remote room member, using the "perfect negotiation" pattern
 //! so either side can (re)negotiate at any time without signaling glare.
 
+use protocol::ice_privacy::{scrub_sdp, AddressGate, RELEASE_WITHOUT_PUBLIC_MS};
 use protocol::{IceCandidateData, InputLane, SignalPayload, INPUT_EVENTS_LABEL, INPUT_STATE_LABEL};
 use futures::channel::oneshot;
 use std::cell::{Cell, RefCell};
@@ -80,6 +81,8 @@ pub struct PeerLink {
     input_state: Rc<RefCell<Option<RtcDataChannel>>>,
     /// Candidates that arrived before the remote description (relays can reorder).
     pending_ice: RefCell<Vec<IceCandidateData>>,
+    /// Our candidates and descriptions on their way to `remote` (local addresses kept back).
+    gate: Rc<Gate>,
     closed: Rc<Cell<bool>>,
     signal_out: SignalOut,
     on_event: LinkEventHandler,
@@ -106,6 +109,11 @@ impl PeerLink {
             n.set(id + 1);
             id
         });
+        let gate = {
+            let signal_out = signal_out.clone();
+            let remote = remote.to_string();
+            Gate::new(Rc::new(move |candidates| signal_out(&remote, SignalPayload::IceBatch { to: remote.clone(), candidates })))
+        };
         let link = Rc::new(Self {
             remote: remote.to_string(),
             id,
@@ -122,17 +130,14 @@ impl PeerLink {
             input_events: Rc::new(RefCell::new(None)),
             input_state: Rc::new(RefCell::new(None)),
             pending_ice: RefCell::new(Vec::new()),
+            gate,
             closed: Rc::new(Cell::new(false)),
             signal_out,
             on_event: on_event.clone(),
         });
 
         let notify_closed = link.closed_notifier(on_event.clone());
-        {
-            let signal_out = link.signal_out.clone();
-            let remote = link.remote.clone();
-            batch_ice(&link.pc, Rc::new(move |candidates| signal_out(&remote, SignalPayload::IceBatch { to: remote.clone(), candidates })));
-        }
+        link.gate.watch(&link.pc);
         link.install_negotiation();
         watch_state(&link.pc, notify_closed.clone());
         link.install_track_handler(on_event.clone());
@@ -354,7 +359,7 @@ impl PeerLink {
                     &self.remote,
                     SignalPayload::Answer {
                         to: self.remote.clone(),
-                        sdp: local.sdp(),
+                        sdp: self.gate.sdp(&local.sdp()),
                     },
                 );
             }
@@ -368,6 +373,7 @@ impl PeerLink {
     }
 
     pub async fn add_candidates(&self, candidates: Vec<IceCandidateData>) {
+        self.gate.remote(&candidates);
         if self.pc.remote_description().is_none() {
             self.pending_ice.borrow_mut().extend(candidates);
             return;
@@ -421,6 +427,7 @@ impl PeerLink {
         let closed = self.closed.clone();
         let signal_out = self.signal_out.clone();
         let remote = self.remote.clone();
+        let gate = self.gate.clone();
         let on_needed = Closure::wrap(Box::new(move || {
             if closed.get() {
                 return;
@@ -429,6 +436,7 @@ impl PeerLink {
             let making_offer = making_offer.clone();
             let signal_out = signal_out.clone();
             let remote = remote.clone();
+            let gate = gate.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 making_offer.set(true);
                 match set_local_description_implicit(&pc).await {
@@ -438,7 +446,7 @@ impl PeerLink {
                                 &remote,
                                 SignalPayload::Offer {
                                     to: remote.clone(),
-                                    sdp: local.sdp(),
+                                    sdp: gate.sdp(&local.sdp()),
                                 },
                             );
                         }
@@ -542,17 +550,17 @@ async fn set_local_description_implicit(pc: &RtcPeerConnection) -> Result<(), Js
 }
 
 /// Batch local ICE candidates (100 ms or 10 candidates) to stay under relay rate limits;
-/// `out` sends each batch.
-fn batch_ice(pc: &RtcPeerConnection, out: Rc<dyn Fn(Vec<IceCandidateData>)>) {
+/// `out` takes each batch, and whether gathering is over with it.
+fn batch_ice(pc: &RtcPeerConnection, out: Rc<dyn Fn(Vec<IceCandidateData>, bool)>) {
     let batch = Rc::new(RefCell::new(Vec::<IceCandidateData>::new()));
     let timer = Rc::new(Cell::new(None::<i32>));
 
-    let flush: Rc<dyn Fn()> = {
+    let flush: Rc<dyn Fn(bool)> = {
         let batch = batch.clone();
-        Rc::new(move || {
+        Rc::new(move |done| {
             let candidates = std::mem::take(&mut *batch.borrow_mut());
-            if !candidates.is_empty() {
-                out(candidates);
+            if !candidates.is_empty() || done {
+                out(candidates, done);
             }
         })
     };
@@ -560,7 +568,7 @@ fn batch_ice(pc: &RtcPeerConnection, out: Rc<dyn Fn(Vec<IceCandidateData>)>) {
     let on_ice = Closure::wrap(Box::new(move |ev: RtcPeerConnectionIceEvent| {
         let Some(candidate) = ev.candidate() else {
             // Gathering complete.
-            flush();
+            flush(true);
             return;
         };
         batch.borrow_mut().push(IceCandidateData {
@@ -572,11 +580,11 @@ fn batch_ice(pc: &RtcPeerConnection, out: Rc<dyn Fn(Vec<IceCandidateData>)>) {
             w.clear_timeout_with_handle(handle);
         }
         if batch.borrow().len() >= ICE_BATCH_MAX {
-            flush();
+            flush(false);
             return;
         }
         let flush = flush.clone();
-        let cb = Closure::once(move || flush());
+        let cb = Closure::once(move || flush(false));
         if let Some(w) = window() {
             if let Ok(handle) = w.set_timeout_with_callback_and_timeout_and_arguments_0(
                 cb.as_ref().unchecked_ref(),
@@ -589,6 +597,77 @@ fn batch_ice(pc: &RtcPeerConnection, out: Rc<dyn Fn(Vec<IceCandidateData>)>) {
     }) as Box<dyn FnMut(RtcPeerConnectionIceEvent)>);
     pc.set_onicecandidate(Some(on_ice.as_ref().unchecked_ref()));
     on_ice.forget();
+}
+
+/// One connection's candidates and descriptions on their way out (`protocol::ice_privacy`):
+/// local network addresses go only to a member on the same network.
+struct Gate {
+    state: RefCell<AddressGate>,
+    send: Rc<dyn Fn(Vec<IceCandidateData>)>,
+    timer_started: Cell<bool>,
+}
+
+impl Gate {
+    fn new(send: Rc<dyn Fn(Vec<IceCandidateData>)>) -> Rc<Self> {
+        Rc::new(Self { state: RefCell::new(AddressGate::new(same_network_hook())), send, timer_started: Cell::new(false) })
+    }
+
+    /// Take `pc`'s gathered candidates (batched by `batch_ice`).
+    fn watch(self: &Rc<Self>, pc: &RtcPeerConnection) {
+        let gate = self.clone();
+        batch_ice(pc, Rc::new(move |batch, done| gate.local(batch, done)));
+    }
+
+    fn local(self: &Rc<Self>, batch: Vec<IceCandidateData>, done: bool) {
+        let mut out = self.state.borrow_mut().local(batch);
+        if done {
+            out.extend(self.state.borrow_mut().gathering_done());
+        }
+        if !self.timer_started.replace(true) {
+            let gate = self.clone();
+            let cb = Closure::once(move || {
+                let out = gate.state.borrow_mut().timeout();
+                gate.emit(out);
+            });
+            if let Some(w) = window() {
+                let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), RELEASE_WITHOUT_PUBLIC_MS as i32);
+            }
+            cb.forget();
+        }
+        self.emit(out);
+    }
+
+    /// The remote's candidates, which show whether it shares our public address.
+    fn remote(&self, batch: &[IceCandidateData]) {
+        let out = self.state.borrow_mut().remote(batch);
+        self.emit(out);
+    }
+
+    /// An outgoing description without what the remote may not see.
+    fn sdp(&self, sdp: &str) -> String {
+        scrub_sdp(sdp, self.state.borrow().released())
+    }
+
+    fn emit(&self, out: Vec<IceCandidateData>) {
+        if !out.is_empty() {
+            (self.send)(out);
+        }
+    }
+}
+
+/// Test hook: `window.__dchatSameNetwork` (true or false) decides whether local addresses
+/// go to every member or to none, instead of comparing public addresses.
+fn same_network_hook() -> Option<bool> {
+    #[cfg(feature = "e2e-hooks")]
+    {
+        window()
+            .and_then(|w| js_sys::Reflect::get(&w, &"__dchatSameNetwork".into()).ok())
+            .and_then(|v| v.as_bool())
+    }
+    #[cfg(not(feature = "e2e-hooks"))]
+    {
+        None
+    }
 }
 
 /// Call `notify_closed` when the connection fails or closes, or stays "disconnected" for
@@ -662,6 +741,7 @@ pub struct FileLink {
     dc: RtcDataChannel,
     drain_notify: DrainNotify,
     pending_ice: RefCell<Vec<IceCandidateData>>,
+    gate: Rc<Gate>,
     described: Cell<bool>,
     closed: Rc<Cell<bool>>,
     signal_out: FileLinkSignalOut,
@@ -687,6 +767,11 @@ impl FileLink {
         let dc = pc.create_data_channel_with_data_channel_dict(FILE_LABEL, &init);
         dc.set_buffered_amount_low_threshold(FILE_BUFFER_LOW_THRESHOLD);
         dc.set_binary_type(RtcDataChannelType::Arraybuffer);
+        let gate = {
+            let signal_out = signal_out.clone();
+            let remote = remote.to_string();
+            Gate::new(Rc::new(move |candidates| signal_out(SignalPayload::IceBatch { to: remote.clone(), candidates })))
+        };
         let link = Rc::new(Self {
             remote: remote.to_string(),
             id,
@@ -696,6 +781,7 @@ impl FileLink {
             dc,
             drain_notify: Rc::new(RefCell::new(Vec::new())),
             pending_ice: RefCell::new(Vec::new()),
+            gate,
             described: Cell::new(false),
             closed: Rc::new(Cell::new(false)),
             signal_out,
@@ -711,11 +797,7 @@ impl FileLink {
                 }
             })
         };
-        {
-            let signal_out = link.signal_out.clone();
-            let remote = link.remote.clone();
-            batch_ice(&link.pc, Rc::new(move |candidates| signal_out(SignalPayload::IceBatch { to: remote.clone(), candidates })));
-        }
+        link.gate.watch(&link.pc);
         watch_state(&link.pc, notify_closed.clone());
         {
             let remote = link.remote.clone();
@@ -747,11 +829,12 @@ impl FileLink {
             let signal_out = link.signal_out.clone();
             let remote = link.remote.clone();
             let closed = link.closed.clone();
+            let gate = link.gate.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 match set_local_description_implicit(&pc).await {
                     Ok(()) => {
                         if let Some(local) = pc.local_description().filter(|_| !closed.get()) {
-                            signal_out(SignalPayload::Offer { to: remote.clone(), sdp: local.sdp() });
+                            signal_out(SignalPayload::Offer { to: remote.clone(), sdp: gate.sdp(&local.sdp()) });
                         }
                     }
                     Err(err) => {
@@ -792,11 +875,12 @@ impl FileLink {
             return;
         }
         if let Some(local) = self.pc.local_description().filter(|_| !self.closed.get()) {
-            (self.signal_out)(SignalPayload::Answer { to: self.remote.clone(), sdp: local.sdp() });
+            (self.signal_out)(SignalPayload::Answer { to: self.remote.clone(), sdp: self.gate.sdp(&local.sdp()) });
         }
     }
 
     pub async fn add_candidates(&self, candidates: Vec<IceCandidateData>) {
+        self.gate.remote(&candidates);
         if self.pc.remote_description().is_none() {
             self.pending_ice.borrow_mut().extend(candidates);
             return;

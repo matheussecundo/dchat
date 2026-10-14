@@ -230,6 +230,10 @@ fn App() -> impl IntoView {
     let my_name = StoredValue::new(String::new());
     // TURN servers the host offered (fetched once, reused if the room moves).
     let host_ice = StoredValue::new_local(None::<js_sys::Array>);
+    // The host offers TURN (known on the join screen), and this member hides its own IP
+    // address through it: RAM only, kept when the room moves, gone on reload.
+    let (host_turn, set_host_turn) = signal(false);
+    let (hide_my_ip, set_hide_my_ip) = signal(false);
     // A password room's stretched password, RAM only: it also opens the room after a rekey.
     let stretched_password = StoredValue::new(None::<[u8; KEY_LENGTH]>);
 
@@ -271,7 +275,7 @@ fn App() -> impl IntoView {
             held_media,
         };
         set_room_id_sig.set(room_id.clone());
-        match RoomSession::start(room_id, key, my_name.get_value(), signals, carry, host_ice.get_value()) {
+        match RoomSession::start(room_id, key, my_name.get_value(), signals, carry, host_ice.get_value(), hide_my_ip.get_untracked()) {
             Ok(session) => {
                 session_ref.set_value(Some(session.clone()));
                 session.set_allow_control(allow_control.get_untracked());
@@ -317,8 +321,9 @@ fn App() -> impl IntoView {
                 stretched_password.set_value(Some(stretched));
                 set_password_input.set(String::new());
             }
-            // Optional host TURN servers (Cloudflare Worker); quick 404 on static hosts.
-            host_ice.set_value(ice::fetch_ice_servers().await);
+            // Optional host TURN servers (Cloudflare Worker); quick 404 on static hosts. The join
+            // screen may have asked already: one request per page.
+            host_ice.set_value(ice::host_ice_servers().await);
             start_session(room_id, key, None);
             set_entering.set(false);
         });
@@ -1196,6 +1201,7 @@ fn App() -> impl IntoView {
         }
     };
     let hides_ip = move || session_ref.with_value(|s| s.as_ref().is_some_and(|s| s.hides_ip()));
+    let hides_my_ip = move || session_ref.with_value(|s| s.as_ref().is_some_and(|s| s.hides_my_ip()));
     let has_password = move || session_ref.with_value(|s| s.as_ref().is_some_and(|s| s.has_password()));
 
     let is_connected = move || status.get() == ConnectionStatus::Connected;
@@ -1414,7 +1420,15 @@ fn App() -> impl IntoView {
 
     let join_view = move || {
         let room = read_credentials().map(|(room, _)| room).unwrap_or_default();
-        let password_room = RoomParams::from_fragment(&current_fragment()).password_salt.is_some();
+        let room_params = RoomParams::from_fragment(&current_fragment());
+        let password_room = room_params.password_salt.is_some();
+        // Hiding only my own address needs a TURN server, from the link or the host.
+        let link_turn = !room_params.turn_urls.is_empty();
+        let room_hides_ip = room_params.hide_ip;
+        wasm_bindgen_futures::spawn_local(async move {
+            let servers = ice::host_ice_servers().await;
+            set_host_turn.set(servers.as_ref().is_some_and(ice::offers_turn));
+        });
         view! {
             <div class="lobby">
                 <form class="lobby-card" autocomplete="off" on:submit=move |ev| { ev.prevent_default(); enter_room(); }>
@@ -1434,6 +1448,20 @@ fn App() -> impl IntoView {
                             on:input=move |ev| set_password_input.set(event_target_value(&ev))
                         />
                         <p class="lobby-hint">{move || t(lang.get(), "join_password_hint")}</p>
+                    })}
+                    {move || (!room_hides_ip && (link_turn || host_turn.get())).then(|| view! {
+                        <label class="lobby-check" for="hide-my-ip-checkbox">
+                            <input
+                                type="checkbox"
+                                id="hide-my-ip-checkbox"
+                                prop:checked=move || hide_my_ip.get()
+                                on:change=move |ev| set_hide_my_ip.set(event_target_checked(&ev))
+                            />
+                            <span>{move || t(lang.get(), "hide_my_ip_label")}</span>
+                        </label>
+                        {move || hide_my_ip.get().then(|| view! {
+                            <p class="lobby-hint">{move || t(lang.get(), "hide_my_ip_hint")}</p>
+                        })}
                     })}
                     <button id="enter-room-btn" type="submit" class="btn btn-primary lobby-submit" disabled=move || entering.get()>
                         {move || enter_label("btn_enter_room")}
@@ -1644,6 +1672,11 @@ fn App() -> impl IntoView {
                     {move || hides_ip().then(|| view! {
                         <span class="history-badge hide-ip-badge" title=move || t(lang.get(), "hide_ip_badge_title")>
                             {move || t(lang.get(), "hide_ip_badge")}
+                        </span>
+                    })}
+                    {move || hides_my_ip().then(|| view! {
+                        <span class="history-badge hide-my-ip-badge" title=move || t(lang.get(), "hide_my_ip_badge_title")>
+                            {move || t(lang.get(), "hide_my_ip_badge")}
                         </span>
                     })}
                     <button class="btn btn-secondary copy-invite-btn" on:click=copy_invite_link>

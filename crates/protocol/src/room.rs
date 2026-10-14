@@ -436,12 +436,15 @@ pub struct IcePlan {
 }
 
 /// `host_urls`: every URL of the ICE servers the host offered (`./ice-servers`).
-pub fn plan_ice(params: &RoomParams, host_urls: &[String]) -> IcePlan {
+/// `hide_mine`: this member chose to hide its own IP address (TURN only for its connections),
+/// in a room that doesn't hide everyone's.
+pub fn plan_ice(params: &RoomParams, host_urls: &[String], hide_mine: bool) -> IcePlan {
     let host_offers = |schemes: [&str; 2]| host_urls.iter().any(|u| schemes.iter().any(|s| u.starts_with(s)));
     let has_stun = !params.stun_urls.is_empty() || host_offers(["stun:", "stuns:"]);
+    let relay_only = params.hide_ip || hide_mine;
     IcePlan {
-        relay_only: params.hide_ip,
-        fallback_stun: !has_stun && !params.hide_ip,
+        relay_only,
+        fallback_stun: !has_stun && !relay_only,
         has_turn: !params.turn_urls.is_empty() || host_offers(["turn:", "turns:"]),
     }
 }
@@ -740,7 +743,7 @@ mod tests {
     fn test_google_stun_only_as_a_fallback() {
         let plan = |fragment: &str, host: &[&str]| {
             let host: Vec<String> = host.iter().map(|u| u.to_string()).collect();
-            plan_ice(&RoomParams::from_fragment(&FragmentParams::parse(fragment)), &host)
+            plan_ice(&RoomParams::from_fragment(&FragmentParams::parse(fragment)), &host, false)
         };
         // Nothing else offers STUN: the fallback is needed to get through NAT.
         assert_eq!(plan("#room=r", &[]), IcePlan { relay_only: false, fallback_stun: true, has_turn: false });
@@ -758,5 +761,8 @@ mod tests {
             plan("#room=r&hideip=1", &[]),
             IcePlan { relay_only: true, fallback_stun: false, has_turn: false }
         );
+        // A member hiding only its own address: TURN only for it, in any room.
+        let mine = plan_ice(&RoomParams::from_fragment(&FragmentParams::parse("#room=r")), &["turn:t.example".to_string()], true);
+        assert_eq!(mine, IcePlan { relay_only: true, fallback_stun: false, has_turn: true });
     }
 }

@@ -133,6 +133,8 @@ struct Inner {
     me: String,
     join_ts: u64,
     rtc_config: RtcConfiguration,
+    /// This member hides its own IP address (TURN only), in a room that doesn't hide everyone's.
+    hide_mine: bool,
     signals: SessionSignals,
     /// The room's relay topic and relays; the pool is opened only while we need it.
     topic: String,
@@ -223,6 +225,7 @@ struct Inner {
 impl RoomSession {
     /// Join `room_id`. `carry` comes from the previous session when an admin moved the room
     /// here from another link. `host_ice` are extra ICE servers the host offered (see `ice.rs`).
+    /// `hide_mine`: this member's connections go through TURN only (its IP hidden from members).
     pub fn start(
         room_id: String,
         key: [u8; KEY_LENGTH],
@@ -230,6 +233,7 @@ impl RoomSession {
         signals: SessionSignals,
         carry: Option<SessionCarry>,
         host_ice: Option<js_sys::Array>,
+        hide_mine: bool,
     ) -> Result<Self, String> {
         let params = RoomParams::from_fragment(&current_fragment());
         let migrated = carry.is_some();
@@ -255,7 +259,8 @@ impl RoomSession {
         // After a move, members come back in a burst: hand the secret to an heir once they have.
         let hold_until = if migrated { started_at + MIGRATION_QUIET_MS } else { 0.0 };
 
-        let (rtc_config, ice_plan) = build_rtc_config(&params, host_ice.as_ref());
+        let (rtc_config, ice_plan) = build_rtc_config(&params, host_ice.as_ref(), hide_mine);
+        let hide_mine = hide_mine && !params.hide_ip;
         let topic = match params.password_salt {
             Some(_) => password_room_topic(&room_id, &key),
             None => hash_room_topic(&room_id),
@@ -265,6 +270,7 @@ impl RoomSession {
             inner: Rc::new(Inner {
                 key,
                 rtc_config,
+                hide_mine,
                 params,
                 room_id: room_id.clone(),
                 identity: identity.clone(),
@@ -883,6 +889,11 @@ impl RoomSession {
     /// The room connects only through TURN, hiding members' IP addresses from each other.
     pub fn hides_ip(&self) -> bool {
         self.inner.params.hide_ip
+    }
+
+    /// Only this member's connections go through TURN (its IP hidden from the others).
+    pub fn hides_my_ip(&self) -> bool {
+        self.inner.hide_mine
     }
 
     /// Joining the room needs a password as well as the link.
@@ -1514,8 +1525,9 @@ fn clean_remote_name(raw: &str, author: &str) -> String {
 /// STUN by default, plus TURN for members whose NATs block direct connections: servers the
 /// host offers (`host_ice`) and/or one from the room link (`&turn=`, `&turnuser=`, `&turnpass=`).
 /// ICE settings for every link (see `protocol::plan_ice`): the room's STUN and TURN, then
-/// the host's; Google's STUN only when nothing else offers STUN; TURN only with `&hideip=1`.
-fn build_rtc_config(params: &RoomParams, host_ice: Option<&js_sys::Array>) -> (RtcConfiguration, IcePlan) {
+/// the host's; Google's STUN only when nothing else offers STUN; TURN only with `&hideip=1`
+/// or when this member hides its own IP (`hide_mine`).
+fn build_rtc_config(params: &RoomParams, host_ice: Option<&js_sys::Array>, hide_mine: bool) -> (RtcConfiguration, IcePlan) {
     let config = RtcConfiguration::new();
     let servers = js_sys::Array::new();
     let server = |urls: &[String]| {
@@ -1550,7 +1562,7 @@ fn build_rtc_config(params: &RoomParams, host_ice: Option<&js_sys::Array>) -> (R
         servers.push(&entry);
     }
 
-    let plan = plan_ice(params, &host_urls);
+    let plan = plan_ice(params, &host_urls, hide_mine);
     if plan.fallback_stun {
         servers.push(&server(&[FALLBACK_STUN_URL.to_string()]));
     }
