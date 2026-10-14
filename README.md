@@ -293,9 +293,9 @@ When creating a room, **Signaling relays** lets you choose: the public relays (d
 https://your-domain.com/#room=…&key=…&relays=wss://relay.example.com            # only your relay
 https://your-domain.com/#room=…&key=…&relays=wss://relay.example.com,nostr      # yours + public (nostr = the public relays)
 ```
-Click the **⚡ Nostr** badge to see the room's relays and how many are connected. Dropped relay connections reconnect automatically.
+Click the **⚡ Nostr** badge to see the room's relays and how many are connected. Dropped relay connections reconnect automatically. Only two members of a room (an admin first, then the members with the lowest keys) stay on the relays to let newcomers in; every other member shows *(standby)* once linked and connects to the relays again only when it needs them (cut off, back from a pause with no link left), so relays see far fewer IP addresses.
 
-Relays are used only to find members and set up each direct link. Once two members are linked, everything else, including starting voice, camera or screen share, travels over their own link. If the relays go down, members already connected keep chatting and calling; only newcomers (and links that need to reconnect) wait for a relay.
+Relays are used only to find members and set up a newcomer's first direct link. Once a newcomer is linked to one member, its links with everyone else are set up through the room's existing links, and once two members are linked, everything else, including starting voice, camera or screen share, travels over their own link. Every relay event has the same size. If the relays go down, members already connected keep chatting and calling; only newcomers (and links that need to reconnect) wait for a relay.
 
 To run your own relay, this repository includes **`dchat-relay`** (`crates/relay`): a small RAM-only relay that forwards only dchat's ephemeral signaling events, with signature, freshness and rate checks and an optional origin lock. It ships as a Docker image with a Caddy setup for automatic `wss://`. See [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) section 4.
 

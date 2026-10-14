@@ -16,7 +16,9 @@ pub struct RelayConfig {
     /// Accept events whose `created_at` is at most this old / this far ahead (seconds).
     pub max_event_age_secs: u64,
     pub max_future_secs: u64,
-    /// Per-connection token bucket: a member joining a 25-person room sends ~100 events at once.
+    /// Per-connection token bucket. A newcomer shakes hands over the relays with the room's two
+    /// introducers only (a dozen events or so); the burst stays generous for knocks, ICE split
+    /// across several events, and introducers letting several newcomers in at once.
     pub event_burst: u32,
     pub events_per_sec: u32,
     /// Browser origins allowed to connect (e.g. `https://chat.example.com`); empty = any.

@@ -275,6 +275,18 @@ pub enum RoomBody {
     /// WebRTC renegotiation (offer, answer, ICE) for the link between author and `to`, sent
     /// over that link itself once it is open, so Nostr relays only carry the first handshake.
     LinkSignal { to: String, signal: SignalPayload },
+    /// A first handshake (offer, answer, ICE) for `to`, who is in the room but not linked with
+    /// the author yet: sealed to `to` (`seal_json`, as `RelaySignal::Sealed` through the relays)
+    /// and passed hop by hop over the mesh toward `to`, never flooded, so the relays carry
+    /// only the introducers' handshakes (`protocol::relay_role`).
+    RoutedSignal { to: String, sealed: EncryptedPayload },
+    /// From an introducer: `who` announced itself on the relays but couldn't link with the
+    /// introducers. Members without a link to `who` join the relays for a while
+    /// (`relay_role::KNOCK_WINDOW_MS`) so it can link with them.
+    Knock { who: String },
+    /// A member saw someone on protocol version `v`, newer than the room's, on the relays:
+    /// every member shows the reload banner, not only those on the relays.
+    NewerVersion { v: u32 },
     /// The author's remote-control state while they share their screen: whether they accept
     /// requests (host app paired, whole screen shared), how many controllers its computer
     /// can take, and who holds what. Gossiped, so everyone sees who controls the shared

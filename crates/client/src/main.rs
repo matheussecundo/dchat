@@ -123,6 +123,7 @@ fn App() -> impl IntoView {
     let (removed, set_removed) = signal(false);
     let (rekey, set_rekey) = signal_local(None::<RekeyTarget>);
     let (connected_relays, set_connected_relays) = signal(0usize);
+    let (relay_standby, set_relay_standby) = signal(false);
     let (input_text, set_input_text) = signal(String::new());
     let (show_qr, set_show_qr) = signal(false);
     let (show_relays, set_show_relays) = signal(false);
@@ -248,6 +249,7 @@ fn App() -> impl IntoView {
             names: set_names,
             room_full: set_room_full,
             connected_relays: set_connected_relays,
+            relay_standby: set_relay_standby,
             lounge: set_lounge,
             my_voice: set_my_voice,
             speaking: set_speaking,
@@ -1616,7 +1618,13 @@ fn App() -> impl IntoView {
                         <span>{move || t(lang.get(), "nostr_badge")}</span>
                         <span>{move || {
                             let c = connected_relays.get();
-                            if c > 0 { format!("({} active)", c) } else { "(connecting...)".to_string() }
+                            if c > 0 {
+                                format!("({} active)", c)
+                            } else if relay_standby.get() {
+                                "(standby)".to_string()
+                            } else {
+                                "(connecting...)".to_string()
+                            }
                         }}</span>
                     </button>
                 </div>
@@ -2154,6 +2162,9 @@ fn App() -> impl IntoView {
                                 <button class="btn btn-secondary" on:click=move |_| set_show_relays.set(false)>"✕"</button>
                             </div>
                             <p class="relays-desc">{move || t(lang.get(), "nostr_relays_desc")}</p>
+                            {move || (relay_standby.get() && connected_relays.get() == 0).then(|| view! {
+                                <p class="relays-desc relays-standby">{move || t(lang.get(), "nostr_relays_standby")}</p>
+                            })}
                             <div class="relays-box">
                                 <div class="relays-box-title">{move || t(lang.get(), "nostr_active_relays")}</div>
                                 <ul class="relays-list">

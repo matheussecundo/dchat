@@ -107,19 +107,22 @@ pub struct NostrRelayPool {
     seen_event_ids: RefCell<GossipDedup>,
     connected_count: Cell<usize>,
     closed: Cell<bool>,
+    /// Say `Presence` on every (re)connection.
+    announce: bool,
 }
 
 impl NostrRelayPool {
     /// `identity` is the member's session key (it also signs room envelopes, and survives a
     /// rekey); relay events are signed by a fresh key that `identity` certifies inside each
     /// encrypted frame. `topic` is the room's relay topic (`hash_room_topic`, or
-    /// `password_room_topic`).
+    /// `password_room_topic`). `announce`: say `Presence` on every (re)connection.
     pub fn new(
         topic: String,
         key: [u8; KEY_LENGTH],
         identity: Rc<NostrBurnerKey>,
         relays: Vec<String>,
         events: PoolEvents,
+        announce: bool,
     ) -> Result<Rc<Self>, String> {
         let events = Rc::new(events);
         let relay_key = NostrBurnerKey::generate().map_err(|e| e.to_string())?;
@@ -141,6 +144,7 @@ impl NostrRelayPool {
             seen_event_ids: RefCell::new(GossipDedup::new(SEEN_EVENTS_CAPACITY)),
             connected_count: Cell::new(0),
             closed: Cell::new(false),
+            announce,
         });
         log::info!("Initializing Nostr relay pool with {} relays", relays.len());
         for (index, url) in relays.into_iter().enumerate() {
@@ -247,7 +251,8 @@ impl NostrRelayPool {
         .ok()
     }
 
-    /// Subscribe, announce presence and route incoming events until the connection ends.
+    /// Subscribe, announce presence (`announce`) and route incoming events until the
+    /// connection ends.
     async fn serve_connection(&self, index: usize, url: &str, ws: WebSocket, events: &PoolEvents) {
         let (mut ws_sink, mut ws_stream) = ws.split();
         let (tx, mut rx) = mpsc::unbounded::<String>();
@@ -264,8 +269,10 @@ impl NostrRelayPool {
         if let Some(json) = self.subscription_json() {
             let _ = tx.unbounded_send(json);
         }
-        for presence in self.event_jsons(&SignalPayload::Presence) {
-            let _ = tx.unbounded_send(presence);
+        if self.announce {
+            for presence in self.event_jsons(&SignalPayload::Presence) {
+                let _ = tx.unbounded_send(presence);
+            }
         }
         if self.closed.get() {
             return;

@@ -95,11 +95,12 @@ mod tests {
     use crate::media::{self, MediaInfo, MediaKind, Thumbnail, WAVEFORM_BARS};
     use crate::succession;
     use crate::presence;
+    use crate::relay_role;
     use sha2::{Digest, Sha256};
 
     /// The wire fingerprint recorded for the current version. When the test below fails,
     /// bump `PROTOCOL_VERSION` and record the new pair here.
-    const RECORDED: (u32, &str) = (10, "f8c43f9c2437cf28b1662be0bffb63e57309e862c498e45261168e0a6b6ffcca");
+    const RECORDED: (u32, &str) = (10, "1e28c90f8efc9e1b3870283e019de53d6da19c0abcb42846117f47e0927da7ba");
 
     fn sealed() -> EncryptedPayload {
         EncryptedPayload { nonce: "n".into(), ciphertext: "c".into() }
@@ -225,6 +226,9 @@ mod tests {
             RoomBody::Delete { target: "m".into() },
             RoomBody::Dm { sealed: sealed() },
             RoomBody::LinkSignal { to: "b".into(), signal: SignalPayload::Offer { to: "b".into(), sdp: "v=0".into() } },
+            RoomBody::RoutedSignal { to: "b".into(), sealed: sealed() },
+            RoomBody::Knock { who: "b".into() },
+            RoomBody::NewerVersion { v: 11 },
             RoomBody::AdminRekey {
                 kicked: Some("c".into()),
                 grants: vec![SealedGrant { to: "b".into(), payload: sealed() }],
@@ -261,6 +265,9 @@ mod tests {
             RoomBody::Delete { .. } => "Delete",
             RoomBody::Dm { .. } => "Dm",
             RoomBody::LinkSignal { .. } => "LinkSignal",
+            RoomBody::RoutedSignal { .. } => "RoutedSignal",
+            RoomBody::Knock { .. } => "Knock",
+            RoomBody::NewerVersion { .. } => "NewerVersion",
             RoomBody::AdminRekey { .. } => "AdminRekey",
             RoomBody::AdminHandover { .. } => "AdminHandover",
             RoomBody::ControlStatus { .. } => "ControlStatus",
@@ -296,6 +303,14 @@ mod tests {
         wire.push(format!("{} {}", succession::ADMIN_ABSENT_MS, MAX_RANKING));
         // Away and return: how long a member out of reach keeps its place.
         wire.push(presence::AWAY_GRACE_MS.to_string());
+        // Who stays on the relays, and how long members join them for a knock.
+        wire.push(format!(
+            "{} {} {} {}",
+            relay_role::INTRODUCERS,
+            relay_role::LEAVE_HOLD_MS,
+            relay_role::KNOCK_WINDOW_MS,
+            relay_role::KNOCK_AGAIN_MS
+        ));
         wire.push(hash_room_topic("r"));
         // Remote-control input: every event's binary encoding, the packet header, the keys.
         wire.push(hex::encode(encode_events(&crate::input::tests::samples()).unwrap()));

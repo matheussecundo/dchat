@@ -20,6 +20,8 @@ export async function newMember(browser, label) {
   const page = await context.newPage();
   page.on('console', (msg) => {
     if (msg.type() === 'error') console.log(`${label} ERROR:`, msg.text());
+    // E2E_CONSOLE=1: every line the page logs, for debugging a spec.
+    else if (process.env.E2E_CONSOLE) console.log(`${label} ${Date.now() % 100000}:`, msg.text());
   });
   return { context, page };
 }
