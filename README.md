@@ -85,7 +85,7 @@ Closing the tab, **💥 Wipe Session** or a reload still leaves at once. If the 
 
 **Room passwords**: optionally set a password when creating a room: tick **Protect with a password** first (it is off by default, and the box asks for a new password, so the browser never fills in one it saved). Joining then needs the link *and* the password (share it separately, for example by voice), so a leaked link alone doesn't open the room. The link only carries a salt (`pw=`), never the password. A wrong password shows no error: you just find nobody. The room shows 🔒 *Password*.
 
-**Privacy**: tick *Hide members' IP addresses from each other* when creating a room and every member connects through a TURN server, so nobody in the room learns anyone's IP address (the room shows 🛡️ *IPs hidden*). It needs a TURN server from the host or the link. [`docs/PRIVACY.md`](./docs/PRIVACY.md) explains what members, relays and servers can see, and lists possible improvements.
+**Privacy**: tick *Hide members' IP addresses from each other* when creating a room and every member connects through a TURN server, so nobody in the room learns anyone's IP address (the room shows 🛡️ *IPs hidden*). It needs a TURN server from the host or the link. To hide only your own address in any room, tick *Hide my IP address from the other members* on the join screen (shown when TURN is available): only your connections go through TURN. [`docs/PRIVACY.md`](./docs/PRIVACY.md) explains what members, relays and servers can see, and lists possible improvements.
 
 **Versions**: members connect only with members running the same dchat protocol version. If someone in the room has a newer version, you see *Someone in this room is using a newer version of dchat* with a **Reload** button; reloading loads the latest version and keeps the room link (like any reload, it clears this tab's chat). Members on the newer version see a short notice instead. Updates that only change the interface don't affect who can connect.
 
@@ -213,6 +213,8 @@ What you will see:
 - **Voice, video and files don't work with that person**: media and file transfers only travel over direct links (the lounge marks them with ⚠, file cards say *Sender not directly reachable*).
 - If no mutual member exists, the person stays `connecting…` until a path appears.
 
+Local network addresses (192.168.x and the like) go only to members behind the same public address as you, so two members on the same Wi-Fi still link directly; everyone else sees only your public address. Two devices on one network that show different public addresses (several internet connections, some VPNs) and whose router doesn't loop traffic back fall back to TURN or `via`.
+
 **Fix: add a TURN server.** A TURN server forwards encrypted packets between members who can't reach each other. It sees IP addresses and traffic timing, but never message or media content (DTLS/SRTP plus the room key). There are two ways to provide one:
 
 - **From the host (recommended):** when the site is deployed on Cloudflare (see "Cloudflare (Workers + TURN)" below), the app asks the site for fresh, short-lived Cloudflare TURN credentials each time you enter a room (`GET ./ice-servers`). Nothing needs to go in the link. On hosts without that endpoint the request just returns 404 and the app carries on with STUN.
@@ -293,9 +295,9 @@ When creating a room, **Signaling relays** lets you choose: the public relays (d
 https://your-domain.com/#room=…&key=…&relays=wss://relay.example.com            # only your relay
 https://your-domain.com/#room=…&key=…&relays=wss://relay.example.com,nostr      # yours + public (nostr = the public relays)
 ```
-Click the **⚡ Nostr** badge to see the room's relays and how many are connected. Dropped relay connections reconnect automatically.
+Click the **⚡ Nostr** badge to see the room's relays and how many are connected. Dropped relay connections reconnect automatically. Only two members of a room (an admin first, then the members with the lowest keys) stay on the relays to let newcomers in; every other member shows *(standby)* once linked and connects to the relays again only when it needs them (cut off, back from a pause with no link left), so relays see far fewer IP addresses.
 
-Relays are used only to find members and set up each direct link. Once two members are linked, everything else, including starting voice, camera or screen share, travels over their own link. If the relays go down, members already connected keep chatting and calling; only newcomers (and links that need to reconnect) wait for a relay.
+Relays are used only to find members and set up a newcomer's first direct link. Once a newcomer is linked to one member, its links with everyone else are set up through the room's existing links, and once two members are linked, everything else, including starting voice, camera or screen share, travels over their own link. Every relay event has the same size. If the relays go down, members already connected keep chatting and calling; only newcomers (and links that need to reconnect) wait for a relay.
 
 To run your own relay, this repository includes **`dchat-relay`** (`crates/relay`): a small RAM-only relay that forwards only dchat's ephemeral signaling events, with signature, freshness and rate checks and an optional origin lock. It ships as a Docker image with a Caddy setup for automatic `wss://`. See [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) section 4.
 

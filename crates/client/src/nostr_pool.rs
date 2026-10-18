@@ -7,7 +7,7 @@ use protocol::crypto::{decrypt_bytes, encrypt_bytes, EncryptedPayload};
 use protocol::{
     decode_signal, encode_signal, relay_key_message, verify_event, verify_message, ClientRelayMessage, DecodedSignal,
     GossipDedup, NostrBurnerKey, NostrFilter, RelayClientMessage, RelayFrame, RelaySignal, SignalPayload,
-    KIND_EPHEMERAL_SIGNAL, KEY_LENGTH, PROTOCOL_VERSION,
+    KIND_EPHEMERAL_SIGNAL, KEY_LENGTH, PROTOCOL_VERSION, RELAY_PAD_BASE,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -40,6 +40,36 @@ pub fn protocol_version() -> u32 {
 
 /// Relay keys whose identity certificate was checked, at most this many remembered.
 const CERTIFIED_CAPACITY: usize = 1024;
+
+#[cfg(feature = "e2e-hooks")]
+thread_local! {
+    /// The largest signal (unpadded JSON before encryption) this tab sent, by kind.
+    static FRAME_SIZES: RefCell<HashMap<&'static str, usize>> = RefCell::new(HashMap::new());
+}
+
+/// Test hook: `FRAME_SIZES` as a JS object (`window.__dchat.relayFrameSizes()`).
+#[cfg(feature = "e2e-hooks")]
+pub fn frame_sizes() -> wasm_bindgen::JsValue {
+    let object = js_sys::Object::new();
+    FRAME_SIZES.with(|sizes| {
+        for (kind, size) in sizes.borrow().iter() {
+            let _ = js_sys::Reflect::set(&object, &(*kind).into(), &(*size as f64).into());
+        }
+    });
+    object.into()
+}
+
+#[cfg(feature = "e2e-hooks")]
+fn signal_kind(signal: &SignalPayload) -> &'static str {
+    match signal {
+        SignalPayload::Presence => "Presence",
+        SignalPayload::Offer { .. } => "Offer",
+        SignalPayload::Answer { .. } => "Answer",
+        SignalPayload::IceBatch { .. } => "IceBatch",
+        SignalPayload::PeerLeft => "PeerLeft",
+        SignalPayload::RekeyForward { .. } => "RekeyForward",
+    }
+}
 
 /// What the pool reports to the session.
 pub struct PoolEvents {
@@ -77,19 +107,22 @@ pub struct NostrRelayPool {
     seen_event_ids: RefCell<GossipDedup>,
     connected_count: Cell<usize>,
     closed: Cell<bool>,
+    /// Say `Presence` on every (re)connection.
+    announce: bool,
 }
 
 impl NostrRelayPool {
     /// `identity` is the member's session key (it also signs room envelopes, and survives a
     /// rekey); relay events are signed by a fresh key that `identity` certifies inside each
     /// encrypted frame. `topic` is the room's relay topic (`hash_room_topic`, or
-    /// `password_room_topic`).
+    /// `password_room_topic`). `announce`: say `Presence` on every (re)connection.
     pub fn new(
         topic: String,
         key: [u8; KEY_LENGTH],
         identity: Rc<NostrBurnerKey>,
         relays: Vec<String>,
         events: PoolEvents,
+        announce: bool,
     ) -> Result<Rc<Self>, String> {
         let events = Rc::new(events);
         let relay_key = NostrBurnerKey::generate().map_err(|e| e.to_string())?;
@@ -111,6 +144,7 @@ impl NostrRelayPool {
             seen_event_ids: RefCell::new(GossipDedup::new(SEEN_EVENTS_CAPACITY)),
             connected_count: Cell::new(0),
             closed: Cell::new(false),
+            announce,
         });
         log::info!("Initializing Nostr relay pool with {} relays", relays.len());
         for (index, url) in relays.into_iter().enumerate() {
@@ -217,7 +251,8 @@ impl NostrRelayPool {
         .ok()
     }
 
-    /// Subscribe, announce presence and route incoming events until the connection ends.
+    /// Subscribe, announce presence (`announce`) and route incoming events until the
+    /// connection ends.
     async fn serve_connection(&self, index: usize, url: &str, ws: WebSocket, events: &PoolEvents) {
         let (mut ws_sink, mut ws_stream) = ws.split();
         let (tx, mut rx) = mpsc::unbounded::<String>();
@@ -234,8 +269,10 @@ impl NostrRelayPool {
         if let Some(json) = self.subscription_json() {
             let _ = tx.unbounded_send(json);
         }
-        if let Some(presence) = self.signed_event_json(&SignalPayload::Presence) {
-            let _ = tx.unbounded_send(presence);
+        if self.announce {
+            for presence in self.event_jsons(&SignalPayload::Presence) {
+                let _ = tx.unbounded_send(presence);
+            }
         }
         if self.closed.get() {
             return;
@@ -352,8 +389,32 @@ impl NostrRelayPool {
         true
     }
 
-    /// Seal (when addressed), encrypt, sign and serialize `signal` as an EVENT message.
-    fn signed_event_json(&self, signal: &SignalPayload) -> Option<String> {
+    /// `signal` as EVENT messages: one, or several for an ICE batch too large for the
+    /// relays' common padded size (`RELAY_PAD_BASE`), so every handshake event looks alike.
+    fn event_jsons(&self, signal: &SignalPayload) -> Vec<String> {
+        let Some((json, padded, _unpadded)) = self.signed_event_json(signal) else {
+            return Vec::new();
+        };
+        if let SignalPayload::IceBatch { to, candidates } = signal {
+            if padded > RELAY_PAD_BASE && candidates.len() > 1 {
+                let (first, second) = candidates.split_at(candidates.len() / 2);
+                let mut jsons = self.event_jsons(&SignalPayload::IceBatch { to: to.clone(), candidates: first.to_vec() });
+                jsons.extend(self.event_jsons(&SignalPayload::IceBatch { to: to.clone(), candidates: second.to_vec() }));
+                return jsons;
+            }
+        }
+        #[cfg(feature = "e2e-hooks")]
+        FRAME_SIZES.with(|sizes| {
+            let mut sizes = sizes.borrow_mut();
+            let entry = sizes.entry(signal_kind(signal)).or_insert(0);
+            *entry = (*entry).max(_unpadded);
+        });
+        vec![json]
+    }
+
+    /// Seal (when addressed), pad, encrypt, sign and serialize `signal` as an EVENT message;
+    /// with its plaintext length, padded and unpadded.
+    fn signed_event_json(&self, signal: &SignalPayload) -> Option<(String, usize, usize)> {
         let relayed = RelaySignal::seal(&self.identity, signal)
             .map_err(|e| log::error!("Failed to seal signaling payload: {:?}", e))
             .ok()?;
@@ -369,7 +430,7 @@ impl NostrRelayPool {
             .create_event(KIND_EPHEMERAL_SIGNAL, vec![vec!["d".to_string(), self.topic.clone()]], content, now_sec)
             .map_err(|e| log::error!("Failed to create Nostr event: {:?}", e))
             .ok()?;
-        ClientRelayMessage::Event(event).to_json().ok()
+        Some((ClientRelayMessage::Event(event).to_json().ok()?, plaintext.len(), protocol::unpadded_len(&plaintext)))
     }
 
     /// Broadcast a SignalPayload across all connected relays in the pool.
@@ -377,11 +438,8 @@ impl NostrRelayPool {
         if self.closed.get() {
             return;
         }
-        let Some(msg_json) = self.signed_event_json(signal) else {
-            return;
-        };
-        self.senders
-            .borrow_mut()
-            .retain(|_, tx| tx.unbounded_send(msg_json.clone()).is_ok());
+        for json in self.event_jsons(signal) {
+            self.senders.borrow_mut().retain(|_, tx| tx.unbounded_send(json.clone()).is_ok());
+        }
     }
 }

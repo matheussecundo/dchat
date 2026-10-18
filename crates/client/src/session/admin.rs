@@ -6,7 +6,9 @@
 //! Members away at that moment (a phone that switched apps) get a grant too. They can't
 //! receive the envelope, so members who move keep listening on the old room's relays while
 //! those absences may last, and hand it to them when they announce themselves there
-//! (`SignalPayload::RekeyForward`, sealed to them).
+//! (`SignalPayload::RekeyForward`, sealed to them). Only the new room's introducers keep
+//! that pool open (`set_forwarding`, driven by the new session), so the relays see the same
+//! few members on the old topic as on the new one.
 
 use super::RoomSession;
 use crate::names::pubkey_tag;
@@ -116,10 +118,16 @@ impl RoomSession {
         let s = self.clone();
         set_timeout(
             move || {
+                // Pools kept for away members move on with us, this room's among them.
+                let mut forwarders = s.inner.forwarders.take();
+                if s.forwarding_active() {
+                    forwarders.push(s.clone());
+                }
                 let carry = SessionCarry {
                     identity: s.inner.identity.clone(),
                     shared_files: s.shared_files(),
                     first_seen: s.inner.succession.borrow().seen.clone(),
+                    forwarders,
                 };
                 s.leave();
                 let mut params = current_fragment();
@@ -158,22 +166,43 @@ impl RoomSession {
             Some(Forwarding { envelope: Rc::new(envelope.clone()), to, answered: HashMap::new(), until: until as f64 });
     }
 
+    /// Whether this (closed) session still waits for members away during a rekey it followed.
+    pub(super) fn forwarding_active(&self) -> bool {
+        self.inner.forwarding.borrow().as_ref().is_some_and(|f| f.until > js_sys::Date::now())
+    }
+
     /// The session left: close its relay connections, or keep them until the last member
-    /// away during a rekey we followed could come back.
-    pub(super) fn close_pool_after_forwarding(&self, pool: Rc<crate::nostr_pool::NostrRelayPool>) {
+    /// away during a rekey we followed could come back (the next session may close them
+    /// sooner, `set_forwarding`).
+    pub(super) fn close_pool_after_forwarding(&self) {
         let until = self.inner.forwarding.borrow().as_ref().map(|f| f.until);
         let Some(until) = until.filter(|until| *until > js_sys::Date::now()) else {
-            pool.close();
+            self.close_pool();
             return;
         };
         let s = self.clone();
-        set_timeout(
-            move || {
-                pool.close();
-                s.inner.forwarding.borrow_mut().take();
-            },
-            std::time::Duration::from_millis((until - js_sys::Date::now()).max(0.0) as u64),
-        );
+        set_timeout(move || s.end_forwarding(), std::time::Duration::from_millis((until - js_sys::Date::now()).max(0.0) as u64));
+    }
+
+    /// From the next session: listen on this old room's relays (`on`, we are an introducer
+    /// there) or not. Returns whether this session still forwards at all.
+    pub(super) fn set_forwarding(&self, on: bool) -> bool {
+        if !self.forwarding_active() {
+            self.end_forwarding();
+            return false;
+        }
+        match (on, self.pool().is_some()) {
+            (true, false) => self.open_pool(false),
+            (false, true) => self.close_pool(),
+            _ => {}
+        }
+        true
+    }
+
+    /// No more forwarding: close the old room's relay connections.
+    pub(super) fn end_forwarding(&self) {
+        self.inner.forwarding.borrow_mut().take();
+        self.close_pool();
     }
 
     /// `from` announced itself on the old topic after we moved: if it was away during the

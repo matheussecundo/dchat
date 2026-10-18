@@ -33,3 +33,24 @@ test('members on different protocol versions never link; the older one is asked 
 
   for (const m of [ana, bo, cy]) await m.context.close();
 });
+
+test('members on standby, off the relays, still hear about a newer version from the room', async ({ browser }) => {
+  test.setTimeout(120000);
+  const names = ['Ana', 'Bo', 'Cy'];
+  const members = [];
+  for (const name of names) members.push(await newMember(browser, name));
+  const invite = inviteFrom(await createRoom(members[0].page, { name: 'Ana' }));
+  for (const [i, m] of members.slice(1).entries()) await joinRoom(m.page, invite, names[i + 1]);
+  for (const [i, m] of members.entries()) await expectDirectMesh(m.page, names, names[i]);
+  // Only the two introducers stay on the relays.
+  const onRelays = async () => (await Promise.all(members.map((m) => m.page.evaluate(() => window.__dchat.relayState().pool)))).filter(Boolean).length;
+  await expect.poll(onRelays, { timeout: 30000 }).toBe(2);
+
+  const newer = await newMember(browser, 'Dee');
+  await newer.context.addInitScript(() => { window.__dchatProtocolVersion = 999; });
+  await joinRoom(newer.page, invite, 'Dee');
+  for (const m of members) await expect(m.page.locator('#update-banner')).toBeVisible({ timeout: 20000 });
+  await expect(newer.page.locator('.member-row')).toHaveCount(1);
+
+  for (const m of [...members, newer]) await m.context.close();
+});

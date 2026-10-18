@@ -353,6 +353,9 @@ pub struct SessionCarry {
     pub shared_files: HashMap<String, web_sys::File>,
     /// Who has been in the room longest, as we saw it (admin succession).
     pub first_seen: protocol::succession::FirstSeen,
+    /// Earlier rooms' sessions still waiting for members who were away when the room moved
+    /// (`admin::Forwarding`): their relay pools follow our introducer role in the new room.
+    pub forwarders: Vec<crate::session::RoomSession>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

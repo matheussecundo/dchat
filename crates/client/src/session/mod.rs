@@ -10,6 +10,8 @@ mod files;
 mod history;
 mod lounge;
 mod quality;
+mod relays;
+mod routing;
 mod succession;
 mod sync;
 
@@ -17,7 +19,7 @@ pub use files::{save_blob, save_finished, start_save};
 
 use crate::mesh::{LinkEvent, LinkEventHandler, PeerLink, SignalOut};
 use crate::names::pubkey_tag;
-use crate::nostr_pool::{protocol_version, NostrRelayPool, PoolEvents};
+use crate::nostr_pool::{protocol_version, NostrRelayPool};
 use crate::state::{
     current_fragment, current_time_string, get_default_relays, ChatMessageUi, ConnectionStatus,
     DmUi, LinkUi, LoungeMemberUi, MemberUi, MyVoiceUi, Notice, RekeyTarget, SessionCarry,
@@ -29,6 +31,8 @@ use lounge::{Lounge, VoiceInfo};
 use leptos::prelude::*;
 use protocol::chat_log::ChatLog;
 use protocol::presence::Absences;
+use protocol::relay_role::{self, RelayRole};
+use protocol::routing::RouteBudget;
 use protocol::succession::Succession;
 use protocol::crypto::{decrypt_json, encrypt_json};
 use protocol::{
@@ -43,9 +47,8 @@ use wasm_bindgen::JsCast;
 use web_sys::{window, RtcConfiguration, RtcIceTransportPolicy};
 
 const TICK_MS: i32 = 2500;
-/// Beacon every tick while joining, then every `SLOW_BEACON_EVERY` ticks.
-const FAST_BEACON_FOR_MS: f64 = 20_000.0;
-const SLOW_BEACON_EVERY: u32 = 6;
+/// Beacon on every tick while joining or back from a pause (`protocol::relay_role`).
+const FAST_BEACON_FOR_MS: f64 = relay_role::FAST_BEACON_FOR_MS as f64;
 /// A link that has not opened by then is dropped (e.g. NAT traversal failed).
 const LINK_TIMEOUT_MS: f64 = 20_000.0;
 /// After a failed link, wait this long before trying the same member again.
@@ -74,6 +77,8 @@ pub struct SessionSignals {
     pub names: WriteSignal<HashMap<String, String>>,
     pub room_full: WriteSignal<bool>,
     pub connected_relays: WriteSignal<usize>,
+    /// Linked and not needed on the relays: the pool is closed on purpose (`relays.rs`).
+    pub relay_standby: WriteSignal<bool>,
     /// Members holding a voice seat, in seat order.
     pub lounge: WriteSignal<Vec<LoungeMemberUi>>,
     pub my_voice: WriteSignal<MyVoiceUi>,
@@ -128,8 +133,35 @@ struct Inner {
     me: String,
     join_ts: u64,
     rtc_config: RtcConfiguration,
+    /// This member hides its own IP address (TURN only), in a room that doesn't hide everyone's.
+    hide_mine: bool,
     signals: SessionSignals,
+    /// The room's relay topic and relays; the pool is opened only while we need it.
+    topic: String,
+    relay_urls: Vec<String>,
     pool: RefCell<Option<Rc<NostrRelayPool>>>,
+    /// Bumped on every pool opened or closed: a replaced pool's events are ignored.
+    pool_generation: Cell<u32>,
+    relay_role: RefCell<RelayRole>,
+    /// We are one of the room's introducers (`relays.rs`), and since when it matters.
+    introducer: Cell<bool>,
+    introducer_fast_until: Cell<f64>,
+    /// Knocks from introducers (who → until when we stay on the relays for them), and when we
+    /// last knocked for each member ourselves.
+    knocks: RefCell<HashMap<String, f64>>,
+    knocked: RefCell<HashMap<String, f64>>,
+    /// Members out of reach announcing themselves on the relays, since when (until linked).
+    heard_unlinked: RefCell<HashMap<String, f64>>,
+    /// Routed handshakes (`routing.rs`): how much each author may have forwarded, and the link
+    /// each author's last one came in on.
+    route_budget: RefCell<RouteBudget>,
+    route_hints: RefCell<HashMap<String, String>>,
+    /// The latest `NewerVersion` seen, replayed to every new neighbor.
+    newer_version: RefCell<Option<RoomEnvelope>>,
+    /// Earlier rooms' sessions still forwarding a rekey to members who were away, and until
+    /// when (right after a move) they are left as they are.
+    forwarders: RefCell<Vec<RoomSession>>,
+    forwarders_hold_until: f64,
     links: RefCell<HashMap<String, Rc<PeerLink>>>,
     retry_after: RefCell<HashMap<String, f64>>,
     roster: RefCell<Roster>,
@@ -146,6 +178,11 @@ struct Inner {
     blocked: RefCell<HashSet<String>>,
     relays_connected: Cell<usize>,
     last_presence_echo: Cell<f64>,
+    /// When we last announced ourselves on the relays, and the jitter of the next safety beacon.
+    last_beacon: Cell<f64>,
+    beacon_jitter: Cell<f64>,
+    /// A check for members we reach only through others, to dial them (`dial_unlinked`).
+    mesh_check_queued: Cell<bool>,
     closed: Cell<bool>,
     lounge: Lounge,
     files: Files,
@@ -188,6 +225,7 @@ struct Inner {
 impl RoomSession {
     /// Join `room_id`. `carry` comes from the previous session when an admin moved the room
     /// here from another link. `host_ice` are extra ICE servers the host offered (see `ice.rs`).
+    /// `hide_mine`: this member's connections go through TURN only (its IP hidden from members).
     pub fn start(
         room_id: String,
         key: [u8; KEY_LENGTH],
@@ -195,12 +233,18 @@ impl RoomSession {
         signals: SessionSignals,
         carry: Option<SessionCarry>,
         host_ice: Option<js_sys::Array>,
+        hide_mine: bool,
     ) -> Result<Self, String> {
         let params = RoomParams::from_fragment(&current_fragment());
         let migrated = carry.is_some();
-        let (identity, shared_files, first_seen) = match carry {
-            Some(carry) => (carry.identity, carry.shared_files, carry.first_seen),
-            None => (Rc::new(NostrBurnerKey::generate().map_err(|e| e.to_string())?), HashMap::new(), Default::default()),
+        let (identity, shared_files, first_seen, forwarders) = match carry {
+            Some(carry) => (carry.identity, carry.shared_files, carry.first_seen, carry.forwarders),
+            None => (
+                Rc::new(NostrBurnerKey::generate().map_err(|e| e.to_string())?),
+                HashMap::new(),
+                Default::default(),
+                Vec::new(),
+            ),
         };
         let me = identity.pubkey().to_string();
         let started_at = js_sys::Date::now();
@@ -215,7 +259,8 @@ impl RoomSession {
         // After a move, members come back in a burst: hand the secret to an heir once they have.
         let hold_until = if migrated { started_at + MIGRATION_QUIET_MS } else { 0.0 };
 
-        let (rtc_config, ice_plan) = build_rtc_config(&params, host_ice.as_ref());
+        let (rtc_config, ice_plan) = build_rtc_config(&params, host_ice.as_ref(), hide_mine);
+        let hide_mine = hide_mine && !params.hide_ip;
         let topic = match params.password_salt {
             Some(_) => password_room_topic(&room_id, &key),
             None => hash_room_topic(&room_id),
@@ -225,13 +270,28 @@ impl RoomSession {
             inner: Rc::new(Inner {
                 key,
                 rtc_config,
+                hide_mine,
                 params,
                 room_id: room_id.clone(),
                 identity: identity.clone(),
                 me,
                 join_ts: started_at as u64,
                 signals,
+                topic,
+                relay_urls: get_default_relays(),
                 pool: RefCell::new(None),
+                pool_generation: Cell::new(0),
+                relay_role: RefCell::new(RelayRole::default()),
+                introducer: Cell::new(false),
+                introducer_fast_until: Cell::new(0.0),
+                knocks: RefCell::new(HashMap::new()),
+                knocked: RefCell::new(HashMap::new()),
+                heard_unlinked: RefCell::new(HashMap::new()),
+                route_budget: RefCell::new(RouteBudget::default()),
+                route_hints: RefCell::new(HashMap::new()),
+                newer_version: RefCell::new(None),
+                forwarders: RefCell::new(forwarders),
+                forwarders_hold_until: if migrated { started_at + MIGRATION_QUIET_MS } else { 0.0 },
                 links: RefCell::new(HashMap::new()),
                 retry_after: RefCell::new(HashMap::new()),
                 roster: RefCell::new(Roster::default()),
@@ -244,6 +304,9 @@ impl RoomSession {
                 blocked: RefCell::new(HashSet::new()),
                 relays_connected: Cell::new(0),
                 last_presence_echo: Cell::new(0.0),
+                last_beacon: Cell::new(0.0),
+                beacon_jitter: Cell::new(js_sys::Math::random()),
+                mesh_check_queued: Cell::new(false),
                 closed: Cell::new(false),
                 lounge: Lounge::default(),
                 files: Files::default(),
@@ -283,38 +346,13 @@ impl RoomSession {
         });
         session.publish_link_state();
 
-        let events = PoolEvents {
-            on_signal: {
-                let s = session.clone();
-                Box::new(move |from, signal| s.on_relay_signal(from, signal))
-            },
-            on_other_version: {
-                let s = session.clone();
-                Box::new(move |from, version| s.on_other_version(&from, version))
-            },
-            on_relay_connected: {
-                let s = session.clone();
-                Box::new(move |count| {
-                    // A pool kept open after a rekey (`forward_rekey`) must not touch the UI,
-                    // which shows the new session.
-                    if s.inner.closed.get() {
-                        return;
-                    }
-                    s.inner.relays_connected.set(count);
-                    s.inner.signals.connected_relays.set(count);
-                    s.refresh_status();
-                })
-            },
-        };
-        let pool = NostrRelayPool::new(topic, key, identity, get_default_relays(), events)?;
-        *session.inner.pool.borrow_mut() = Some(pool);
-
         session.start_ticker();
         session.start_typing_ticker();
         session.watch_lifecycle();
-        session.recompute();
         #[cfg(feature = "e2e-hooks")]
         session.install_e2e_hooks();
+        // Alone so far: on the relays (`update_relay_role`, at the end of every recompute).
+        session.recompute();
         Ok(session)
     }
 
@@ -333,7 +371,10 @@ impl RoomSession {
         }
         self.end_control();
         self.close_lounge();
-        if let Some(pool) = self.pool() {
+        // Linked members hear the `Leave` below over the mesh; only a member still shaking
+        // hands with us (it heard us on the relays) needs to hear it there.
+        let handshaking = self.inner.links.borrow().values().any(|l| !l.is_open());
+        if let Some(pool) = self.pool().filter(|_| handshaking) {
             pool.broadcast_signal(&SignalPayload::PeerLeft);
         }
         self.publish(RoomBody::Leave);
@@ -345,10 +386,10 @@ impl RoomSession {
             link.close();
         }
         // Queued messages (the PeerLeft above) are still sent before the sockets close. After
-        // a rekey, the relays stay a while for members who were away (`forward_rekey`).
-        if let Some(pool) = self.pool() {
-            self.close_pool_after_forwarding(pool);
-        }
+        // a rekey, the relays stay a while for members who were away (`forward_rekey`); pools
+        // kept for earlier rekeys went to the next session, or end here.
+        self.close_pool_after_forwarding();
+        self.end_forwarders();
         self.refresh_status();
     }
 
@@ -366,18 +407,22 @@ impl RoomSession {
             }
             return;
         }
-        match &signal {
-            SignalPayload::RekeyForward { envelope, .. } => {
-                self.on_rekey_forward(envelope);
-                return;
-            }
-            SignalPayload::Offer { .. } | SignalPayload::IceBatch { .. } => {
-                if self.link(&from).is_some_and(|l| l.open_for() > STALE_LINK_MS) {
-                    log::info!("{} lost its link to us: connecting again", pubkey_tag(&from));
-                    self.drop_link(&from, false);
-                }
-            }
-            _ => {}
+        if let SignalPayload::RekeyForward { envelope, .. } = &signal {
+            self.on_rekey_forward(envelope);
+            return;
+        }
+        self.on_handshake(from, signal);
+    }
+
+    /// A signal through the relays or routed over the mesh (not over its own link). An offer
+    /// or ICE from a member whose link to us has been open a while means they lost that link
+    /// (a phone that slept): ours is stale, start over.
+    fn on_handshake(&self, from: String, signal: SignalPayload) {
+        if matches!(signal, SignalPayload::Offer { .. } | SignalPayload::IceBatch { .. })
+            && self.link(&from).is_some_and(|l| l.open_for() > STALE_LINK_MS)
+        {
+            log::info!("{} lost its link to us: connecting again", pubkey_tag(&from));
+            self.drop_link(&from, false);
         }
         self.on_signal(from, signal);
     }
@@ -429,10 +474,15 @@ impl RoomSession {
         if self.inner.closed.get() || !self.inner.other_versions.borrow_mut().insert(from.to_string()) {
             return;
         }
+        // Linked members beacon rarely: announce ourselves once, so they learn of us too.
+        if let Some(pool) = self.pool() {
+            pool.broadcast_signal(&SignalPayload::Presence);
+        }
         let own = protocol_version();
         if version > own {
             log::warn!("A member runs protocol version {version}, newer than ours ({own}): reload to update");
             self.inner.signals.update_required.set(true);
+            self.tell_newer_version(version);
         } else {
             log::warn!("A member runs older protocol version {version} (ours: {own}); it must reload to connect");
             self.toast("toast_peer_outdated");
@@ -442,15 +492,31 @@ impl RoomSession {
     /// A member announced itself. The lower pubkey of each pair dials; the higher one
     /// answers with its own presence so the lower one learns about it.
     fn on_presence(&self, from: &str) {
-        if self.inner.links.borrow().contains_key(from) {
+        let link = self.link(from);
+        if let Some(link) = link {
+            // Linked members announce themselves only rarely: this one may have lost our link
+            // (a phone that slept) while ours still looks open. Ask it; silence drops the link.
+            if link.is_open() && !self.inner.link_checks.borrow().contains_key(from) {
+                let now = js_sys::Date::now();
+                if self.send_direct(from, RoomBody::LinkCheck { to: from.to_string(), reply: false }) {
+                    self.inner.link_checks.borrow_mut().insert(from.to_string(), now + LINK_CHECK_MS);
+                }
+            }
             return;
         }
         let now = js_sys::Date::now();
         // The backoff spares a member we still reach through others while our direct link to
         // them keeps failing. One out of reach (away, gone, or we were paused) is dialed at once.
         let reachable = self.inner.present.borrow().contains(from);
-        if reachable && self.inner.retry_after.borrow().get(from).is_some_and(|t| *t > now) {
+        let failed = self.inner.retry_after.borrow().get(from).is_some_and(|t| *t > now);
+        if reachable && failed {
             return;
+        }
+        // Newcomers link with the introducers first: when that failed (or never got anywhere
+        // in a link's time), others must try.
+        let since = if reachable { now } else { *self.inner.heard_unlinked.borrow_mut().entry(from.to_string()).or_insert(now) };
+        if self.inner.introducer.get() && (failed || now - since > LINK_TIMEOUT_MS) {
+            self.knock_for(from, now);
         }
         if self.inner.me.as_str() < from {
             self.create_link(from, true);
@@ -466,8 +532,9 @@ impl RoomSession {
         if remote == self.inner.me || self.inner.blocked.borrow().contains(remote) {
             return None;
         }
-        // No links before the session joined the relays, or after it left.
-        self.pool()?;
+        if self.inner.closed.get() {
+            return None;
+        }
         let handler: LinkEventHandler = {
             let s = self.clone();
             Rc::new(move |remote, id, event| s.on_link_event(remote, id, event))
@@ -490,7 +557,8 @@ impl RoomSession {
     }
 
     /// Send a link's offer, answer or ICE to `remote`: over the link itself once it is open,
-    /// otherwise (the first handshake) through the relays.
+    /// otherwise (the first handshake) over the mesh when it reaches `remote`, else through
+    /// the relays.
     fn send_link_signal(&self, remote: &str, signal: SignalPayload) {
         if self.inner.closed.get() {
             return;
@@ -507,8 +575,12 @@ impl RoomSession {
         {
             return;
         }
-        if let Some(pool) = self.pool() {
-            pool.broadcast_signal(&signal);
+        if self.send_routed(remote, &signal) {
+            return;
+        }
+        match self.pool() {
+            Some(pool) => pool.broadcast_signal(&signal),
+            None => log::warn!("No way to reach {} for a handshake", pubkey_tag(remote)),
         }
     }
 
@@ -525,6 +597,7 @@ impl RoomSession {
                 log::info!("Direct link open with {}", pubkey_tag(remote));
                 link.mark_opened();
                 self.inner.retry_after.borrow_mut().remove(remote);
+                self.inner.heard_unlinked.borrow_mut().remove(remote);
                 self.inner.link_checks.borrow_mut().remove(remote);
                 self.publish_link_state();
                 self.sync_to(remote);
@@ -613,7 +686,8 @@ impl RoomSession {
         let reports = self.inner.link_reports.borrow();
         let voices = self.inner.lounge.envelopes.borrow();
         let controls = self.inner.control.envelopes.borrow();
-        for envelope in hellos.values().chain(reports.values()).chain(voices.values()).chain(controls.values()) {
+        let newer = self.inner.newer_version.borrow();
+        for envelope in hellos.values().chain(reports.values()).chain(voices.values()).chain(controls.values()).chain(newer.iter()) {
             if let Some(frame) = self.encode(envelope) {
                 link.send(&frame);
             }
@@ -640,6 +714,11 @@ impl RoomSession {
         }
         self.inner.dedup.borrow_mut().insert(&envelope.id);
 
+        // Routed handshakes go toward their recipient only, never to the whole room.
+        if let RoomBody::RoutedSignal { to, sealed } = &envelope.body {
+            self.on_routed(from, frame, &envelope, to, sealed);
+            return;
+        }
         // Direct-only messages (file requests and the like) must come straight from
         // their author over this link, are for us alone and are never relayed.
         if let Some(to) = envelope.body.recipient() {
@@ -764,6 +843,10 @@ impl RoomSession {
                     self.on_signal(author.to_string(), signal.clone());
                 }
             }
+            // Handled as they arrive (`on_routed`), never applied.
+            RoomBody::RoutedSignal { .. } => {}
+            RoomBody::Knock { who } => self.on_knock(author, who),
+            RoomBody::NewerVersion { v } => self.on_newer_version(envelope, *v),
             RoomBody::LinkCheck { reply, .. } => {
                 if !reply {
                     self.send_direct(author, RoomBody::LinkCheck { to: author.to_string(), reply: true });
@@ -808,6 +891,11 @@ impl RoomSession {
         self.inner.params.hide_ip
     }
 
+    /// Only this member's connections go through TURN (its IP hidden from the others).
+    pub fn hides_my_ip(&self) -> bool {
+        self.inner.hide_mine
+    }
+
     /// Joining the room needs a password as well as the link.
     pub fn has_password(&self) -> bool {
         self.inner.params.password_salt.is_some()
@@ -831,6 +919,11 @@ impl RoomSession {
             self.member_gone(pubkey);
         }
         self.inner.roster.borrow_mut().remove(pubkey);
+        self.inner.route_budget.borrow_mut().forget(pubkey);
+        self.inner.route_hints.borrow_mut().remove(pubkey);
+        self.inner.knocks.borrow_mut().remove(pubkey);
+        self.inner.knocked.borrow_mut().remove(pubkey);
+        self.inner.heard_unlinked.borrow_mut().remove(pubkey);
         self.inner.hellos.borrow_mut().remove(pubkey);
         self.inner.link_reports.borrow_mut().remove(pubkey);
         let link = self.inner.links.borrow_mut().remove(pubkey);
@@ -947,6 +1040,48 @@ impl RoomSession {
         self.refresh_status();
         self.recompute_lounge();
         self.schedule_heir_check();
+        self.schedule_mesh_check();
+        self.update_relay_role();
+    }
+
+    /// Dial members we reach only through others (`dial_unlinked`), once the current message
+    /// is handled.
+    fn schedule_mesh_check(&self) {
+        if self.inner.mesh_check_queued.replace(true) {
+            return;
+        }
+        let s = self.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            s.inner.mesh_check_queued.set(false);
+            s.dial_unlinked();
+        });
+    }
+
+    /// Members in the room (reached through others) without a link to us: the lower pubkey
+    /// of each pair dials, except while a failed attempt's backoff runs.
+    fn dial_unlinked(&self) {
+        if self.inner.closed.get() || self.frozen() {
+            return;
+        }
+        let now = js_sys::Date::now();
+        let me = self.inner.me.as_str();
+        let to_dial: Vec<String> = {
+            let links = self.inner.links.borrow();
+            let blocked = self.inner.blocked.borrow();
+            let retry_after = self.inner.retry_after.borrow();
+            self.inner
+                .present
+                .borrow()
+                .iter()
+                .filter(|pk| me < pk.as_str() && !links.contains_key(*pk) && !blocked.contains(*pk))
+                .filter(|pk| retry_after.get(*pk).is_none_or(|at| *at <= now))
+                .cloned()
+                .collect()
+        };
+        for pk in to_dial {
+            log::info!("Dialing {}, reached through others", pubkey_tag(&pk));
+            self.create_link(&pk, true);
+        }
     }
 
     /// `pubkey` left, or stayed away for the whole grace: what waited for them ends.
@@ -1047,11 +1182,34 @@ impl RoomSession {
         self.inner.signals.messages.update(|msgs| msgs.push(message));
     }
 
-    /// Presence beacon (fast while joining, slow afterwards, so late or missed members
-    /// still find us) and the watchdog for links that never open.
+    /// Whether to announce ourselves on the relays now (`protocol::relay_role`): often while
+    /// we have no open link, rarely as a linked introducer, never otherwise.
+    fn beacon_due(&self, now: f64) -> bool {
+        if self.pool().is_none() {
+            return false;
+        }
+        let (role, fast_until) = self.beacon_role();
+        relay_role::beacon_due(
+            role,
+            now as u64,
+            self.inner.last_beacon.get() as u64,
+            fast_until as u64,
+            self.inner.beacon_jitter.get(),
+        )
+    }
+
+    fn beacon(&self, now: f64) {
+        if let Some(pool) = self.pool() {
+            pool.broadcast_signal(&SignalPayload::Presence);
+            self.inner.last_beacon.set(now);
+            self.inner.beacon_jitter.set(js_sys::Math::random());
+        }
+    }
+
+    /// Presence beacon (`beacon_due`), dialing members we reach only through others, and the
+    /// watchdog for links that never open.
     fn start_ticker(&self) {
         let s = self.clone();
-        let tick = Cell::new(0u32);
         let handle: Rc<Cell<Option<i32>>> = Rc::new(Cell::new(None));
         let handle_c = handle.clone();
         let cb = Closure::wrap(Box::new(move || {
@@ -1066,12 +1224,9 @@ impl RoomSession {
             }
             let now = js_sys::Date::now();
             s.wake_check(now);
-            let n = tick.get() + 1;
-            tick.set(n);
-            if now < s.inner.fast_beacon_until.get() || n % SLOW_BEACON_EVERY == 0 {
-                if let Some(pool) = s.pool() {
-                    pool.broadcast_signal(&SignalPayload::Presence);
-                }
+            s.update_relay_role();
+            if s.beacon_due(now) {
+                s.beacon(now);
             }
             if s.inner.absences.borrow().next_expiry().is_some_and(|at| at as f64 <= now) {
                 s.recompute();
@@ -1079,13 +1234,15 @@ impl RoomSession {
             let silent: Vec<String> =
                 s.inner.link_checks.borrow().iter().filter(|(_, until)| **until <= now).map(|(pk, _)| pk.clone()).collect();
             for remote in silent {
-                log::info!("Link to {} did not answer after a pause: connecting again", pubkey_tag(&remote));
+                log::info!("Link to {} did not answer: connecting again", pubkey_tag(&remote));
                 s.inner.link_checks.borrow_mut().remove(&remote);
                 s.drop_link(&remote, false);
-                if let Some(pool) = s.pool() {
-                    pool.broadcast_signal(&SignalPayload::Presence);
+                // Cut off now: announce ourselves at once (the fast window may be over).
+                if !s.has_open_link() {
+                    s.beacon(now);
                 }
             }
+            s.dial_unlinked();
             let stale: Vec<String> = s
                 .inner
                 .links
@@ -1151,8 +1308,9 @@ impl RoomSession {
         }
     }
 
-    /// Back from a pause, or the network came back: reconnect the relays, ask every link
-    /// whether it is still alive (silent ones are dialed again), and announce ourselves.
+    /// Back from a pause, or the network came back: reconnect the relays and ask every link
+    /// whether it is still alive (silent ones are dialed again). We announce ourselves on the
+    /// relays only once no link is left: the mesh knows we are back otherwise.
     fn on_wake(&self) {
         if self.inner.closed.get() {
             return;
@@ -1163,7 +1321,6 @@ impl RoomSession {
         self.inner.retry_after.borrow_mut().clear();
         if let Some(pool) = self.pool() {
             pool.wake();
-            pool.broadcast_signal(&SignalPayload::Presence);
         }
         let links: Vec<Rc<PeerLink>> = self.inner.links.borrow().values().cloned().collect();
         for link in links {
@@ -1174,6 +1331,9 @@ impl RoomSession {
             } else {
                 self.drop_link(&remote, false);
             }
+        }
+        if !self.has_open_link() {
+            self.beacon(now);
         }
         self.resume_voice();
         self.recompute();
@@ -1214,17 +1374,48 @@ impl RoomSession {
         let _ = js_sys::Reflect::set(&hooks, &"blockPeer".into(), block_peer.as_ref());
         block_peer.forget();
 
-        // Allow links with `pubkey` again (after `blockPeer`) and announce ourselves.
+        // Members to refuse links with from the start (`window.__dchatBlocked`, an init script).
+        if let Ok(list) = js_sys::Reflect::get(&win, &"__dchatBlocked".into()) {
+            if let Some(list) = list.dyn_ref::<js_sys::Array>() {
+                self.inner.blocked.borrow_mut().extend(list.iter().filter_map(|pk| pk.as_string()));
+            }
+        }
+
+        // Allow links with `pubkey` again (after `blockPeer`), dial it through the mesh when it
+        // reaches it, and announce ourselves on the relays when on them.
         let s = self.clone();
         let unblock_peer = Closure::wrap(Box::new(move |pubkey: String| {
             s.inner.blocked.borrow_mut().remove(&pubkey);
             s.inner.retry_after.borrow_mut().remove(&pubkey);
+            s.schedule_mesh_check();
             if let Some(pool) = s.pool() {
                 pool.broadcast_signal(&SignalPayload::Presence);
             }
         }) as Box<dyn Fn(String)>);
         let _ = js_sys::Reflect::set(&hooks, &"unblockPeer".into(), unblock_peer.as_ref());
         unblock_peer.forget();
+
+        // Whether this tab is on the relays and why: `{ pool, connected, introducer, introducers,
+        // forwarding }` (`forwarding`: old rooms' pools kept open for members away in a rekey).
+        let s = self.clone();
+        let relay_state = Closure::wrap(Box::new(move || {
+            let state = js_sys::Object::new();
+            let introducers: js_sys::Array = s.introducers().into_iter().map(JsValue::from).collect();
+            let _ = js_sys::Reflect::set(&state, &"pool".into(), &s.pool().is_some().into());
+            let _ = js_sys::Reflect::set(&state, &"connected".into(), &(s.inner.relays_connected.get() as f64).into());
+            let _ = js_sys::Reflect::set(&state, &"introducer".into(), &s.inner.introducer.get().into());
+            let _ = js_sys::Reflect::set(&state, &"introducers".into(), &introducers);
+            let forwarding = s.inner.forwarders.borrow().iter().filter(|old| old.pool().is_some()).count();
+            let _ = js_sys::Reflect::set(&state, &"forwarding".into(), &(forwarding as f64).into());
+            JsValue::from(state)
+        }) as Box<dyn Fn() -> JsValue>);
+        let _ = js_sys::Reflect::set(&hooks, &"relayState".into(), relay_state.as_ref());
+        relay_state.forget();
+
+        // The largest signal this tab sent through the relays, by kind (unpadded bytes).
+        let frame_sizes = Closure::wrap(Box::new(crate::nostr_pool::frame_sizes) as Box<dyn Fn() -> JsValue>);
+        let _ = js_sys::Reflect::set(&hooks, &"relayFrameSizes".into(), frame_sizes.as_ref());
+        frame_sizes.forget();
         self.install_sync_hooks(&hooks);
 
         // Act as a phone that switched apps: links die without a word (the members drop them
@@ -1334,8 +1525,9 @@ fn clean_remote_name(raw: &str, author: &str) -> String {
 /// STUN by default, plus TURN for members whose NATs block direct connections: servers the
 /// host offers (`host_ice`) and/or one from the room link (`&turn=`, `&turnuser=`, `&turnpass=`).
 /// ICE settings for every link (see `protocol::plan_ice`): the room's STUN and TURN, then
-/// the host's; Google's STUN only when nothing else offers STUN; TURN only with `&hideip=1`.
-fn build_rtc_config(params: &RoomParams, host_ice: Option<&js_sys::Array>) -> (RtcConfiguration, IcePlan) {
+/// the host's; Google's STUN only when nothing else offers STUN; TURN only with `&hideip=1`
+/// or when this member hides its own IP (`hide_mine`).
+fn build_rtc_config(params: &RoomParams, host_ice: Option<&js_sys::Array>, hide_mine: bool) -> (RtcConfiguration, IcePlan) {
     let config = RtcConfiguration::new();
     let servers = js_sys::Array::new();
     let server = |urls: &[String]| {
@@ -1370,7 +1562,7 @@ fn build_rtc_config(params: &RoomParams, host_ice: Option<&js_sys::Array>) -> (R
         servers.push(&entry);
     }
 
-    let plan = plan_ice(params, &host_urls);
+    let plan = plan_ice(params, &host_urls, hide_mine);
     if plan.fallback_stun {
         servers.push(&server(&[FALLBACK_STUN_URL.to_string()]));
     }

@@ -112,12 +112,40 @@ impl Roster {
         if let Some(direct) = neighbors.iter().find(|n| self.linked(n, target)) {
             return Some(direct.clone());
         }
-        neighbors.into_iter().find(|n| {
-            let mut sub = Roster::default();
-            sub.link_states = self.link_states.clone();
-            sub.link_states.remove(me);
-            sub.reachable_from(n).contains(target)
-        })
+        neighbors.into_iter().find(|n| self.reaches_without(n, target, me))
+    }
+
+    /// Whether `start` reaches `target` over direct links without going through `excluded`.
+    /// `excluded`'s own report still counts: a member that lost its link to us may still
+    /// report it, and only our report says it is gone.
+    fn reaches_without(&self, start: &str, target: &str, excluded: &str) -> bool {
+        let mut seen: HashSet<String> = HashSet::from([start.to_string(), excluded.to_string()]);
+        let mut queue: VecDeque<String> = VecDeque::from([start.to_string()]);
+        while let Some(current) = queue.pop_front() {
+            if current == target {
+                return true;
+            }
+            for next in self.neighbors(&current) {
+                if seen.insert(next.clone()) {
+                    queue.push_back(next);
+                }
+            }
+        }
+        false
+    }
+
+    /// The direct neighbor of `me` to hand a message for `target` (a routed handshake): `target`
+    /// itself when linked, else a neighbor linked to it, else one that reaches it; never
+    /// `avoid` (the link the message came in on).
+    pub fn next_hop(&self, me: &str, target: &str, avoid: Option<&str>) -> Option<String> {
+        let neighbors: Vec<String> = self.neighbors(me).into_iter().filter(|n| Some(n.as_str()) != avoid).collect();
+        if neighbors.iter().any(|n| n == target) {
+            return Some(target.to_string());
+        }
+        if let Some(direct) = neighbors.iter().find(|n| self.linked(n, target)) {
+            return Some(direct.clone());
+        }
+        neighbors.into_iter().find(|n| self.reaches_without(n, target, me))
     }
 
     /// Direct neighbors of `me` that should receive a copy of a message written by
@@ -408,12 +436,15 @@ pub struct IcePlan {
 }
 
 /// `host_urls`: every URL of the ICE servers the host offered (`./ice-servers`).
-pub fn plan_ice(params: &RoomParams, host_urls: &[String]) -> IcePlan {
+/// `hide_mine`: this member chose to hide its own IP address (TURN only for its connections),
+/// in a room that doesn't hide everyone's.
+pub fn plan_ice(params: &RoomParams, host_urls: &[String], hide_mine: bool) -> IcePlan {
     let host_offers = |schemes: [&str; 2]| host_urls.iter().any(|u| schemes.iter().any(|s| u.starts_with(s)));
     let has_stun = !params.stun_urls.is_empty() || host_offers(["stun:", "stuns:"]);
+    let relay_only = params.hide_ip || hide_mine;
     IcePlan {
-        relay_only: params.hide_ip,
-        fallback_stun: !has_stun && !params.hide_ip,
+        relay_only,
+        fallback_stun: !has_stun && !relay_only,
         has_turn: !params.turn_urls.is_empty() || host_offers(["turn:", "turns:"]),
     }
 }
@@ -496,6 +527,37 @@ mod tests {
         roster.set_links("c", 2, links(&["b", "e"]));
         roster.set_links("e", 1, links(&["c"]));
         assert_eq!(roster.relay_for("a", "e"), Some("b".into()));
+    }
+
+    #[test]
+    fn test_next_hop_goes_toward_the_target_never_back() {
+        // a - b - c - e, and a - d - c.
+        let mut roster = Roster::default();
+        roster.set_links("a", 1, links(&["b", "d"]));
+        roster.set_links("b", 1, links(&["a", "c"]));
+        roster.set_links("d", 1, links(&["a", "c"]));
+        roster.set_links("c", 1, links(&["b", "d", "e"]));
+        roster.set_links("e", 1, links(&["c"]));
+
+        assert_eq!(roster.next_hop("a", "b", None), Some("b".into()), "a neighbor gets it directly");
+        assert_eq!(roster.next_hop("a", "c", None), Some("b".into()));
+        assert_eq!(roster.next_hop("a", "c", Some("b")), Some("d".into()), "never back where it came from");
+        assert_eq!(roster.next_hop("a", "e", Some("b")), Some("d".into()));
+        assert_eq!(roster.next_hop("e", "a", Some("c")), None, "e's only way is where it came from");
+        assert_eq!(roster.next_hop("a", "z", None), None);
+    }
+
+    #[test]
+    fn test_no_route_through_ourselves_on_a_stale_report() {
+        // a - b, and c was cut off from both: a and b dropped it, but c's last report (which
+        // a and b still hold) claims links to both. Nothing reaches c.
+        let mut roster = Roster::default();
+        roster.set_links("a", 2, links(&["b"]));
+        roster.set_links("b", 2, links(&["a"]));
+        roster.set_links("c", 1, links(&["a", "b"]));
+        assert!(!roster.reachable_from("a").contains("c"));
+        assert_eq!(roster.next_hop("a", "c", None), None);
+        assert_eq!(roster.relay_for("a", "c"), None);
     }
 
     #[test]
@@ -681,7 +743,7 @@ mod tests {
     fn test_google_stun_only_as_a_fallback() {
         let plan = |fragment: &str, host: &[&str]| {
             let host: Vec<String> = host.iter().map(|u| u.to_string()).collect();
-            plan_ice(&RoomParams::from_fragment(&FragmentParams::parse(fragment)), &host)
+            plan_ice(&RoomParams::from_fragment(&FragmentParams::parse(fragment)), &host, false)
         };
         // Nothing else offers STUN: the fallback is needed to get through NAT.
         assert_eq!(plan("#room=r", &[]), IcePlan { relay_only: false, fallback_stun: true, has_turn: false });
@@ -699,5 +761,8 @@ mod tests {
             plan("#room=r&hideip=1", &[]),
             IcePlan { relay_only: true, fallback_stun: false, has_turn: false }
         );
+        // A member hiding only its own address: TURN only for it, in any room.
+        let mine = plan_ice(&RoomParams::from_fragment(&FragmentParams::parse("#room=r")), &["turn:t.example".to_string()], true);
+        assert_eq!(mine, IcePlan { relay_only: true, fallback_stun: false, has_turn: true });
     }
 }

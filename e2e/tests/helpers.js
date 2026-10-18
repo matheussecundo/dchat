@@ -1,10 +1,17 @@
 import crypto from 'node:crypto';
 import { expect } from '@playwright/test';
 
-// Records every RTCPeerConnection the page creates in `window.__pcs`, for stats checks.
+// Records every RTCPeerConnection the page creates in `window.__pcs`, for stats checks, and
+// every remote ICE candidate it is given in `window.__remoteCandidates`.
 const TRACK_PCS = `
   window.__pcs = [];
+  window.__remoteCandidates = [];
   const OrigPC = window.RTCPeerConnection;
+  const addIceCandidate = OrigPC.prototype.addIceCandidate;
+  OrigPC.prototype.addIceCandidate = function(candidate, ...rest) {
+    if (candidate && candidate.candidate) window.__remoteCandidates.push(candidate.candidate);
+    return addIceCandidate.call(this, candidate, ...rest);
+  };
   window.RTCPeerConnection = function(...args) {
     const pc = new OrigPC(...args);
     window.__pcs.push(pc);
@@ -20,6 +27,8 @@ export async function newMember(browser, label) {
   const page = await context.newPage();
   page.on('console', (msg) => {
     if (msg.type() === 'error') console.log(`${label} ERROR:`, msg.text());
+    // E2E_CONSOLE=1: every line the page logs, for debugging a spec.
+    else if (process.env.E2E_CONSOLE) console.log(`${label} ${Date.now() % 100000}:`, msg.text());
   });
   return { context, page };
 }
@@ -468,6 +477,31 @@ export function openWithRoomKey(roomUrl, payload) {
   });
   decipher.setAuthTag(data.subarray(data.length - 16));
   return Buffer.concat([decipher.update(data.subarray(0, data.length - 16)), decipher.final()]).toString();
+}
+
+/**
+ * Record every EVENT `member` publishes to its relays. Each entry is `{ at, content, pubkey,
+ * signal }`, `signal` being the `{ v, payload }` frame opened with the room key of `roomUrl()`
+ * when read (a function: the creator publishes before its link is known to the test).
+ */
+export async function recordPublished(member, roomUrl) {
+  const published = [];
+  await member.context.routeWebSocket('**/nostr', (ws) => {
+    const server = ws.connectToServer();
+    ws.onMessage((message) => {
+      const [type, event] = JSON.parse(message);
+      if (type === 'EVENT') {
+        published.push({
+          at: Date.now(),
+          content: event.content,
+          pubkey: event.pubkey,
+          get signal() { return JSON.parse(openWithRoomKey(roomUrl(), JSON.parse(this.content))); },
+        });
+      }
+      server.send(message);
+    });
+  });
+  return published;
 }
 
 /** Init script: record every text frame the page sends on a data channel (`window.__sentFrames`). */

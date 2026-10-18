@@ -12,7 +12,35 @@ use serde::{Deserialize, Serialize};
 ///
 /// Never change how a plain room's relay topic is derived (`hash_room_topic`): members on
 /// different versions only notice each other (and show the reload banner) on a shared topic.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
+
+/// Every signal's plaintext is padded to one of a few sizes before the room-key encryption,
+/// so relays can't tell a presence beacon from a handshake by its length: everything that
+/// fits takes `RELAY_PAD_BASE` bytes (ICE batches are split to fit), larger signals (a
+/// forwarded rekey with many grants) the next power of two up to `RELAY_PAD_MAX_POW2`, then
+/// `RELAY_PAD_LAST` (public relays drop events over 64 KiB). Padding is trailing JSON
+/// whitespace, so every version still reads `v` first.
+pub const RELAY_PAD_BASE: usize = 2048;
+pub const RELAY_PAD_MAX_POW2: usize = 32 * 1024;
+pub const RELAY_PAD_LAST: usize = 48 * 1024;
+
+/// The padded length of a signal whose JSON takes `len` bytes.
+pub fn relay_pad_len(len: usize) -> usize {
+    if len <= RELAY_PAD_BASE {
+        RELAY_PAD_BASE
+    } else if len <= RELAY_PAD_MAX_POW2 {
+        len.next_power_of_two()
+    } else if len <= RELAY_PAD_LAST {
+        RELAY_PAD_LAST
+    } else {
+        len
+    }
+}
+
+/// The length of a padded signal's JSON without its padding.
+pub fn unpadded_len(json: &[u8]) -> usize {
+    json.trim_ascii_end().len()
+}
 
 /// What travels through the relays (encrypted with the room key): the sender's protocol
 /// version and its signal. Every version must keep `v` readable, whatever `payload` becomes.
@@ -30,8 +58,11 @@ pub enum DecodedSignal {
     Invalid,
 }
 
+/// `signal` as the relays carry it (before the room-key encryption), padded (`relay_pad_len`).
 pub fn encode_signal(signal: &RelayFrame, version: u32) -> serde_json::Result<Vec<u8>> {
-    serde_json::to_vec(&VersionedSignal { v: version, payload: signal })
+    let mut json = serde_json::to_vec(&VersionedSignal { v: version, payload: signal })?;
+    json.resize(relay_pad_len(json.len()), b' ');
+    Ok(json)
 }
 
 /// Read the version first, and parse the payload only when it matches `version`.
@@ -64,11 +95,12 @@ mod tests {
     use crate::media::{self, MediaInfo, MediaKind, Thumbnail, WAVEFORM_BARS};
     use crate::succession;
     use crate::presence;
+    use crate::relay_role;
     use sha2::{Digest, Sha256};
 
     /// The wire fingerprint recorded for the current version. When the test below fails,
     /// bump `PROTOCOL_VERSION` and record the new pair here.
-    const RECORDED: (u32, &str) = (9, "a892ff06fff9c7ba1dc599a4347e6066bd39533a5b2b028ab3f77580e46d1a5b");
+    const RECORDED: (u32, &str) = (10, "1e28c90f8efc9e1b3870283e019de53d6da19c0abcb42846117f47e0927da7ba");
 
     fn sealed() -> EncryptedPayload {
         EncryptedPayload { nonce: "n".into(), ciphertext: "c".into() }
@@ -194,6 +226,9 @@ mod tests {
             RoomBody::Delete { target: "m".into() },
             RoomBody::Dm { sealed: sealed() },
             RoomBody::LinkSignal { to: "b".into(), signal: SignalPayload::Offer { to: "b".into(), sdp: "v=0".into() } },
+            RoomBody::RoutedSignal { to: "b".into(), sealed: sealed() },
+            RoomBody::Knock { who: "b".into() },
+            RoomBody::NewerVersion { v: 11 },
             RoomBody::AdminRekey {
                 kicked: Some("c".into()),
                 grants: vec![SealedGrant { to: "b".into(), payload: sealed() }],
@@ -230,6 +265,9 @@ mod tests {
             RoomBody::Delete { .. } => "Delete",
             RoomBody::Dm { .. } => "Dm",
             RoomBody::LinkSignal { .. } => "LinkSignal",
+            RoomBody::RoutedSignal { .. } => "RoutedSignal",
+            RoomBody::Knock { .. } => "Knock",
+            RoomBody::NewerVersion { .. } => "NewerVersion",
             RoomBody::AdminRekey { .. } => "AdminRekey",
             RoomBody::AdminHandover { .. } => "AdminHandover",
             RoomBody::ControlStatus { .. } => "ControlStatus",
@@ -247,6 +285,7 @@ mod tests {
         for signal in relay_signals() {
             wire.push(String::from_utf8(encode_signal(&frame(signal), 0).unwrap()).unwrap());
         }
+        wire.push(format!("{RELAY_PAD_BASE} {RELAY_PAD_MAX_POW2} {RELAY_PAD_LAST}"));
         wire.push(String::from_utf8(relay_key_message("t", "k")).unwrap());
         for signal in signals() {
             wire.push(serde_json::to_string(&signal).unwrap());
@@ -264,6 +303,14 @@ mod tests {
         wire.push(format!("{} {}", succession::ADMIN_ABSENT_MS, MAX_RANKING));
         // Away and return: how long a member out of reach keeps its place.
         wire.push(presence::AWAY_GRACE_MS.to_string());
+        // Who stays on the relays, and how long members join them for a knock.
+        wire.push(format!(
+            "{} {} {} {}",
+            relay_role::INTRODUCERS,
+            relay_role::LEAVE_HOLD_MS,
+            relay_role::KNOCK_WINDOW_MS,
+            relay_role::KNOCK_AGAIN_MS
+        ));
         wire.push(hash_room_topic("r"));
         // Remote-control input: every event's binary encoding, the packet header, the keys.
         wire.push(hex::encode(encode_events(&crate::input::tests::samples()).unwrap()));
@@ -342,6 +389,36 @@ mod tests {
             let json = encode_signal(&frame(signal.clone()), 4).unwrap();
             assert_eq!(decode_signal(&json, 4), DecodedSignal::Signal(frame(signal)));
         }
+    }
+
+    #[test]
+    fn test_every_routine_signal_has_the_same_padded_size() {
+        for signal in relay_signals() {
+            let json = encode_signal(&frame(signal), PROTOCOL_VERSION).unwrap();
+            assert_eq!(json.len(), RELAY_PAD_BASE);
+            assert!(json[unpadded_len(&json)..].iter().all(|b| *b == b' '));
+        }
+        // A larger signal takes the next bucket, never a size of its own.
+        let big = RelaySignal::Sealed { to: "b".into(), sealed: EncryptedPayload { nonce: "n".into(), ciphertext: "c".repeat(5000) } };
+        assert_eq!(encode_signal(&frame(big), PROTOCOL_VERSION).unwrap().len(), 8192);
+    }
+
+    #[test]
+    fn test_padding_buckets() {
+        assert_eq!(relay_pad_len(0), RELAY_PAD_BASE);
+        assert_eq!(relay_pad_len(RELAY_PAD_BASE), RELAY_PAD_BASE);
+        assert_eq!(relay_pad_len(RELAY_PAD_BASE + 1), 2 * RELAY_PAD_BASE);
+        assert_eq!(relay_pad_len(RELAY_PAD_MAX_POW2), RELAY_PAD_MAX_POW2);
+        assert_eq!(relay_pad_len(RELAY_PAD_MAX_POW2 + 1), RELAY_PAD_LAST);
+        assert_eq!(relay_pad_len(RELAY_PAD_LAST + 1), RELAY_PAD_LAST + 1);
+        assert!(RELAY_PAD_BASE.is_power_of_two() && RELAY_PAD_MAX_POW2.is_power_of_two());
+    }
+
+    #[test]
+    fn test_padded_signals_still_show_their_version_to_older_members() {
+        // Older versions parse `v` with serde_json, which allows trailing whitespace.
+        let padded = encode_signal(&frame(RelaySignal::Presence), PROTOCOL_VERSION).unwrap();
+        assert_eq!(decode_signal(&padded, PROTOCOL_VERSION - 1), DecodedSignal::OtherVersion(PROTOCOL_VERSION));
     }
 
     #[test]
